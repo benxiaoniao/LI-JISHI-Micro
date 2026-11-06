@@ -1,0 +1,22 @@
+# Rust
+/compiler/target/
+**/*.rs.bk
+
+# C / 构建产物
+/build/
+*.o
+*.elf
+*.bin
+*.hex
+*.map
+*.d
+
+# 生成物
+/examples/*.jmb
+*.jmb
+/dist/
+.screenshots/
+
+# 编辑器
+.vscode/
+.idea/
