@@ -34,6 +34,7 @@
 /* GPIOA / GPIOC */
 #define GPIOA_CRH       REG32(0x40010804u)
 #define GPIOC_CRH       REG32(0x40011004u)
+#define GPIOC_IDR       REG32(0x40011008u)
 #define GPIOC_BSRR      REG32(0x40011010u)
 #define GPIOC_BRR       REG32(0x40011014u)
 
@@ -219,6 +220,36 @@ void port_led_toggle(void)
     static int state = 0;
     state = !state;
     port_led_set(state);
+}
+
+/* ---------------- 板级 GPIO（v0：PC13 一个脚） ---------------- */
+
+void port_gpio_write(uint32_t pin, int level)
+{
+    if (pin != LED_PIN) {
+        return;
+    }
+    if (level) {
+        GPIOC_BSRR = (1u << LED_PIN);   /* 高电平 */
+    } else {
+        GPIOC_BRR = (1u << LED_PIN);    /* 低电平（板载 LED 点亮） */
+    }
+}
+
+int port_gpio_read(uint32_t pin)
+{
+    if (pin != LED_PIN) {
+        return -1;
+    }
+    return (int)((GPIOC_IDR >> LED_PIN) & 1u);
+}
+
+void port_delay_ms(uint32_t ms)
+{
+    uint32_t start = g_ms;
+    while ((uint32_t)(g_ms - start) < ms) {
+        /* 忙等：SysTick 中断在跑，g_ms 会自增 */
+    }
 }
 
 /* ---------------- 运行时端口（jm_port.h） ---------------- */

@@ -1,5 +1,6 @@
 #include "jishim.h"
 #include "stm32f103_port.h"
+#include "f103_native.h"
 #include "jmk.h"
 
 /*
@@ -240,7 +241,16 @@ int main(void)
     port_log(" Hz\r\n");
     port_log("内嵌程序: ");
     port_log_u32(jm_app_jmb_len);
-    port_log(" 字节\r\n\r\n");
+    port_log(" 字节\r\n");
+
+    if (f103_native_register() != 0) {
+        port_log("[原生] 登记失败：板级函数表\r\n");
+    } else {
+        port_log("[原生] 板级函数表已登记：");
+        port_log(F103_NATIVE_TABLE_NAME);
+        port_log("\r\n");
+    }
+    port_log("\r\n");
 
     if (jm_run(jm_app_jmb, (size_t)jm_app_jmb_len) == 0) {
         port_log("\r\n[砾] 程序正常结束\r\n");

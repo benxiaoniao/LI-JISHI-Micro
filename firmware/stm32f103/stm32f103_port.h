@@ -28,4 +28,11 @@ uint32_t port_uptime_ms(void);
 void port_led_set(int on);
 void port_led_toggle(void);
 
+/* 板级 GPIO（v0 只开放 PC13 一个输出脚） */
+void port_gpio_write(uint32_t pin, int level);
+int  port_gpio_read(uint32_t pin);
+
+/* 忙等延时（不带调度，供 native 函数使用） */
+void port_delay_ms(uint32_t ms);
+
 #endif

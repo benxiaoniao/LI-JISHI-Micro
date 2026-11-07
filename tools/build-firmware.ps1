@@ -58,6 +58,7 @@ try {
         "runtime\src\jm_loader.c", "runtime\src\jm_error.c",
         "runtime\src\jm_native.c",
         "firmware\stm32f103\stm32f103_port.c",
+        "firmware\stm32f103\f103_native.c",
         "firmware\stm32f103\jmk.c",
         "firmware\stm32f103\main.c",
         "$out\jm_blob.c"
