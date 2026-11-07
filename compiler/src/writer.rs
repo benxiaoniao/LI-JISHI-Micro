@@ -9,17 +9,20 @@ const NAME_ENTRY: usize = 2;
 const CODE_ENTRY: usize = 10;
 /// 捕获表每项 2 字节：`(父帧槽, 子帧槽)`。
 const CAP_ENTRY: usize = 2;
+/// JMB v4：类记录每项 8 字节。
+const CLASS_REC: usize = 8;
 
 pub fn write(prog: &Program) -> Result<Vec<u8>> {
     let nconsts = prog.consts.len();
     let nnames = prog.names.len();
     let ncodes = prog.codes.len();
-    if nconsts > 255 || nnames > 255 || ncodes > 255 {
+    let nclasses = prog.classes.len();
+    if nconsts > 255 || nnames > 255 || ncodes > 255 || nclasses > 255 {
         return Err(CompileError::new(
             "E105",
             1,
             1,
-            "常量 / 名字 / 函数数量超过 255",
+            "常量 / 名字 / 函数 / 类数量超过 255",
         ));
     }
 
@@ -28,7 +31,12 @@ pub fn write(prog: &Program) -> Result<Vec<u8>> {
     let code_start = name_start + NAME_ENTRY * nnames;
     let ncap_total: usize = prog.codes.iter().map(|c| c.caps.len()).sum();
     let cap_start = code_start + CODE_ENTRY * ncodes;
-    let pool_start = cap_start + CAP_ENTRY * ncap_total;
+    let class_start = cap_start + CAP_ENTRY * ncap_total;
+    let total_fields: usize = prog.classes.iter().map(|c| c.fields.len()).sum();
+    let total_methods: usize = prog.classes.iter().map(|c| c.methods.len()).sum();
+    let fields_start = class_start + CLASS_REC * nclasses;
+    let methods_start = fields_start + total_fields;
+    let pool_start = methods_start + 2 * total_methods;
 
     // 字符串池：名字在前，字符串常量在后
     let mut pool: Vec<u8> = Vec::new();
@@ -76,13 +84,14 @@ pub fn write(prog: &Program) -> Result<Vec<u8>> {
     let mut out = Vec::with_capacity(total);
     // 头
     out.extend_from_slice(b"JMB1");
-    out.push(3); // version：JMB v3（异常处理；表结构与 v2 相同）
+    out.push(4); // version：JMB v4（类表）
     out.push(0); // flags
     out.push(nconsts as u8);
     out.push(nnames as u8);
     out.push(ncodes as u8);
     out.push(prog.entry);
-    out.extend_from_slice(&[0, 0]);
+    out.push(nclasses as u8); // p10：类数量
+    out.push(0); // p11：保留
 
     // 常量表
     for (i, c) in prog.consts.iter().enumerate() {
@@ -145,6 +154,31 @@ pub fn write(prog: &Program) -> Result<Vec<u8>> {
         }
     }
 
+    // 类表：定长记录 → 字段名数组 → 方法(name,code)数组
+    let mut rel_fields = CLASS_REC * nclasses;
+    let mut rel_methods = CLASS_REC * nclasses + total_fields;
+    for c in &prog.classes {
+        out.push(c.name_idx);
+        out.push(c.fields.len() as u8);
+        out.push(c.methods.len() as u8);
+        out.push(c.init_code);
+        out.extend_from_slice(&(rel_fields as u16).to_le_bytes());
+        out.extend_from_slice(&(rel_methods as u16).to_le_bytes());
+        rel_fields += c.fields.len();
+        rel_methods += 2 * c.methods.len();
+    }
+    for c in &prog.classes {
+        for &f in &c.fields {
+            out.push(f);
+        }
+    }
+    for c in &prog.classes {
+        for &(name_idx, code_idx) in &c.methods {
+            out.push(name_idx);
+            out.push(code_idx);
+        }
+    }
+
     // 字符串池
     out.extend_from_slice(&pool);
 
@@ -193,6 +227,12 @@ pub fn disassemble(prog: &Program) -> String {
                     let a = u16::from_le_bytes([c.code[ip], c.code[ip + 1]]);
                     ip += 2;
                     s.push_str(&format!("-> {}", a));
+                }
+                Operand::U8U8 => {
+                    let a = c.code[ip];
+                    let b = c.code[ip + 1];
+                    ip += 2;
+                    s.push_str(&format!("{}, {}", a, b));
                 }
             }
             s.push('\n');

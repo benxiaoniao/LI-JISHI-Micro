@@ -34,6 +34,18 @@ pub const OP_MAKE_CLOSURE: u8 = 28;
 pub const OP_TRY: u8 = 29;
 pub const OP_TRY_END: u8 = 30;
 pub const OP_THROW: u8 = 31;
+/// JM14 类：新建实例（U8 类下标）
+pub const OP_NEW_INSTANCE: u8 = 32;
+/// 读字段（U8 字段名下标）
+pub const OP_GET_FIELD: u8 = 33;
+/// 写字段（U8 字段名下标）
+pub const OP_SET_FIELD: u8 = 34;
+/// 调方法（U8 方法名下标, U8 实参数）
+pub const OP_CALL_METHOD: u8 = 35;
+/// 调初始化（U8 类下标, U8 实参数）
+pub const OP_CALL_INIT: u8 = 36;
+/// 方法帧返回（无操作数）
+pub const OP_RETURN_METHOD: u8 = 37;
 
 /// 运算子码
 pub const BIN_ADD: u8 = 0;
@@ -66,15 +78,18 @@ pub enum Operand {
     None,
     U8,
     U16,
+    /// 两个连续 U8：用于 `CALL_METHOD` / `CALL_INIT`（名字/类下标 + 实参数）。
+    U8U8,
 }
 
 /// 形态表：决定一条指令占几个字节。
 pub fn operand(op: u8) -> Operand {
     match op {
         OP_HALT | OP_POP | OP_DUP | OP_SWAP | OP_NEG | OP_NOT | OP_RETURN | OP_GET_ITEM
-        | OP_SET_ITEM | OP_GET_ITER | OP_TRY_END | OP_THROW => Operand::None,
+        | OP_SET_ITEM | OP_GET_ITER | OP_TRY_END | OP_THROW | OP_RETURN_METHOD => Operand::None,
         OP_JUMP | OP_JUMP_IF_FALSE | OP_JUMP_IF_TRUE | OP_JUMP_IF_FALSE_OR_POP
         | OP_JUMP_IF_TRUE_OR_POP | OP_FOR_ITER | OP_TRY => Operand::U16,
+        OP_CALL_METHOD | OP_CALL_INIT => Operand::U8U8,
         _ => Operand::U8,
     }
 }
@@ -113,6 +128,12 @@ pub fn op_name(op: u8) -> &'static str {
         OP_TRY => "TRY",
         OP_TRY_END => "TRY_END",
         OP_THROW => "THROW",
+        OP_NEW_INSTANCE => "NEW_INSTANCE",
+        OP_GET_FIELD => "GET_FIELD",
+        OP_SET_FIELD => "SET_FIELD",
+        OP_CALL_METHOD => "CALL_METHOD",
+        OP_CALL_INIT => "CALL_INIT",
+        OP_RETURN_METHOD => "RETURN_METHOD",
         _ => "?",
     }
 }
@@ -147,7 +168,7 @@ pub fn emit_c_header() -> String {
     let mut s = String::new();
     s.push_str("/* 由 micc --emit-header 生成，请勿手改。 */\n");
     s.push_str("#ifndef JM_OPCODES_H\n#define JM_OPCODES_H\n\n");
-    let ops: [(u8, &str); 32] = [
+    let ops: [(u8, &str); 38] = [
         (OP_HALT, "OP_HALT"),
         (OP_CONST, "OP_CONST"),
         (OP_LOAD_LOCAL, "OP_LOAD_LOCAL"),
@@ -180,6 +201,12 @@ pub fn emit_c_header() -> String {
         (OP_TRY, "OP_TRY"),
         (OP_TRY_END, "OP_TRY_END"),
         (OP_THROW, "OP_THROW"),
+        (OP_NEW_INSTANCE, "OP_NEW_INSTANCE"),
+        (OP_GET_FIELD, "OP_GET_FIELD"),
+        (OP_SET_FIELD, "OP_SET_FIELD"),
+        (OP_CALL_METHOD, "OP_CALL_METHOD"),
+        (OP_CALL_INIT, "OP_CALL_INIT"),
+        (OP_RETURN_METHOD, "OP_RETURN_METHOD"),
     ];
     for (v, n) in ops {
         s.push_str(&format!("#define {n} {v}\n"));

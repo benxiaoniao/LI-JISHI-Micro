@@ -25,6 +25,9 @@ pub enum Kw {
     Throw,
     Try,
     Catch,
+    Class,
+    New,
+    SelfRef,
     /// JISHI 有、Micro v0 明确不支持的关键字
     Unsupported(&'static str),
 }
@@ -106,9 +109,10 @@ pub const KEYWORDS: &[(&str, Kw)] = &[
     ("抛出", Kw::Throw),
     ("尝试", Kw::Try),
     ("捕获", Kw::Catch),
-    ("类", Kw::Unsupported("类")),
+    ("类", Kw::Class),
+    ("新建", Kw::New),
+    ("本", Kw::SelfRef),
     ("继承", Kw::Unsupported("继承")),
-    ("新建", Kw::Unsupported("新建")),
     ("最终", Kw::Unsupported("最终")),
     ("匹配", Kw::Unsupported("匹配")),
     ("情形", Kw::Unsupported("情形")),

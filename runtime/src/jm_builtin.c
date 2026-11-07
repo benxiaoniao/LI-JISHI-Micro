@@ -213,6 +213,34 @@ int jm_repr(JmState *st, JmValue v, int quoted, JmSink sink, void *ctx, int dept
         case JM_T_CLOSURE:
             S("<函数>");
             return 0;
+        case JM_T_INSTANCE: {
+            JmInstance *in = (JmInstance *)o;
+            if (in->class_idx >= st->nclasses) {
+                S("<实例>");
+                return 0;
+            }
+            /* 类记录 8 B：[0]=类名 [1]=字段数 [4..5]=字段名数组偏移。 */
+            const uint8_t *ce = st->base + st->class_start + (uint32_t)in->class_idx * 8u;
+            const char *cname = (const char *)name_entry(st, ce[0]);
+            sink(ctx, cname, (uint32_t)strlen(cname));
+            sink(ctx, "{", 1);
+            uint16_t foff = (uint16_t)(st->base[st->class_start + (uint32_t)in->class_idx * 8u + 4u] |
+                                       (st->base[st->class_start + (uint32_t)in->class_idx * 8u + 5u] << 8));
+            uint32_t base_off = st->class_start + foff;
+            for (uint8_t k = 0; k < ce[1]; k++) {
+                if (k) {
+                    sink(ctx, ", ", 2);
+                }
+                const char *fname = (const char *)name_entry(st, st->base[base_off + k]);
+                sink(ctx, fname, (uint32_t)strlen(fname));
+                sink(ctx, ": ", 2);
+                if (jm_repr(st, in->fields[k], 1, sink, ctx, depth + 1)) {
+                    return -1;
+                }
+            }
+            sink(ctx, "}", 1);
+            return 0;
+        }
         default:
             S("<对象>");
             return 0;

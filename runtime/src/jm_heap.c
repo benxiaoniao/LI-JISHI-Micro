@@ -212,6 +212,22 @@ JmClosure *jm_closure_new_obj(uint8_t code_idx, uint8_t ncap) {
     return c;
 }
 
+JmInstance *jm_instance_new_obj(uint8_t class_idx, uint8_t nfields) {
+    JmInstance *in = (JmInstance *)jm_obj_alloc(
+        JM_T_INSTANCE,
+        (sizeof(JmInstance) - sizeof(JmObj)) + (size_t)nfields * sizeof(JmValue));
+    if (!in) {
+        return NULL;
+    }
+    in->class_idx = class_idx;
+    in->nfields = nfields;
+    in->pad = 0;
+    for (uint8_t i = 0; i < nfields; i++) {
+        in->fields[i] = JM_UNDEF;
+    }
+    return in;
+}
+
 int jm_list_reserve(JmState *st, JmList *l, uint32_t need) {
     if (l->cap >= need) {
         return 0;
@@ -247,6 +263,14 @@ int jm_list_push(JmState *st, JmList *l, JmValue v) {
 }
 
 int jm_dict_set(JmState *st, JmDict *d, JmValue k, JmValue v) {
+    /* 键必须是不可变值：容器/迭代器/实例都不行。 */
+    if (JM_TAG(k) == JM_TAG_HEAP) {
+        uint16_t kt = jm_obj(k)->type;
+        if (kt == JM_T_LIST || kt == JM_T_DICT || kt == JM_T_ITER ||
+            kt == JM_T_INSTANCE) {
+            return jm_fail(st, E_KEY, "字典键必须是不可变的值");
+        }
+    }
     for (uint32_t i = 0; i < d->len; i++) {
         if (jm_equal(d->entries[i].key, k)) {
             jm_release(d->entries[i].val);
@@ -363,6 +387,13 @@ static void free_obj(JmValue v) {
         JmClosure *c = (JmClosure *)o;
         for (uint8_t i = 0; i < c->ncap; i++) {
             jm_release(c->caps[i]);
+        }
+        break;
+    }
+    case JM_T_INSTANCE: {
+        JmInstance *in = (JmInstance *)o;
+        for (uint8_t i = 0; i < in->nfields; i++) {
+            jm_release(in->fields[i]);
         }
         break;
     }

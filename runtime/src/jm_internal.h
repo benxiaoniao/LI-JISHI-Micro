@@ -61,6 +61,8 @@ static inline JmValue jm_v_builtin(uint8_t id) {
 #define JM_T_DEC 6u
 /* 闭包：代码对象下标 + 捕获槽的值（按值快照、只读）。 */
 #define JM_T_CLOSURE 7u
+/* 实例：类表下标 + 固定字段数组（字段名只存在于 .jmb 类表里）。 */
+#define JM_T_INSTANCE 8u
 
 /* 小数：Q12 定点，raw = 真实值 × 4096。
  * raw 用完整 int32（不是 29 位），故值域约 ±524288、精度 1/4096。
@@ -129,6 +131,16 @@ typedef struct {
     JmValue caps[];
 } JmClosure;
 
+/* 实例对象：头部 8 字节 + fields[nfields]（每项 4 字节）。
+ * nfields 冗余存一份，free_obj 才能不查类表就逐个 release。 */
+typedef struct {
+    JmObj o;
+    uint8_t class_idx;
+    uint8_t nfields;
+    uint16_t pad;
+    JmValue fields[];
+} JmInstance;
+
 extern uint8_t jm_heap[JM_HEAP_SIZE];
 static inline void *jm_obj_ptr(JmValue v) {
     return (void *)(jm_heap + JM_PAYLOAD(v));
@@ -175,6 +187,9 @@ static inline int32_t jm_dec_raw(JmValue v) {
 #define E_UNCAUGHT 27
 #define E_TRY_DEPTH 28
 #define E_TRY_STATE 29
+#define E_FIELD 35
+#define E_NOT_INSTANCE 36
+#define E_METHOD 37
 
 typedef struct {
     int code;
@@ -210,6 +225,10 @@ typedef struct {
     uint32_t const_start;
     uint32_t name_start;
     uint32_t code_start;
+
+    uint8_t nclasses;
+    /* 类表起点（捕获表之后）；类记录 8 B/项，字段/方法数组紧随其后。 */
+    uint32_t class_start;
 
     JmValue globals[JM_MAX_GLOBALS];
     JmValue stack[JM_STACK_SLOTS];
@@ -247,6 +266,7 @@ JmIter *jm_iter_new_obj(JmValue container, uint32_t kind);
 JmRange *jm_range_new_obj(int32_t start, int32_t step, uint32_t len);
 JmDec *jm_dec_new_obj(int32_t raw);
 JmClosure *jm_closure_new_obj(uint8_t code_idx, uint8_t ncap);
+JmInstance *jm_instance_new_obj(uint8_t class_idx, uint8_t nfields);
 
 int jm_list_reserve(JmState *st, JmList *l, uint32_t need);
 int jm_list_push(JmState *st, JmList *l, JmValue v);

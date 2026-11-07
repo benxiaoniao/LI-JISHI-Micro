@@ -18,13 +18,14 @@ int jm_loader_init(JmState *st, const void *data, size_t len) {
     if (p[0] != 'J' || p[1] != 'M' || p[2] != 'B' || p[3] != '1') {
         return jm_fail(st, E_FILE, "不是 .jmb 文件（魔数不对）");
     }
-    if (p[4] != 3) {
-        return jm_fail(st, E_FILE, "不支持的字节码版本（需要 JMB v3）");
+    if (p[4] != 4) {
+        return jm_fail(st, E_FILE, "不支持的字节码版本（需要 JMB v4）");
     }
     st->nconsts = p[6];
     st->nnames = p[7];
     st->ncodes = p[8];
     st->entry = p[9];
+    st->nclasses = p[10];
     if (st->entry >= st->ncodes) {
         return jm_fail(st, E_FILE, "入口代码下标越界");
     }
@@ -92,6 +93,42 @@ int jm_loader_init(JmState *st, const void *data, size_t len) {
     }
     if (cap_cur < tables_end) {
         return jm_fail(st, E_FILE, "捕获表长度不一致");
+    }
+
+    /* 类表：定长 8 B 记录数组，随后是字段名数组与方法(name,code)数组，
+     * 记录里的偏移都相对 class_start。 */
+    st->class_start = tables_end;
+    uint32_t cls_end = st->class_start + (uint32_t)st->nclasses * 8u;
+    if (cls_end > st->len) {
+        return jm_fail(st, E_FILE, "类表越界");
+    }
+    for (uint8_t i = 0; i < st->nclasses; i++) {
+        const uint8_t *e = st->base + st->class_start + (uint32_t)i * 8u;
+        uint8_t nfields = e[1];
+        uint8_t nmethods = e[2];
+        uint8_t init_code = e[3];
+        uint32_t foff = st->class_start + rd16(e + 4);
+        uint32_t moff = st->class_start + rd16(e + 6);
+        if (e[0] >= st->nnames) {
+            return jm_fail(st, E_FILE, "类名下标越界");
+        }
+        if (init_code >= st->ncodes) {
+            return jm_fail(st, E_FILE, "初始化代码下标越界");
+        }
+        if (foff + nfields > st->len || moff + (uint32_t)nmethods * 2u > st->len) {
+            return jm_fail(st, E_FILE, "类成员表越界");
+        }
+        for (uint8_t k = 0; k < nfields; k++) {
+            if (st->base[foff + k] >= st->nnames) {
+                return jm_fail(st, E_FILE, "字段名下标越界");
+            }
+        }
+        for (uint8_t k = 0; k < nmethods; k++) {
+            const uint8_t *m = st->base + moff + (uint32_t)k * 2u;
+            if (m[0] >= st->nnames || m[1] >= st->ncodes) {
+                return jm_fail(st, E_FILE, "方法表下标越界");
+            }
+        }
     }
     return 0;
 }

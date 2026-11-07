@@ -16,11 +16,16 @@ int jm_fail_aux(JmState *st, int code, const char *detail, int aux) {
     return -1;
 }
 
+/* 未捕获抛出的显示缓冲：共 64 字节 = 60 字节正文 + 3 字节「…」 + 1 字节 NUL。
+ * 正文放不下时截断并以「…」结尾，明确提示还有内容没显示。 */
+#define UNCAUGHT_BODY 60u
+
 /* 把抛出值渲染进 JmState 的固定显示缓冲（超长截断）。 */
 typedef struct {
     char *buf;
     uint32_t cap;
     uint32_t len;
+    int truncated;
 } ThrowSink;
 
 static int throw_sink(void *ctx, const char *s, uint32_t n) {
@@ -28,11 +33,37 @@ static int throw_sink(void *ctx, const char *s, uint32_t n) {
     uint32_t room = b->cap - 1u - b->len;
     if (n > room) {
         n = room;
+        b->truncated = 1;
     }
     for (uint32_t i = 0; i < n; i++) {
         b->buf[b->len++] = s[i];
     }
     return 0;
+}
+
+/* 截断点可能落在 UTF-8 字符中间：退回到完整的字符边界，避免半个汉字。 */
+static uint32_t utf8_trim_tail(const char *buf, uint32_t len) {
+    uint32_t run = 0;
+    uint32_t p = len;
+    while (p > 0 && run < 3 && ((uint8_t)buf[p - 1] & 0xC0) == 0x80) {
+        p--;
+        run++;
+    }
+    if (p > 0) {
+        uint8_t c = (uint8_t)buf[p - 1];
+        uint32_t need = 1;
+        if (c >= 0xF0) {
+            need = 4;
+        } else if (c >= 0xE0) {
+            need = 3;
+        } else if (c >= 0xC0) {
+            need = 2;
+        }
+        if (run + 1u < need) {
+            return p - 1u; /* 头字节的后续被截掉了，整字符丢掉 */
+        }
+    }
+    return len;
 }
 
 static uint16_t rd16(const uint8_t *p) {
@@ -61,6 +92,37 @@ static uint32_t cap_offset(JmState *st, uint8_t i) {
 static const char *name_at(JmState *st, uint8_t i) {
     uint16_t off = rd16(st->base + st->name_start + (uint32_t)i * 2u);
     return (const char *)(st->base + off);
+}
+
+/* 类记录：8 B，偏移都相对 class_start。
+ * [0]=name_idx [1]=nfields [2]=nmethods [3]=init_code [4..5]=fields_off [6..7]=methods_off */
+static const uint8_t *class_entry(JmState *st, uint8_t i) {
+    return st->base + st->class_start + (uint32_t)i * 8u;
+}
+
+/* 按名字表下标查字段槽位；返回 -1 表示没有。 */
+static int class_field_slot(JmState *st, uint8_t ci, uint8_t ni) {
+    const uint8_t *e = class_entry(st, ci);
+    uint32_t off = st->class_start + rd16(e + 4);
+    for (uint8_t k = 0; k < e[1]; k++) {
+        if (st->base[off + k] == ni) {
+            return (int)k;
+        }
+    }
+    return -1;
+}
+
+/* 按名字表下标查方法代码对象下标；返回 -1 表示没有。 */
+static int class_method_code(JmState *st, uint8_t ci, uint8_t ni) {
+    const uint8_t *e = class_entry(st, ci);
+    uint32_t off = st->class_start + rd16(e + 6);
+    for (uint8_t k = 0; k < e[2]; k++) {
+        const uint8_t *m = st->base + off + (uint32_t)k * 2u;
+        if (m[0] == ni) {
+            return (int)m[1];
+        }
+    }
+    return -1;
 }
 
 static int load_const(JmState *st, uint8_t idx, JmValue *out) {
@@ -268,6 +330,9 @@ int jm_type_name(JmValue v, const char **name) {
             return 0;
         case JM_T_CLOSURE:
             *name = "函数";
+            return 0;
+        case JM_T_INSTANCE:
+            *name = "实例";
             return 0;
         default:
             *name = "对象";
@@ -752,12 +817,6 @@ int jm_setitem(JmState *st, JmValue obj, JmValue idx, JmValue val) {
         return 0;
     }
     if (o->type == JM_T_DICT) {
-        if (JM_TAG(idx) == JM_TAG_HEAP) {
-            JmObj *ko = jm_obj(idx);
-            if (ko->type == JM_T_LIST || ko->type == JM_T_DICT || ko->type == JM_T_ITER) {
-                return jm_fail(st, E_KEY, "字典键必须是不可变的值");
-            }
-        }
         return jm_dict_set(st, (JmDict *)o, idx, val);
     }
     return jm_fail(st, E_TYPE, "文本/范围不能写入");
@@ -1230,6 +1289,199 @@ int jm_execute(JmState *st) {
             ip = f->ip;
             break;
         }
+        case OP_RETURN_METHOD: {
+            JmValue ret;
+            POP_V(ret);
+            while (st->tp > 0 && st->tries[st->tp - 1].frame_idx == (uint8_t)st->fp) {
+                st->tp--;
+            }
+            if (st->fp == 0) {
+                jm_release(ret);
+                goto done;
+            }
+            for (uint16_t i = 1; i < cur_nlocals; i++) {
+                jm_release(st->stack[f->base + i]);
+            }
+            uint16_t slot0 = f->base;
+            jm_release(st->stack[slot0]);
+            st->stack[slot0] = ret;
+            st->sp = (int)slot0 + 1;
+            st->fp--;
+            f = &st->frames[st->fp];
+            cur_code = f->code_idx;
+            ce = code_entry(st, cur_code);
+            code = st->base + rd16(ce + 0);
+            clen = rd16(ce + 2);
+            cur_nlocals = ce[6];
+            ip = f->ip;
+            break;
+        }
+        case OP_NEW_INSTANCE: {
+            uint8_t ci = code[ip++];
+            if (ci >= st->nclasses) {
+                VM_FAIL(E_TYPE, "类下标越界");
+            }
+            uint8_t nfields = class_entry(st, ci)[1];
+            JmInstance *in = jm_instance_new_obj(ci, nfields);
+            if (!in) {
+                VM_FAIL(E_OOM, "创建实例失败");
+            }
+            PUSH_V(jm_heap_value(in));
+            break;
+        }
+        case OP_GET_FIELD: {
+            uint8_t ni = code[ip++];
+            if (ni >= st->nnames) {
+                VM_FAIL(E_NAMES, "名字下标越界");
+            }
+            JmValue rcv;
+            POP_V(rcv);
+            if (JM_TAG(rcv) != JM_TAG_HEAP || jm_obj(rcv)->type != JM_T_INSTANCE) {
+                jm_release(rcv);
+                VM_FAIL(E_NOT_INSTANCE, "只能对实例取字段");
+            }
+            JmInstance *in = (JmInstance *)jm_obj(rcv);
+            if (in->class_idx >= st->nclasses) {
+                jm_release(rcv);
+                VM_FAIL(E_FIELD, "实例的类下标越界");
+            }
+            int fi = class_field_slot(st, in->class_idx, ni);
+            if (fi < 0) {
+                jm_release(rcv);
+                VM_FAIL(E_FIELD, "实例没有这个字段");
+            }
+            JmValue fv = in->fields[fi];
+            jm_retain(fv);
+            jm_release(rcv);
+            PUSH_V(fv);
+            break;
+        }
+        case OP_SET_FIELD: {
+            uint8_t ni = code[ip++];
+            if (ni >= st->nnames) {
+                VM_FAIL(E_NAMES, "名字下标越界");
+            }
+            JmValue val, rcv;
+            POP_V(val);
+            POP_V(rcv);
+            if (JM_TAG(rcv) != JM_TAG_HEAP || jm_obj(rcv)->type != JM_T_INSTANCE) {
+                jm_release(val);
+                jm_release(rcv);
+                VM_FAIL(E_NOT_INSTANCE, "只能对实例写字段");
+            }
+            JmInstance *in = (JmInstance *)jm_obj(rcv);
+            if (in->class_idx >= st->nclasses) {
+                jm_release(val);
+                jm_release(rcv);
+                VM_FAIL(E_FIELD, "实例的类下标越界");
+            }
+            int fi = class_field_slot(st, in->class_idx, ni);
+            if (fi < 0) {
+                jm_release(val);
+                jm_release(rcv);
+                VM_FAIL(E_FIELD, "实例没有这个字段");
+            }
+            jm_release(in->fields[fi]);
+            in->fields[fi] = val;
+            jm_release(rcv);
+            break;
+        }
+        case OP_CALL_METHOD: {
+            uint8_t ni = code[ip++];
+            uint8_t argc = code[ip++];
+            if (ni >= st->nnames) {
+                VM_FAIL(E_NAMES, "名字下标越界");
+            }
+            if (st->sp < (int)argc + 1) {
+                VM_FAIL(E_UNDERFLOW, "调用时值栈不足");
+            }
+            JmValue rcv = st->stack[st->sp - argc - 1];
+            if (JM_TAG(rcv) != JM_TAG_HEAP || jm_obj(rcv)->type != JM_T_INSTANCE) {
+                VM_FAIL(E_NOT_INSTANCE, "只能对实例调方法");
+            }
+            JmInstance *in = (JmInstance *)jm_obj(rcv);
+            if (in->class_idx >= st->nclasses) {
+                VM_FAIL(E_METHOD, "实例的类下标越界");
+            }
+            int idx = class_method_code(st, in->class_idx, ni);
+            if (idx < 0) {
+                VM_FAIL(E_METHOD, "实例没有这个方法");
+            }
+            const uint8_t *nce = code_entry(st, (uint8_t)idx);
+            uint8_t nparams = nce[5];
+            uint8_t nl = nce[6];
+            if ((uint16_t)argc + 1u != nparams) {
+                VM_FAIL(E_ARGC, "实参个数与形参不符");
+            }
+            if (st->fp + 1 >= JM_MAX_FRAMES) {
+                VM_FAIL(E_FRAMES, "调用层数太深");
+            }
+            f->ip = ip;
+            st->fp++;
+            JmFrame *nf = &st->frames[st->fp];
+            nf->code_idx = (uint8_t)idx;
+            nf->ip = 0;
+            nf->base = (uint16_t)(st->sp - argc - 1);
+            for (uint8_t i = nparams; i < nl; i++) {
+                PUSH_V(JM_UNDEF);
+            }
+            f = nf;
+            cur_code = (uint8_t)idx;
+            cur_nlocals = nl;
+            ce = nce;
+            code = st->base + rd16(ce + 0);
+            clen = rd16(ce + 2);
+            ip = 0;
+            break;
+        }
+        case OP_CALL_INIT: {
+            uint8_t ci = code[ip++];
+            uint8_t argc = code[ip++];
+            if (ci >= st->nclasses) {
+                VM_FAIL(E_TYPE, "类下标越界");
+            }
+            if (st->sp < (int)argc + 1) {
+                VM_FAIL(E_UNDERFLOW, "构造时值栈不足");
+            }
+            JmValue rcv = st->stack[st->sp - argc - 1];
+            if (JM_TAG(rcv) != JM_TAG_HEAP || jm_obj(rcv)->type != JM_T_INSTANCE) {
+                VM_FAIL(E_NOT_INSTANCE, "构造的目标不是实例");
+            }
+            JmInstance *in = (JmInstance *)jm_obj(rcv);
+            if (in->class_idx != ci) {
+                VM_FAIL(E_OBJ, "构造接收者与类不符");
+            }
+            uint8_t idx = class_entry(st, ci)[3];
+            if (idx >= st->ncodes) {
+                VM_FAIL(E_CODE, "初始化代码对象越界");
+            }
+            const uint8_t *nce = code_entry(st, idx);
+            uint8_t nparams = nce[5];
+            uint8_t nl = nce[6];
+            if ((uint16_t)argc + 1u != nparams) {
+                VM_FAIL(E_ARGC, "实参个数与初始化形参不符");
+            }
+            if (st->fp + 1 >= JM_MAX_FRAMES) {
+                VM_FAIL(E_FRAMES, "调用层数太深");
+            }
+            f->ip = ip;
+            st->fp++;
+            JmFrame *nf = &st->frames[st->fp];
+            nf->code_idx = idx;
+            nf->ip = 0;
+            nf->base = (uint16_t)(st->sp - argc - 1);
+            for (uint8_t i = nparams; i < nl; i++) {
+                PUSH_V(JM_UNDEF);
+            }
+            f = nf;
+            cur_code = idx;
+            cur_nlocals = nl;
+            ce = nce;
+            code = st->base + rd16(ce + 0);
+            clen = rd16(ce + 2);
+            ip = 0;
+            break;
+        }
         case OP_BUILD_LIST: {
             uint8_t n = code[ip++];
             JmValue lv;
@@ -1390,9 +1642,16 @@ int jm_execute(JmState *st) {
             JmValue v;
             POP_V(v);
             if (st->tp <= 0) {
-                ThrowSink tb = {st->uncaught, (uint32_t)sizeof(st->uncaught), 0u};
+                ThrowSink tb = {st->uncaught, UNCAUGHT_BODY, 0u, 0};
                 st->uncaught[0] = 0;
                 jm_repr(st, v, 0, throw_sink, &tb, 0);
+                if (tb.truncated) {
+                    /* 以「…」收尾，避免让人误以为内容只有这么多。 */
+                    tb.len = utf8_trim_tail(st->uncaught, tb.len);
+                    st->uncaught[tb.len++] = (char)0xE2;
+                    st->uncaught[tb.len++] = (char)0x80;
+                    st->uncaught[tb.len++] = (char)0xA6;
+                }
                 st->uncaught[tb.len] = 0;
                 jm_release(v);
                 VM_FAIL(E_UNCAUGHT, st->uncaught);

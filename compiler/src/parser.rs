@@ -107,6 +107,51 @@ impl Parser {
         Ok(stmts)
     }
 
+    fn parse_func_decl(&mut self) -> Result<MethodDecl> {
+        let t = self.peek().clone();
+        let line = t.line;
+        self.pos += 1;
+        let (name, _, _) = self.expect_ident()?;
+        self.expect_op("(")?;
+        let mut params = Vec::new();
+        if !matches!(self.peek().tok, Tok::Op(")")) {
+            loop {
+                let (p, pl, pc) = self.expect_ident()?;
+                if matches!(self.peek().tok, Tok::Op(":")) {
+                    // 类型标注：读掉类型名，不参与运行
+                    self.pos += 1;
+                    let _ = self.expect_ident()?;
+                }
+                if matches!(self.peek().tok, Tok::Op("=")) {
+                    return Err(CompileError::new(
+                        "E107",
+                        pl,
+                        pc,
+                        "Micro Core v0 不支持参数默认值",
+                    ));
+                }
+                params.push(p);
+                if matches!(self.peek().tok, Tok::Op(",")) {
+                    self.pos += 1;
+                    continue;
+                }
+                break;
+            }
+        }
+        self.expect_op(")")?;
+        if matches!(self.peek().tok, Tok::Op("->")) {
+            self.pos += 1;
+            let _ = self.expect_ident()?;
+        }
+        let body = self.parse_block()?;
+        Ok(MethodDecl {
+            name,
+            params,
+            body,
+            line,
+        })
+    }
+
     fn parse_stmt(&mut self) -> Result<Stmt> {
         let t = self.peek().clone();
         let line = t.line;
@@ -183,42 +228,62 @@ impl Parser {
                 })
             }
             Tok::Kw(Kw::Func) => {
+                let m = self.parse_func_decl()?;
+                Ok(Stmt {
+                    kind: StmtKind::FuncDef {
+                        name: m.name,
+                        params: m.params,
+                        body: m.body,
+                    },
+                    line,
+                })
+            }
+            Tok::Kw(Kw::Class) => {
                 self.pos += 1;
                 let (name, _, _) = self.expect_ident()?;
-                self.expect_op("(")?;
-                let mut params = Vec::new();
-                if !matches!(self.peek().tok, Tok::Op(")")) {
-                    loop {
-                        let (p, pl, pc) = self.expect_ident()?;
-                        if matches!(self.peek().tok, Tok::Op(":")) {
-                            // 类型标注：读掉类型名，不参与运行
+                self.expect_op(":")?;
+                self.expect_newline()?;
+                if !matches!(self.peek().tok, Tok::Indent) {
+                    return Err(self.err("E109", "这里应该换行并缩进"));
+                }
+                self.pos += 1;
+                let mut fields: Vec<(String, Expr)> = Vec::new();
+                let mut methods: Vec<MethodDecl> = Vec::new();
+                while !matches!(self.peek().tok, Tok::Dedent | Tok::Eof) {
+                    if matches!(self.peek().tok, Tok::Newline) {
+                        self.pos += 1;
+                        continue;
+                    }
+                    match self.peek().tok {
+                        Tok::Kw(Kw::Ling) => {
                             self.pos += 1;
-                            let _ = self.expect_ident()?;
+                            let (fname, _, _) = self.expect_ident()?;
+                            self.expect_op("=")?;
+                            let e = self.parse_expr()?;
+                            self.expect_newline()?;
+                            fields.push((fname, e));
                         }
-                        if matches!(self.peek().tok, Tok::Op("=")) {
+                        Tok::Kw(Kw::Func) => methods.push(self.parse_func_decl()?),
+                        _ => {
+                            let bad = self.peek().clone();
                             return Err(CompileError::new(
-                                "E107",
-                                pl,
-                                pc,
-                                "Micro Core v0 不支持参数默认值",
+                                "E118",
+                                bad.line,
+                                bad.col,
+                                "类体里只能写字段（令 名 = 默认值）或函数（函数 名(...):）",
                             ));
                         }
-                        params.push(p);
-                        if matches!(self.peek().tok, Tok::Op(",")) {
-                            self.pos += 1;
-                            continue;
-                        }
-                        break;
                     }
                 }
-                self.expect_op(")")?;
-                if matches!(self.peek().tok, Tok::Op("->")) {
+                if matches!(self.peek().tok, Tok::Dedent) {
                     self.pos += 1;
-                    let _ = self.expect_ident()?;
                 }
-                let body = self.parse_block()?;
                 Ok(Stmt {
-                    kind: StmtKind::FuncDef { name, params, body },
+                    kind: StmtKind::Class(ClassDecl {
+                        name,
+                        fields,
+                        methods,
+                    }),
                     line,
                 })
             }
@@ -303,7 +368,7 @@ impl Parser {
                 "E103",
                 line,
                 t.col,
-                format!("Micro Core v0 不支持「{}」", name),
+                format!("使用了 v0 不支持的关键字「{}」（如继承/最终/匹配等）", name),
             )),
             _ => {
                 let e = self.parse_expr()?;
@@ -346,11 +411,29 @@ impl Parser {
                             ),
                             line,
                         }),
+                        ExprKind::Member(obj, name) => Ok(Stmt {
+                            kind: StmtKind::AssignMember(
+                                (**obj).clone(),
+                                name.clone(),
+                                Box::new(Expr {
+                                    kind: ExprKind::Bin(bop, Box::new(lhs), Box::new(rhs)),
+                                    line: e.line,
+                                    col: e.col,
+                                }),
+                            ),
+                            line,
+                        }),
+                        ExprKind::SelfRef => Err(CompileError::new(
+                            "E120",
+                            e.line,
+                            e.col,
+                            "「本」是只读绑定，不能赋值",
+                        )),
                         _ => Err(CompileError::new(
                             "E109",
                             e.line,
                             e.col,
-                            "复合赋值的左边只能是名字或下标",
+                            "复合赋值的左边只能是名字、下标或字段",
                         )),
                     }
                 } else if matches!(self.peek().tok, Tok::Op("=")) {
@@ -366,11 +449,21 @@ impl Parser {
                             kind: StmtKind::AssignIndex(*obj, idx, Box::new(rhs)),
                             line,
                         }),
+                        ExprKind::Member(obj, name) => Ok(Stmt {
+                            kind: StmtKind::AssignMember(*obj, name, Box::new(rhs)),
+                            line,
+                        }),
+                        ExprKind::SelfRef => Err(CompileError::new(
+                            "E120",
+                            e.line,
+                            e.col,
+                            "「本」是只读绑定，不能赋值",
+                        )),
                         _ => Err(CompileError::new(
                             "E109",
                             e.line,
                             e.col,
-                            "等号左边只能是名字或下标",
+                            "等号左边只能是名字、下标或字段",
                         )),
                     }
                 } else {
@@ -570,7 +663,41 @@ impl Parser {
                     };
                 }
                 Tok::Op(".") => {
-                    return Err(self.err("E108", "Micro Core v0 不支持属性访问「.」"));
+                    self.pos += 1;
+                    if !matches!(self.peek().tok, Tok::Ident(_)) {
+                        return Err(self.err("E108", "「.」后面应该写字段名或方法名"));
+                    }
+                    let (name, _, _) = self.expect_ident()?;
+                    let (line, col) = (e.line, e.col);
+                    if matches!(self.peek().tok, Tok::Op("(")) {
+                        self.pos += 1;
+                        let mut args = Vec::new();
+                        if !matches!(self.peek().tok, Tok::Op(")")) {
+                            loop {
+                                args.push(self.parse_expr()?);
+                                if matches!(self.peek().tok, Tok::Op(",")) {
+                                    self.pos += 1;
+                                    if matches!(self.peek().tok, Tok::Op(")")) {
+                                        break;
+                                    }
+                                    continue;
+                                }
+                                break;
+                            }
+                        }
+                        self.expect_op(")")?;
+                        e = Expr {
+                            kind: ExprKind::MethodCall(Box::new(e), name, args),
+                            line,
+                            col,
+                        };
+                    } else {
+                        e = Expr {
+                            kind: ExprKind::Member(Box::new(e), name),
+                            line,
+                            col,
+                        };
+                    }
                 }
                 _ => break,
             }
@@ -626,6 +753,39 @@ impl Parser {
                 self.pos += 1;
                 Ok(Expr {
                     kind: ExprKind::Nil,
+                    line,
+                    col,
+                })
+            }
+            Tok::Kw(Kw::SelfRef) => {
+                self.pos += 1;
+                Ok(Expr {
+                    kind: ExprKind::SelfRef,
+                    line,
+                    col,
+                })
+            }
+            Tok::Kw(Kw::New) => {
+                self.pos += 1;
+                let (cls, _, _) = self.expect_ident()?;
+                self.expect_op("(")?;
+                let mut args = Vec::new();
+                if !matches!(self.peek().tok, Tok::Op(")")) {
+                    loop {
+                        args.push(self.parse_expr()?);
+                        if matches!(self.peek().tok, Tok::Op(",")) {
+                            self.pos += 1;
+                            if matches!(self.peek().tok, Tok::Op(")")) {
+                                break;
+                            }
+                            continue;
+                        }
+                        break;
+                    }
+                }
+                self.expect_op(")")?;
+                Ok(Expr {
+                    kind: ExprKind::New(cls, args),
                     line,
                     col,
                 })

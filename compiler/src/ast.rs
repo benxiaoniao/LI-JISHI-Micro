@@ -51,6 +51,30 @@ pub enum ExprKind {
     Compare(Box<Expr>, Vec<(CmpOp, Box<Expr>)>),
     Call(Box<Expr>, Vec<Expr>),
     Index(Box<Expr>, Box<Expr>),
+    /// `新建 类名(实参...)`
+    New(String, Vec<Expr>),
+    /// `对象.字段`（读）
+    Member(Box<Expr>, String),
+    /// `对象.方法(实参...)`
+    MethodCall(Box<Expr>, String, Vec<Expr>),
+    /// 方法内的 `本`
+    SelfRef,
+}
+
+/// 类方法声明（`初始化` 也是普通方法，名字为「初始化」）。
+#[derive(Clone, Debug)]
+pub struct MethodDecl {
+    pub name: String,
+    pub params: Vec<String>,
+    pub body: Vec<Stmt>,
+    pub line: u32,
+}
+
+#[derive(Clone, Debug)]
+pub struct ClassDecl {
+    pub name: String,
+    pub fields: Vec<(String, Expr)>,
+    pub methods: Vec<MethodDecl>,
 }
 
 #[derive(Clone, Debug)]
@@ -65,6 +89,8 @@ pub enum StmtKind {
     Let(String, Expr),
     Assign(String, Expr),
     AssignIndex(Expr, Box<Expr>, Box<Expr>),
+    /// `对象.字段 = 值`（接收者表达式、字段名、值）
+    AssignMember(Expr, String, Box<Expr>),
     Expr(Expr),
     If {
         branches: Vec<(Expr, Vec<Stmt>)>,
@@ -80,6 +106,8 @@ pub enum StmtKind {
         params: Vec<String>,
         body: Vec<Stmt>,
     },
+    /// 顶层类声明；类体只允许字段与函数。
+    Class(ClassDecl),
     Return(Option<Expr>),
     Throw(Expr),
     Try {

@@ -34,6 +34,12 @@
 #define OP_TRY 29
 #define OP_TRY_END 30
 #define OP_THROW 31
+#define OP_NEW_INSTANCE 32
+#define OP_GET_FIELD 33
+#define OP_SET_FIELD 34
+#define OP_CALL_METHOD 35
+#define OP_CALL_INIT 36
+#define OP_RETURN_METHOD 37
 
 #define BIN_ADD 0
 #define BIN_SUB 1

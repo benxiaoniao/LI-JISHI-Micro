@@ -21,9 +21,9 @@ PC 上：  .jsh 源码 ──micc──▶  .jmb 微字节码
 | 组成 | 内容 |
 |------|------|
 | 编译器 `micc` | Rust 实现，`.jsh → .jmb`；词法（中文标识符 / 全角归一化 / 4 空格缩进）、语法、作用域、代码生成、反汇编（`--dump`） |
-| 字节码 | `.jmb`（JMB v3），变长指令 1/2/3 字节，4 字节值 + 29 位整数；小数是 Q12 定点堆对象；闭包是带捕获表的堆对象；异常用 `TRY/TRY_END/THROW` |
+| 字节码 | `.jmb`（JMB v4），变长指令 1/2/3 字节，4 字节值 + 29 位整数；小数是 Q12 定点堆对象；闭包是带捕获表的堆对象；异常用 `TRY/TRY_END/THROW`；类表（字段/方法名与 `初始化` 代码）随包存放 |
 | 运行时 `libjishim` | C99、零依赖：`jm_loader`（读包）/ `jm_heap`（静态堆 + 引用计数）/ `jm_vm`（栈机）/ `jm_builtin`（内建）/ `jm_native`（原生绑定）/ `jm_error`（错误码） |
-| 语言能力 | `令`/赋值/复合赋值、`如果/否则如果/否则`、`当`、`循环 N 次`、`遍历`、`中断/继续`、`函数/返回/递归`、闭包（值捕获、只读）、`抛出/尝试/捕获`；列表、字典、文本（UTF-8 码点）、小数（Q12 定点） |
+| 语言能力 | `令`/赋值/复合赋值、`如果/否则如果/否则`、`当`、`循环 N 次`、`遍历`、`中断/继续`、`函数/返回/递归`、闭包（值捕获、只读）、`抛出/尝试/捕获`、类（`类`/`新建`/`本`/字段与方法，无继承）；列表、字典、文本（UTF-8 码点）、小数（Q12 定点） |
 | 内建 | `打印 文本 整数 小数 长度 范围 类型 总和 最大 最小 绝对值` |
 | JMK 内核 | 抢占式固定优先级调度（PendSV 切换）、SysTick 1 kHz、6 个用户任务 + 空闲任务、4 档优先级、动态栈池（默认 3200 B）或静态 6×512 B、信号量、消息队列、毫秒延时/让出 |
 | 板级原生表 | `引脚`（5 项）、`ADC`（2 项）、`定时器`（3 项）；由 `compiler/src/native_spec.rs` 单一事实来源生成 `f103_native_table.h` |
@@ -178,7 +178,7 @@ docs/                      路径图、字节码规格、原生函数表、调�
 | [tools/flash-firmware.ps1](tools/flash-firmware.ps1) | SWD 烧录（默认预览，`-Apply` 才写） |
 | [tools/capture-serial.ps1](tools/capture-serial.ps1) | 串口录制到 `build\uart\`（`-Port` / `-Seconds` / `-Out`） |
 | [tools/test.ps1](tools/test.ps1) | 输出回归（逐字节对比 `tests\expected`） |
-| [tools/test-errors.ps1](tools/test-errors.ps1) | 错误码回归（E004 / E007 / E009 / E013 / E023 / E027 / E028 / E102 / E103 / E117） |
+| [tools/test-errors.ps1](tools/test-errors.ps1) | 错误码回归（E004 / E007 / E009 / E013 / E023 / E027 / E028 / E035 / E036 / E037 / E102 / E103 / E117 / E118 / E120 / E121 / E122 / E123） |
 | [tools/test-native-import.ps1](tools/test-native-import.ps1) | 原生导入回归（引脚 / ADC / 定时器各三类错误 + 正确用例） |
 | [tools/toolchains.ps1](tools/toolchains.ps1) | 工具链定位与版本自检 |
 | [tools/fetch-toolchain.ps1](tools/fetch-toolchain.ps1) | 按锁文件下载并校验 ARM 工具链 |
@@ -187,9 +187,9 @@ docs/                      路径图、字节码规格、原生函数表、调�
 
 ## 6. 当前状态与已知限制
 
-**资源预算**：64 KB Flash / 20 KB SRAM。含 JMK 内核、ADC/定时器驱动、闭包与异常运行时的当前固件
-约 **25.0 KB Flash（39.1%）**、**14.3 KB RAM（71.5%）**（`异常` 示例实测 25616 B / 14644 B，
-同例点灯 24980 B / 14644 B）；RAM 余量已不大，再加功能前先看 `jishim.map`。
+**资源预算**：64 KB Flash / 20 KB SRAM。含 JMK 内核、ADC/定时器驱动、闭包/异常/类运行时的当前固件
+约 **27.4 KB Flash（42.8%）**、**14.3 KB RAM（71.5%）**（`异常` 示例实测 28052 B / 14652 B，
+`类` 示例 27956 B / 14652 B）；RAM 余量已不大，再加功能前先看 `jishim.map`。
 
 **已上板验证**：USART1 输出、PC13 点灯、JMK 调度与栈池、ADC 零点（PA0 接 GND 读 0 / 0 mV）、
 ADC 满量程（PA0 接 3V3 读 4095 / 3300 mV，末位 4094 属正常抖动）、TIM2 1 kHz 计数。

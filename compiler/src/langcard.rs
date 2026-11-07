@@ -68,7 +68,7 @@ pub const BUILTIN_DOCS: &[BuiltinDoc] = &[
         name: "类型",
         min_args: 1,
         max_args: 1,
-        doc: "返回类型名文本：整数 / 小数 / 文本 / 列表 / 字典 / 范围 / 函数 / 内建 / 空 / 真 / 假 / 未定义。",
+        doc: "返回类型名文本：整数 / 小数 / 文本 / 列表 / 字典 / 范围 / 函数 / 内建 / 实例 / 空 / 真 / 假 / 未定义。",
     },
     BuiltinDoc {
         name: "总和",
@@ -131,6 +131,9 @@ pub const RUNTIME_ERROR_DOCS: &[RuntimeErrorDoc] = &[
     RuntimeErrorDoc { name: "E_UNCAUGHT", meaning: "未捕获的异常：`抛出` 的值一路传到了最外层（`错误[E027] 未捕获的异常：<值>`）" },
     RuntimeErrorDoc { name: "E_TRY_DEPTH", meaning: "`尝试` 嵌套超过 8 层（运行时固定栈）" },
     RuntimeErrorDoc { name: "E_TRY_STATE", meaning: "`尝试` 栈与当前帧不匹配（字节码不平衡，通常由编译器 bug 引起）" },
+    RuntimeErrorDoc { name: "E_FIELD", meaning: "实例没有这个字段（E035）" },
+    RuntimeErrorDoc { name: "E_NOT_INSTANCE", meaning: "对非实例取字段或调方法（E036）" },
+    RuntimeErrorDoc { name: "E_METHOD", meaning: "实例没有这个方法（E037）" },
 ];
 
 struct SyntaxRow {
@@ -221,6 +224,16 @@ const SYNTAX: &[SyntaxRow] = &[
         example: "打印(长度(列表))",
     },
     SyntaxRow {
+        construct: "类",
+        form: "类 名字:\n    令 字段 = 默认值\n    函数 初始化(参数): ...\n    函数 方法(参数): ...",
+        example: "类 计数器:\n    令 值 = 0\n    函数 初始化(起点):\n        本.值 = 起点\n    函数 加(n):\n        本.值 += n",
+    },
+    SyntaxRow {
+        construct: "新建 / 成员",
+        form: "新建 类名(实参...)；对象.字段；对象.方法(...)；本（方法内）",
+        example: "令 c = 新建 计数器(5)\nc.加(3)\n打印(c.值)",
+    },
+    SyntaxRow {
         construct: "下标",
         form: "容器[下标]",
         example: "列表[0]",
@@ -239,11 +252,13 @@ const SYNTAX: &[SyntaxRow] = &[
 
 const GRAMMAR: &[&str] = &[
     "program := { statement }",
-    "statement := import | let | assign | if | while | repeat | foreach | funcdef | return | break | continue | throw | try | expr_stmt",
+    "statement := import | class | let | assign | if | while | repeat | foreach | funcdef | return | break | continue | throw | try | expr_stmt",
+    "class := '类' IDENT ':' NEWLINE INDENT { class_member } DEDENT",
+    "class_member := '令' IDENT '=' expr NEWLINE | funcdef",
     "import := '导入' IDENT",
     "let := '令' IDENT '=' expr",
     "assign := lvalue '=' expr | lvalue AUGOP expr",
-    "lvalue := IDENT | postfix '[' expr ']'",
+    "lvalue := IDENT | postfix '[' expr ']' | postfix '.' IDENT",
     "if := '如果' expr block { '否则如果' expr block } [ '否则' block ]",
     "while := '当' expr block",
     "repeat := '循环' expr [ '次' ] block",
@@ -263,8 +278,8 @@ const GRAMMAR: &[&str] = &[
     "mul := unary { ('*'|'/'|'//'|'%') unary }",
     "unary := '-' unary | power",
     "power := postfix [ '**' unary ]",
-    "postfix := primary { '(' args ')' | '[' expr ']' }",
-    "primary := INT | STR | '真' | '假' | '空' | IDENT | '(' expr ')' | list | dict",
+    "postfix := primary { '(' args ')' | '[' expr ']' | '.' IDENT [ '(' args ')' ] }",
+    "primary := INT | STR | '真' | '假' | '空' | IDENT | '本' | '新建' IDENT '(' args ')' | '(' expr ')' | list | dict",
     "list := '[' [ expr { ',' expr } [ ',' ] ] ']'",
     "dict := '{' [ expr ':' expr { ',' expr ':' expr } [ ',' ] ] '}'",
 ];
@@ -288,12 +303,14 @@ const SEMANTICS: &[SemanticRow] = &[
     SemanticRow { topic: "函数", rule: "模块级函数与闭包都是一等值：可以赋值、传参、作为返回值；实参按值传递；形参与实参个数必须一致；调用层数上限 32。" },
     SemanticRow { topic: "闭包", rule: "内层函数读取外层局部变量即按值捕获（定义那一刻的快照，之后外层再改也不影响）；捕获变量只读（赋值报 E117），不能在函数里捕获自己的名字（E117）；单个函数捕获上限 255（E116）。" },
     SemanticRow { topic: "字符串", rule: "单引号、双引号、中文引号都可定界；反斜杠转义支持 \\n \\t \\\\ \\\" \\'；文本按 UTF-8 存。" },
-    SemanticRow { topic: "字典键", rule: "键必须是整数/文本/空/真/假这类不可变值；列表、字典、函数不能当键。" },
+    SemanticRow { topic: "字典键", rule: "键必须是整数/文本/空/真/假这类不可变值；列表、字典、函数、实例不能当键。" },
+    SemanticRow { topic: "类", rule: "`类` 只能写在模块顶层，类名全局唯一；类体只允许字段（`令 名 = 默认值`，默认值必填且不能引用 `本`）与方法。`新建 C(...)` 调用构造：有 `初始化` 时实参个数必须与它一致，否则只能零实参；`初始化` 里禁止 `返回`，构造结果固定是实例本身。方法内 `本` 是只读绑定（不能 `本 = ...`），`本.字段` 读写与 `对象.字段` 相同。没有继承、没有虚分派：字段和方法都在运行期按名字在类的单层表里查找（结构化多态）。未声明字段/方法报 E035/E037，对非实例取成员报 E036；`本.未知` 与 `本.方法` 当值取是编译期 E122/E123。" },
+    SemanticRow { topic: "实例", rule: "实例是普通堆对象：可进列表/字典值、可 `抛出` 并被 `捕获`、可被闭包捕获（含捕获 `本`）；相等比较按身份；`长度`/下标/遍历不适用；native 只能把实例当入参透传，不能构造或返回。" },
     SemanticRow { topic: "迭代", rule: "可遍历：列表、文本（按字符）、字典（按键）、范围。" },
     SemanticRow { topic: "异常", rule: "`抛出 表达式` 抛任意值；`尝试: ... 捕获 名字: ...`（或匿名 `捕获:`）在同一函数内捕获。只有显式 `抛出` 可捕获：除零（E007）、堆耗尽（E017）等 VM 故障与原生错误（E030/E031/E033）一律终止，不能被 `捕获` 拦下。没有 `最后`，一个 `尝试` 只能跟一个 `捕获`。" },
     SemanticRow { topic: "异常传播", rule: "抛出后按调用栈向外找最近的 `捕获`；展开时释放被跳过帧的局部槽（含闭包捕获槽）与操作数临时值，抛出值引用计数平衡。到最外层仍未捕获则 `jm_run` 返回 -1，错误为 `错误[E027] 未捕获的异常：<值>`。`返回`/`中断`/`继续` 离开 `尝试` 时都会先结束该层记录。" },
     SemanticRow { topic: "捕获变量", rule: "`捕获 名字` 绑定的名字是当前作用域的普通可写变量（函数内为局部槽，模块顶层为全局）；`捕获:` 不绑定名字，丢弃抛出值。" },
-    SemanticRow { topic: "内存", rule: "脚本对象都放在固定堆里（固件默认 6 KB）；闭包按引用计数释放，但闭包与列表/字典互相引用成环时 rc 不归零，这块堆不会回收（没有 GC），反复创建最终报 E_OOM；其余堆满也报 E_OOM，不会崩溃。" },
+    SemanticRow { topic: "内存", rule: "脚本对象都放在固定堆里（固件默认 6 KB）；闭包、容器与实例都按引用计数释放（实例释放时连带释放全部字段），但相互引用成环时 rc 不归零，这块堆不会回收（没有 GC，接受环引用泄漏），反复创建最终报 E_OOM；其余堆满也报 E_OOM，不会崩溃。单个实例带块头占 16+4×字段数 字节。" },
 ];
 
 struct LimitRow {
@@ -312,7 +329,8 @@ const LIMITS: &[LimitRow] = &[
     LimitRow { item: "列表元素/字典项", value: "各 255 个（字面量编译期）" },
     LimitRow { item: "调用层数", value: "32 层（JM_MAX_FRAMES）" },
     LimitRow { item: "尝试嵌套", value: "8 层（JM_MAX_TRY_DEPTH，超过报 E028）" },
-    LimitRow { item: "未捕获异常显示", value: "抛出值最多渲染 64 字节，超出截断" },
+    LimitRow { item: "未捕获异常显示", value: "固定 64 B 缓冲（60 B 正文 + 3 B「…」 + NUL）；正文放不下就截断并以「…」结尾，不会静默丢弃" },
+    LimitRow { item: "类", value: "255 个；每类字段 255 个、方法 255 个" },
     LimitRow { item: "值栈", value: "512 槽（JM_STACK_SLOTS）" },
     LimitRow { item: "脚本堆", value: "固件 6 KB / 宿主默认 12 KB" },
     LimitRow { item: "字节码", value: "单个函数 <64 KB，整包 <64 KB" },
@@ -398,13 +416,13 @@ const PITFALLS: &[Pitfall] = &[
         title: "闭包成环会一直占堆（没有 GC）",
         bad: "令 列表 = []\n令 回调 = 造回调(列表)\n列表追加(列表, 回调)",
         good: "只把闭包传给需要它的函数，不让它再被写回自己捕获的容器",
-        why: "闭包与它捕获的列表/字典互相引用时，引用计数无法归零，这块堆不会回收；反复创建这类环会逐步吃满堆，最终运行期报 E017（E_OOM）。当前没有标记清扫 GC（计划在 JM14）。",
+        why: "闭包与它捕获的列表/字典互相引用时，引用计数无法归零，这块堆不会回收；实例字段存回自身（如 `本.自己 = 本`）同样会成环。反复创建这类环会逐步吃满堆，最终运行期报 E017（E_OOM）。当前无 GC，接受环引用泄漏：别在实例字段里存回指自身/父级的引用。",
     },
     Pitfall {
-        title: "没有类和属性访问",
-        bad: "令 s = 对象.名字",
-        good: "令 s = 字典[\"名字\"]",
-        why: "`.` 属性访问与 `类/新建` 都被明确拒绝（E108/E103）；用字典加下标。",
+        title: "类没有继承；方法是“调用”，不是值",
+        bad: "类 子 继承 父:\n    函数 读():\n        返回 本.值\n令 f = c.读",
+        good: "类 计数器:\n    令 值 = 0\n    函数 读():\n        返回 本.值\n打印(c.读())",
+        why: "`继承` 仍是 v0 不支持的关键字（E103），没有父类与虚分派。方法只能 `对象.方法(...)` 调用；把方法当值取（`令 f = c.读`）拿不到方法，`本.读` 会直接报 E123，普通对象则运行期报 E035。",
     },
     Pitfall {
         title: "不要给未声明的名字赋值",
@@ -619,6 +637,7 @@ fn operand_name(o: Operand) -> &'static str {
         Operand::None => "无",
         Operand::U8 => "1 字节",
         Operand::U16 => "2 字节",
+        Operand::U8U8 => "1 字节 + 1 字节",
     }
 }
 
@@ -946,7 +965,7 @@ pub fn render_markdown() -> Result<String, String> {
     m.push_str(&format!("| 字节码 ABI | {} |\n", ABI_VERSION));
     m.push_str("| 编译 | `micc 源码.jsh -o 输出.jmb` |\n");
     m.push_str("| 运行 | STM32F103C8T6 固件内解释器；脚本堆固件 6 KB |\n\n");
-    m.push_str("砾是**中文关键字、缩进式、整数优先**的小语言。它跑在 20 KB RAM 的 MCU 上，整数是 29 位、小数是 Q12 定点；没有类、`最后` 和通用模块系统，异常用显式 `抛出` / `尝试` / `捕获`；闭包按值捕获且捕获变量只读；板级硬件能力通过 `导入 模块` 在编译期引入。\n\n");
+    m.push_str("砾是**中文关键字、缩进式、整数优先**的小语言。它跑在 20 KB RAM 的 MCU 上，整数是 29 位、小数是 Q12 定点；类没有继承，`最后` 和通用模块系统也没有，异常用显式 `抛出` / `尝试` / `捕获`；闭包按值捕获且捕获变量只读；板级硬件能力通过 `导入 模块` 在编译期引入。\n\n");
 
     m.push_str("## 关键字\n\n");
     m.push_str("可用：");
@@ -1182,7 +1201,11 @@ pub fn check() -> Result<(), String> {
             continue;
         }
         let text = read_or_fail(&ent.path(), "编译器源码")?;
-        for code in ["E102", "E103", "E104", "E105", "E106", "E107", "E108", "E109", "E110", "E111", "E112", "E113", "E114", "E115", "E116", "E117"] {
+        for code in [
+            "E102", "E103", "E104", "E105", "E106", "E107", "E108", "E109", "E110", "E111",
+            "E112", "E113", "E114", "E115", "E116", "E117", "E118", "E119", "E120", "E121",
+            "E122", "E123",
+        ] {
             if text.contains(&format!("\"{}\"", code)) && !used.iter().any(|u| u == code) {
                 used.push(code.to_string());
             }

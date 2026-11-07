@@ -26,10 +26,21 @@ pub struct CodeObj {
 }
 
 #[derive(Debug)]
+pub struct ClassObj {
+    pub name_idx: u8,
+    pub init_code: u8,
+    /// 字段名在名字表中的下标，按声明顺序。
+    pub fields: Vec<u8>,
+    /// `(方法名下标, 代码对象下标)`。
+    pub methods: Vec<(u8, u8)>,
+}
+
+#[derive(Debug)]
 pub struct Program {
     pub consts: Vec<ConstVal>,
     pub names: Vec<String>,
     pub codes: Vec<CodeObj>,
+    pub classes: Vec<ClassObj>,
     pub entry: u8,
 }
 
@@ -38,6 +49,9 @@ struct Builder {
     names: Vec<String>,
     name_map: HashMap<String, u8>,
     codes: Vec<CodeObj>,
+    classes: Vec<ClassObj>,
+    /// 类名 → 类表下标（`新建` 用）。
+    class_map: HashMap<String, u8>,
 }
 
 impl Builder {
@@ -47,6 +61,8 @@ impl Builder {
             names: Vec::new(),
             name_map: HashMap::new(),
             codes: Vec::new(),
+            classes: Vec::new(),
+            class_map: HashMap::new(),
         }
     }
 
@@ -66,6 +82,25 @@ impl Builder {
         self.names.push(name.to_string());
         self.name_map.insert(name.to_string(), i as u8);
         Ok(i as u8)
+    }
+
+    /// 在类表里找字段名下标。
+    fn class_field_idx(&self, class_idx: u8, name: &str) -> Option<u8> {
+        let c = self.classes.get(class_idx as usize)?;
+        c.fields
+            .iter()
+            .copied()
+            .find(|&ni| self.names.get(ni as usize).map(|s| s == name).unwrap_or(false))
+    }
+
+    /// 在类表里找方法名下标。
+    fn class_method_idx(&self, class_idx: u8, name: &str) -> Option<u8> {
+        let c = self.classes.get(class_idx as usize)?;
+        c.methods
+            .iter()
+            .copied()
+            .find(|&(ni, _)| self.names.get(ni as usize).map(|s| s == name).unwrap_or(false))
+            .map(|(ni, _)| ni)
     }
 
     fn const_int(&mut self, v: i64, line: u32, col: u32) -> Result<u8> {
@@ -177,6 +212,12 @@ struct FnState {
     is_module: bool,
     /// 顶层 `导入 模块` 汇总出来的原生函数名。
     imported: HashSet<String>,
+    /// 当前编译体所属的类（类表下标）；方法内及方法里的闭包会带上。
+    current_class: Option<u8>,
+    /// 编译字段默认值期间为 true：禁止引用 `本`（E120）。
+    self_blocked: bool,
+    /// 当前帧是 `初始化`：禁止显式 `返回`（E120）。
+    in_init: bool,
 }
 
 impl FnState {
@@ -186,6 +227,11 @@ impl FnState {
     fn emit_u8(&mut self, op: u8, a: u8) {
         self.code.push(op);
         self.code.push(a);
+    }
+    fn emit_u8u8(&mut self, op: u8, a: u8, b: u8) {
+        self.code.push(op);
+        self.code.push(a);
+        self.code.push(b);
     }
     fn here(&self) -> usize {
         self.code.len()
@@ -306,6 +352,104 @@ fn load_name(fs: &mut FnState, b: &mut Builder, name: &str, line: u32, col: u32)
     Ok(())
 }
 
+/// 装载 `本`：方法帧槽 0，或方法内闭包对槽 0 的捕获。
+fn load_self(fs: &mut FnState, line: u32, col: u32) -> Result<()> {
+    if fs.self_blocked {
+        return Err(CompileError::new(
+            "E120",
+            line,
+            col,
+            "字段默认值里不能引用「本」",
+        ));
+    }
+    if let Some(&slot) = fs.slots.get("本") {
+        fs.emit_u8(OP_LOAD_LOCAL, slot);
+        return Ok(());
+    }
+    if let Some(&slot) = fs.captures.get("本") {
+        fs.emit_u8(OP_LOAD_LOCAL, slot);
+        return Ok(());
+    }
+    if let Some(pslot) = fs.parent_slots.get("本").copied() {
+        if let Res::Capture(slot) = capture_from_parent(fs, "本", pslot, line, col)? {
+            fs.emit_u8(OP_LOAD_LOCAL, slot);
+            return Ok(());
+        }
+    }
+    Err(CompileError::new(
+        "E120",
+        line,
+        col,
+        "「本」只能在类方法（及其内部闭包）里使用",
+    ))
+}
+
+/// 取字段名的名字表下标；接收者是 `本` 时顺带做静态检查（E122/E123）。
+fn field_name_idx(
+    fs: &FnState,
+    b: &mut Builder,
+    receiver: &Expr,
+    name: &str,
+    line: u32,
+    col: u32,
+) -> Result<u8> {
+    if matches!(receiver.kind, ExprKind::SelfRef) {
+        if let Some(ci) = fs.current_class {
+            if b.class_method_idx(ci, name).is_some() {
+                return Err(CompileError::new(
+                    "E123",
+                    line,
+                    col,
+                    format!("「{}」是方法，不能当值使用（要调用请写 本.{}(...)）", name, name),
+                ));
+            }
+            if let Some(ni) = b.class_field_idx(ci, name) {
+                return Ok(ni);
+            }
+            return Err(CompileError::new(
+                "E122",
+                line,
+                col,
+                format!("类里没有字段「{}」", name),
+            ));
+        }
+    }
+    b.intern_name(name, line, col)
+}
+
+/// 取方法名的名字表下标；接收者是 `本` 时静态检查成员是否存在。
+fn method_name_idx(
+    fs: &FnState,
+    b: &mut Builder,
+    receiver: &Expr,
+    name: &str,
+    line: u32,
+    col: u32,
+) -> Result<u8> {
+    if matches!(receiver.kind, ExprKind::SelfRef) {
+        if let Some(ci) = fs.current_class {
+            if let Some(ni) = b.class_method_idx(ci, name) {
+                return Ok(ni);
+            }
+            if b.class_field_idx(ci, name).is_some() {
+                return Err(CompileError::new(
+                    "E123",
+                    line,
+                    col,
+                    format!("「{}」是字段，不是方法，不能调用", name),
+                ));
+            }
+            return Err(CompileError::new(
+                "E122",
+                line,
+                col,
+                format!("类里没有方法「{}」", name),
+            ));
+        }
+    }
+    b.intern_name(name, line, col)
+}
+
 fn collect_decls(stmts: &[Stmt], out: &mut Vec<String>) {
     for s in stmts {
         match &s.kind {
@@ -378,6 +522,19 @@ fn collect_free_expr(e: &Expr, bound: &HashSet<String>, out: &mut Vec<String>) {
             collect_free_expr(obj, bound, out);
             collect_free_expr(idx, bound, out);
         }
+        ExprKind::SelfRef => note_free(out, bound, "本"),
+        ExprKind::New(_, args) => {
+            for a in args {
+                collect_free_expr(a, bound, out);
+            }
+        }
+        ExprKind::Member(obj, _) => collect_free_expr(obj, bound, out),
+        ExprKind::MethodCall(obj, _, args) => {
+            collect_free_expr(obj, bound, out);
+            for a in args {
+                collect_free_expr(a, bound, out);
+            }
+        }
         _ => {}
     }
 }
@@ -398,6 +555,11 @@ fn collect_free_stmts(stmts: &[Stmt], bound: &HashSet<String>, out: &mut Vec<Str
                 collect_free_expr(idx, bound, out);
                 collect_free_expr(val, bound, out);
             }
+            StmtKind::AssignMember(obj, _, val) => {
+                collect_free_expr(obj, bound, out);
+                collect_free_expr(val, bound, out);
+            }
+            StmtKind::Class(_) => {}
             StmtKind::Expr(e) => collect_free_expr(e, bound, out),
             StmtKind::Return(Some(e)) => collect_free_expr(e, bound, out),
             StmtKind::Return(None) => {}
@@ -476,6 +638,9 @@ pub fn compile(stmts: &[Stmt]) -> Result<Program> {
         caps: Vec::new(),
     });
 
+    // 类先于模块代码编译：类表要在 `新建` 之前完整，方法体也独立成代码对象。
+    compile_classes(&mut b, stmts, &imported)?;
+
     let mut fs = FnState {
         code: Vec::new(),
         slots: HashMap::new(),
@@ -489,6 +654,9 @@ pub fn compile(stmts: &[Stmt]) -> Result<Program> {
         try_stack: Vec::new(),
         is_module: true,
         imported,
+        current_class: None,
+        self_blocked: false,
+        in_init: false,
     };
 
     // 顶层导入已校验；其余语句照常编译。嵌套的「导入」由 compile_stmt 拒绝。
@@ -507,8 +675,300 @@ pub fn compile(stmts: &[Stmt]) -> Result<Program> {
         consts: b.consts,
         names: b.names,
         codes: b.codes,
+        classes: b.classes,
         entry: 0,
     })
+}
+
+fn compile_classes(b: &mut Builder, stmts: &[Stmt], imported: &HashSet<String>) -> Result<()> {
+    // 顶层名字（类名不能与它们重名）。
+    let mut top = HashSet::new();
+    for s in stmts {
+        match &s.kind {
+            StmtKind::Let(n, _) | StmtKind::ForEach(n, ..) => {
+                top.insert(n.clone());
+            }
+            StmtKind::FuncDef { name, .. } => {
+                top.insert(name.clone());
+            }
+            _ => {}
+        }
+    }
+
+    // 第一遍：分配类下标（类名全局唯一）。
+    let mut decls: Vec<&ClassDecl> = Vec::new();
+    for s in stmts {
+        if let StmtKind::Class(c) = &s.kind {
+            if top.contains(&c.name) {
+                return Err(CompileError::new(
+                    "E119",
+                    s.line,
+                    1,
+                    format!("类名「{}」与顶层函数或变量重名", c.name),
+                ));
+            }
+            if b.class_map.contains_key(&c.name) {
+                return Err(CompileError::new(
+                    "E119",
+                    s.line,
+                    1,
+                    format!("类「{}」重复定义", c.name),
+                ));
+            }
+            if b.classes.len() >= 255 {
+                return Err(CompileError::new("E105", s.line, 1, "类超过 255 个"));
+            }
+            b.class_map.insert(c.name.clone(), b.classes.len() as u8);
+            b.classes.push(ClassObj {
+                name_idx: 0,
+                init_code: 0,
+                fields: Vec::new(),
+                methods: Vec::new(),
+            });
+            decls.push(c);
+        }
+    }
+
+    // 第二遍：类名 / 字段名 / 方法名进全局名字表，并做类内唯一性检查。
+    for (ci, c) in decls.iter().enumerate() {
+        let name_idx = b.intern_name(&c.name, 1, 1)?;
+        b.classes[ci].name_idx = name_idx;
+        if c.fields.len() > 255 || c.methods.len() > 255 {
+            return Err(CompileError::new("E105", 1, 1, "类的字段或方法超过 255 个"));
+        }
+        let mut members: HashSet<String> = HashSet::new();
+        for (fname, fexpr) in &c.fields {
+            if fname == "初始化" {
+                return Err(CompileError::new(
+                    "E119",
+                    fexpr.line,
+                    fexpr.col,
+                    "「初始化」是构造方法名，不能用作字段名",
+                ));
+            }
+            if !members.insert(fname.clone()) {
+                return Err(CompileError::new(
+                    "E119",
+                    fexpr.line,
+                    fexpr.col,
+                    format!("类「{}」里重复的成员名「{}」", c.name, fname),
+                ));
+            }
+        }
+        for m in &c.methods {
+            if !members.insert(m.name.clone()) {
+                return Err(CompileError::new(
+                    "E119",
+                    m.line,
+                    1,
+                    format!("类「{}」里重复的成员名「{}」", c.name, m.name),
+                ));
+            }
+        }
+        let mut fields = Vec::new();
+        for (fname, _) in &c.fields {
+            fields.push(b.intern_name(fname, 1, 1)?);
+        }
+        b.classes[ci].fields = fields;
+    }
+
+    // 第三遍：编译方法体与合成的初始化代码对象。
+    for (ci, c) in decls.iter().enumerate() {
+        let ci = ci as u8;
+        for m in &c.methods {
+            if m.name == "初始化" {
+                continue; // 构造方法只由合成的初始化代码真正执行
+            }
+            let midx = b.intern_name(&m.name, m.line, 1)?;
+            // 先占位登记名字，后面的方法才能静态看到前面的方法（E122 检查要用）。
+            let slot = b.classes[ci as usize].methods.len();
+            b.classes[ci as usize].methods.push((midx, 0));
+            let code = compile_method(b, ci, midx, &m.params, &m.body, imported, m.line)?;
+            b.classes[ci as usize].methods[slot].1 = code;
+        }
+        let init_code = compile_class_init(b, c, ci, imported)?;
+        b.classes[ci as usize].init_code = init_code;
+    }
+    Ok(())
+}
+
+/// 方法帧：槽 0 固定是 `本`，声明形参从槽 1 开始。
+fn compile_method(
+    b: &mut Builder,
+    class_idx: u8,
+    name_idx: u8,
+    params: &[String],
+    body: &[Stmt],
+    imported: &HashSet<String>,
+    line: u32,
+) -> Result<u8> {
+    let idx = b.codes.len();
+    if idx >= 255 {
+        return Err(CompileError::new("E106", line, 1, "函数超过 255 个"));
+    }
+    let idx = idx as u8;
+    b.codes.push(CodeObj {
+        name_idx,
+        nparams: params.len() as u8 + 1,
+        nlocals: params.len() as u8 + 1,
+        code: Vec::new(),
+        caps: Vec::new(),
+    });
+
+    let mut fs = FnState {
+        code: Vec::new(),
+        slots: HashMap::new(),
+        captures: HashMap::new(),
+        parent_slots: HashMap::new(),
+        caps: Vec::new(),
+        self_name: None,
+        nlocals: params.len() as u8 + 1,
+        temps: Vec::new(),
+        loops: Vec::new(),
+        try_stack: Vec::new(),
+        is_module: false,
+        imported: imported.clone(),
+        current_class: Some(class_idx),
+        self_blocked: false,
+        in_init: false,
+    };
+    fs.slots.insert("本".to_string(), 0);
+
+    for (i, p) in params.iter().enumerate() {
+        if native_spec::entry(p).is_some() {
+            return Err(CompileError::new(
+                "E115",
+                line,
+                1,
+                format!("原生函数名「{}」是保留名，不能当参数", p),
+            ));
+        }
+        if fs.slots.insert(p.clone(), (i + 1) as u8).is_some() {
+            return Err(CompileError::new("E109", line, 1, "参数重名"));
+        }
+    }
+    let mut decls = Vec::new();
+    collect_decls(body, &mut decls);
+    for d in decls {
+        if fs.slots.contains_key(&d) {
+            continue;
+        }
+        if fs.nlocals >= 255 {
+            return Err(CompileError::new("E104", line, 1, "局部变量超过 255 个"));
+        }
+        fs.slots.insert(d, fs.nlocals);
+        fs.nlocals += 1;
+    }
+
+    compile_stmts(&mut fs, b, body)?;
+
+    let nil = b.const_nil(line, 1)?;
+    fs.emit_u8(OP_CONST, nil);
+    fs.emit(OP_RETURN_METHOD);
+
+    b.codes[idx as usize].nlocals = fs.nlocals;
+    b.codes[idx as usize].caps = fs.caps;
+    b.codes[idx as usize].code = fs.code;
+    Ok(idx)
+}
+
+/// 合成初始化代码：字段默认值 → 用户 `初始化` 体 → 隐式 `返回 本`。
+fn compile_class_init(
+    b: &mut Builder,
+    c: &ClassDecl,
+    class_idx: u8,
+    imported: &HashSet<String>,
+) -> Result<u8> {
+    let user = c.methods.iter().find(|m| m.name == "初始化");
+    let params: Vec<String> = user.map(|m| m.params.clone()).unwrap_or_default();
+
+    let idx = b.codes.len();
+    if idx >= 255 {
+        return Err(CompileError::new("E106", 1, 1, "函数超过 255 个"));
+    }
+    let idx = idx as u8;
+    let name_idx = b.classes[class_idx as usize].name_idx;
+    b.codes.push(CodeObj {
+        name_idx,
+        nparams: params.len() as u8 + 1,
+        nlocals: params.len() as u8 + 1,
+        code: Vec::new(),
+        caps: Vec::new(),
+    });
+
+    let mut fs = FnState {
+        code: Vec::new(),
+        slots: HashMap::new(),
+        captures: HashMap::new(),
+        parent_slots: HashMap::new(),
+        caps: Vec::new(),
+        self_name: None,
+        nlocals: params.len() as u8 + 1,
+        temps: Vec::new(),
+        loops: Vec::new(),
+        try_stack: Vec::new(),
+        is_module: false,
+        imported: imported.clone(),
+        current_class: Some(class_idx),
+        self_blocked: false,
+        in_init: true,
+    };
+    fs.slots.insert("本".to_string(), 0);
+
+    for (i, p) in params.iter().enumerate() {
+        if native_spec::entry(p).is_some() {
+            return Err(CompileError::new(
+                "E115",
+                user.map(|m| m.line).unwrap_or(1),
+                1,
+                format!("原生函数名「{}」是保留名，不能当参数", p),
+            ));
+        }
+        if fs.slots.insert(p.clone(), (i + 1) as u8).is_some() {
+            return Err(CompileError::new(
+                "E109",
+                user.map(|m| m.line).unwrap_or(1),
+                1,
+                "参数重名",
+            ));
+        }
+    }
+    if let Some(u) = user {
+        let mut decls = Vec::new();
+        collect_decls(&u.body, &mut decls);
+        for d in decls {
+            if fs.slots.contains_key(&d) {
+                continue;
+            }
+            if fs.nlocals >= 255 {
+                return Err(CompileError::new("E104", u.line, 1, "局部变量超过 255 个"));
+            }
+            fs.slots.insert(d, fs.nlocals);
+            fs.nlocals += 1;
+        }
+    }
+
+    // 字段默认值：按声明顺序求值，禁止引用 `本`。
+    for (i, (_, fexpr)) in c.fields.iter().enumerate() {
+        fs.emit_u8(OP_LOAD_LOCAL, 0);
+        fs.self_blocked = true;
+        compile_expr(&mut fs, b, fexpr)?;
+        fs.self_blocked = false;
+        let fidx = b.classes[class_idx as usize].fields[i];
+        fs.emit_u8(OP_SET_FIELD, fidx);
+    }
+
+    if let Some(u) = user {
+        compile_stmts(&mut fs, b, &u.body)?;
+    }
+
+    fs.emit_u8(OP_LOAD_LOCAL, 0);
+    fs.emit(OP_RETURN_METHOD);
+
+    b.codes[idx as usize].nlocals = fs.nlocals;
+    b.codes[idx as usize].caps = fs.caps;
+    b.codes[idx as usize].code = fs.code;
+    Ok(idx)
 }
 
 fn compile_function(
@@ -518,6 +978,7 @@ fn compile_function(
     body: &[Stmt],
     parent_slots: HashMap<String, u8>,
     imported: &HashSet<String>,
+    current_class: Option<u8>,
     line: u32,
     col: u32,
 ) -> Result<u8> {
@@ -548,6 +1009,9 @@ fn compile_function(
         try_stack: Vec::new(),
         is_module: false,
         imported: imported.clone(),
+        current_class,
+        self_blocked: false,
+        in_init: false,
     };
 
     for (i, p) in params.iter().enumerate() {
@@ -607,6 +1071,17 @@ fn compile_stmt(fs: &mut FnState, b: &mut Builder, s: &Stmt) -> Result<()> {
                 "「导入」只能写在模块顶层",
             ));
         }
+        StmtKind::Class(_) => {
+            if !fs.is_module {
+                return Err(CompileError::new(
+                    "E118",
+                    s.line,
+                    1,
+                    "「类」只能写在模块顶层",
+                ));
+            }
+            // 顶层类已由 compile_classes 预编译，这里不生成模块字节码。
+        }
         StmtKind::Let(name, e) => {
             compile_expr(fs, b, e)?;
             store_name(fs, b, name, s.line, e.col)?;
@@ -620,6 +1095,12 @@ fn compile_stmt(fs: &mut FnState, b: &mut Builder, s: &Stmt) -> Result<()> {
             compile_expr(fs, b, idx)?;
             compile_expr(fs, b, val)?;
             fs.emit(OP_SET_ITEM);
+        }
+        StmtKind::AssignMember(obj, name, val) => {
+            let ni = field_name_idx(fs, b, obj, name, s.line, obj.col)?;
+            compile_expr(fs, b, obj)?;
+            compile_expr(fs, b, val)?;
+            fs.emit_u8(OP_SET_FIELD, ni);
         }
         StmtKind::Expr(e) => {
             compile_expr(fs, b, e)?;
@@ -792,7 +1273,17 @@ fn compile_stmt(fs: &mut FnState, b: &mut Builder, s: &Stmt) -> Result<()> {
                     }
                 }
             }
-            let idx = compile_function(b, name, params, body, visible, &fs.imported, s.line, 1)?;
+            let idx = compile_function(
+                b,
+                name,
+                params,
+                body,
+                visible,
+                &fs.imported,
+                fs.current_class,
+                s.line,
+                1,
+            )?;
             if b.codes[idx as usize].caps.is_empty() {
                 fs.emit_u8(OP_MAKE_FUNCTION, idx);
             } else {
@@ -801,6 +1292,14 @@ fn compile_stmt(fs: &mut FnState, b: &mut Builder, s: &Stmt) -> Result<()> {
             store_name(fs, b, name, s.line, 1)?;
         }
         StmtKind::Return(e) => {
+            if fs.in_init {
+                return Err(CompileError::new(
+                    "E120",
+                    s.line,
+                    e.as_ref().map(|x| x.col).unwrap_or(1),
+                    "「初始化」里不能写「返回」；构造结果固定为「本」",
+                ));
+            }
             for _ in 0..fs.try_stack.len() {
                 fs.emit(OP_TRY_END);
             }
@@ -811,7 +1310,12 @@ fn compile_stmt(fs: &mut FnState, b: &mut Builder, s: &Stmt) -> Result<()> {
                     fs.emit_u8(OP_CONST, nil);
                 }
             }
-            fs.emit(OP_RETURN);
+            // 方法帧的槽 0 是接收者，必须用 RETURN_METHOD 收尾。
+            if fs.slots.contains_key("本") {
+                fs.emit(OP_RETURN_METHOD);
+            } else {
+                fs.emit(OP_RETURN);
+            }
         }
     }
     Ok(())
@@ -1038,6 +1542,43 @@ fn compile_expr(fs: &mut FnState, b: &mut Builder, e: &Expr) -> Result<()> {
                 return Err(CompileError::new("E114", e.line, e.col, "实参超过 255 个"));
             }
             fs.emit_u8(OP_CALL, args.len() as u8);
+        }
+        ExprKind::SelfRef => {
+            load_self(fs, e.line, e.col)?;
+        }
+        ExprKind::New(cls, args) => {
+            let Some(&ci) = b.class_map.get(cls) else {
+                return Err(CompileError::new(
+                    "E121",
+                    e.line,
+                    e.col,
+                    format!("类「{}」没有定义", cls),
+                ));
+            };
+            fs.emit_u8(OP_NEW_INSTANCE, ci);
+            for a in args {
+                compile_expr(fs, b, a)?;
+            }
+            if args.len() > 255 {
+                return Err(CompileError::new("E114", e.line, e.col, "实参超过 255 个"));
+            }
+            fs.emit_u8u8(OP_CALL_INIT, ci, args.len() as u8);
+        }
+        ExprKind::Member(obj, name) => {
+            let ni = field_name_idx(fs, b, obj, name, e.line, e.col)?;
+            compile_expr(fs, b, obj)?;
+            fs.emit_u8(OP_GET_FIELD, ni);
+        }
+        ExprKind::MethodCall(obj, name, args) => {
+            let ni = method_name_idx(fs, b, obj, name, e.line, e.col)?;
+            compile_expr(fs, b, obj)?;
+            for a in args {
+                compile_expr(fs, b, a)?;
+            }
+            if args.len() > 255 {
+                return Err(CompileError::new("E114", e.line, e.col, "实参超过 255 个"));
+            }
+            fs.emit_u8u8(OP_CALL_METHOD, ni, args.len() as u8);
         }
         ExprKind::Index(obj, idx) => {
             compile_expr(fs, b, obj)?;
