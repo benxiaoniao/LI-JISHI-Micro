@@ -44,6 +44,31 @@ pub struct Program {
     pub entry: u8,
 }
 
+/// 名字表溢出时按 `包名::` 前缀统计占用（单文件编译没有前缀，算「入口包」）。
+/// 打包后多个包共用一张名字表，这条提示能直接指出是谁吃掉了名额。
+fn name_owner_hint(names: &[String]) -> String {
+    let mut counts: Vec<(String, usize)> = Vec::new();
+    for n in names {
+        let owner = match n.split_once("::") {
+            Some((p, _)) => p,
+            None => "<入口包>",
+        };
+        if let Some(e) = counts.iter_mut().find(|(k, _)| k == owner) {
+            e.1 += 1;
+        } else {
+            counts.push((owner.to_string(), 1));
+        }
+    }
+    counts.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    let top = counts
+        .iter()
+        .take(3)
+        .map(|(k, v)| format!("{} {}", k, v))
+        .collect::<Vec<_>>()
+        .join("，");
+    format!("已用满 255 个，占用最多的是：{}", top)
+}
+
 struct Builder {
     consts: Vec<ConstVal>,
     names: Vec<String>,
@@ -73,10 +98,13 @@ impl Builder {
         let i = self.names.len();
         if i >= 255 {
             return Err(CompileError::new(
-                "E105",
+                "E124",
                 line,
                 col,
-                "名字超过 255 个（Micro Core v0 的上限）",
+                format!(
+                    "名字表超过 255 个（Micro Core v0 的上限）；{}",
+                    name_owner_hint(&self.names)
+                ),
             ));
         }
         self.names.push(name.to_string());

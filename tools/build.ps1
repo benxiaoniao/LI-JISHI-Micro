@@ -49,6 +49,8 @@ try {
         if ($LASTEXITCODE -ne 0) { throw "错误用例失败" }
         & "$PSScriptRoot\test-native-import.ps1"
         if ($LASTEXITCODE -ne 0) { throw "原生导入回归失败" }
+        & "$PSScriptRoot\test-packages.ps1"
+        if ($LASTEXITCODE -ne 0) { throw "包用例失败" }
     }
     Write-Host "完成。"
 }

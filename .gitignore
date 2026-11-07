@@ -17,6 +17,9 @@
 /dist/
 .screenshots/
 
+# 包缓存（`micc install` 的产物；锁文件 .砾/锁.toml 要入库，保证可复现）
+.砾/包/
+
 # 本地工具链（体积大，不入库；由 tools/fetch-toolchain.ps1 安装）
 /tools/toolchains/arm-none-eabi/
 /tools/toolchains/host-gcc/

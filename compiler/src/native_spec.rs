@@ -12,6 +12,10 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 
+/// Native ABI 版本，与 `runtime/include/jm_native.h` 的 `JM_NATIVE_ABI_VERSION` 一致。
+/// 语言卡与打包都校验这一处；`micc --check-langcard` 会比对两边是否漂移。
+pub const NATIVE_ABI_VERSION: u8 = 1;
+
 pub struct NativeEntrySpec {
     pub name: &'static str,
     pub min_args: u8,

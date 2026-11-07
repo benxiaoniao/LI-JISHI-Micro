@@ -57,9 +57,10 @@ powershell -ExecutionPolicy Bypass -File tools\build.ps1
 ```
 
 脚本依次做：构建 `micc` → 校验原生表头 → 生成 `runtime/include/jm_opcodes.h` →
-构建 `build\jmrun.exe` → 编译 `examples\*.jsh` → 跑三套回归
+构建 `build\jmrun.exe` → 编译 `examples\*.jsh` → 跑四套回归
 （[test.ps1](tools/test.ps1) 输出用例、[test-errors.ps1](tools/test-errors.ps1) 错误码用例、
-[test-native-import.ps1](tools/test-native-import.ps1) 原生导入用例）。
+[test-native-import.ps1](tools/test-native-import.ps1) 原生导入用例、
+[test-packages.ps1](tools/test-packages.ps1) 包用例）。
 只想构建不跑回归时加 `-SkipTests`。
 
 单独编译/运行/反汇编：
@@ -95,6 +96,20 @@ compiler\target\release\micc.exe --emit-native-header
 
 规范来源：操作码在 [compiler/src/opcodes.rs](compiler/src/opcodes.rs)，板级原生函数在
 [compiler/src/native_spec.rs](compiler/src/native_spec.rs)，内建与错误码在运行时 C 侧。
+
+### 2.4 源码包（H4 最小切分）
+
+`砾包.toml` 声明包，`micc pack` 递归解析依赖并在源码层合并成一个 `.jmb`；
+`micc install` 生成 `.砾/锁.toml` 与 `.砾/包` 缓存，`--离线` 只读锁与缓存。
+规范见 [docs/包规范.md](docs/包规范.md)，可运行示例在 [examples/packages](examples/packages/说明.md)。
+
+```powershell
+compiler\target\release\micc.exe pack --目录 examples\packages\应用 -o build\packages-示例.jmb
+build\jmrun.exe build\packages-示例.jmb
+
+compiler\target\release\micc.exe install --目录 examples\packages\应用   # 生成锁与缓存
+compiler\target\release\micc.exe pack --目录 examples\packages\应用 --离线
+```
 
 ---
 

@@ -5,6 +5,10 @@ mod langcard;
 mod lexer;
 mod native_spec;
 mod opcodes;
+mod pack;
+mod pack_manifest;
+mod pack_merge;
+mod pack_resolve;
 mod parser;
 mod writer;
 
@@ -13,6 +17,8 @@ use std::process::exit;
 
 fn usage() {
     eprintln!("用法：micc <输入.jsh> [-o 输出.jmb] [--dump]");
+    eprintln!("      micc pack [--目录 <包目录>] [-o 输出.jmb] [--离线]");
+    eprintln!("      micc install [--目录 <包目录>] [--离线]");
     eprintln!("      micc --emit-header        # 导出 jm_opcodes.h");
     eprintln!("      micc --emit-native-header # 导出板级原生表头 f103_native_table.h");
     eprintln!("      micc --check-native       # CI 校验原生表头没漂移（不一致则退出码 1）");
@@ -60,6 +66,12 @@ fn main() {
             exit(1);
         }
         return;
+    }
+    if args[0] == "pack" {
+        exit(pack::cmd_pack(&args[1..]));
+    }
+    if args[0] == "install" {
+        exit(pack::cmd_install(&args[1..]));
     }
 
     let mut input: Option<PathBuf> = None;

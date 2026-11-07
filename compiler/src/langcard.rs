@@ -617,12 +617,20 @@ fn c_native_abi_version() -> Result<u8, String> {
         let line = line.trim();
         if let Some(rest) = line.strip_prefix("#define JM_NATIVE_ABI_VERSION") {
             let value = rest.trim().trim_end_matches('u').trim();
-            return value.parse::<u8>().map_err(|_| {
+            let parsed = value.parse::<u8>().map_err(|_| {
                 format!(
                     "jm_native.h 里 JM_NATIVE_ABI_VERSION 不是 0~255 的整数：{}",
                     value
                 )
-            });
+            })?;
+            if parsed != crate::native_spec::NATIVE_ABI_VERSION {
+                return Err(format!(
+                    "Native ABI 版本不一致：jm_native.h 是 v{}，native_spec.rs 是 v{}；请同步两侧",
+                    parsed,
+                    crate::native_spec::NATIVE_ABI_VERSION
+                ));
+            }
+            return Ok(parsed);
         }
     }
     Err("jm_native.h 里没找到 #define JM_NATIVE_ABI_VERSION".to_string())
@@ -1244,7 +1252,7 @@ pub fn check() -> Result<(), String> {
         for code in [
             "E102", "E103", "E104", "E105", "E106", "E107", "E108", "E109", "E110", "E111",
             "E112", "E113", "E114", "E115", "E116", "E117", "E118", "E119", "E120", "E121",
-            "E122", "E123",
+            "E122", "E123", "E124", "E125", "E126", "E127", "E128", "E129", "E130",
         ] {
             if text.contains(&format!("\"{}\"", code)) && !used.iter().any(|u| u == code) {
                 used.push(code.to_string());
