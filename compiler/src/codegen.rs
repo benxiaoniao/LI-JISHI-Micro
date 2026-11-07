@@ -15,11 +15,12 @@ pub enum ConstVal {
     False,
 }
 
-/// 语句级调试标记：指令流偏移 → 源码行号。
+/// 语句级调试标记：指令流偏移 → 源文件与行号。
 #[derive(Clone, Copy, Debug)]
 pub struct Mark {
     pub off: u32,
     pub line: u32,
+    pub file_id: u8,
 }
 
 #[derive(Debug)]
@@ -288,13 +289,18 @@ impl FnState {
         if let Some(last) = self.marks.last_mut() {
             if last.off == off {
                 last.line = line;
+                last.file_id = self.file_id;
                 return;
             }
-            if last.line == line {
+            if last.line == line && last.file_id == self.file_id {
                 return;
             }
         }
-        self.marks.push(Mark { off, line });
+        self.marks.push(Mark {
+            off,
+            line,
+            file_id: self.file_id,
+        });
     }
     fn jump(&mut self, op: u8) -> usize {
         let at = self.code.len() + 1;

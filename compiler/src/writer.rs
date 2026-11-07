@@ -77,12 +77,30 @@ fn encode_debug(prog: &Program) -> Result<Option<Vec<u8>>> {
     }
 
     // 先编码行记录（偏移相对代码对象起点），再回填代码目录。
+    // 多文件时每条记录前置一个文件标签：0 = 沿用上一条，k = file_id + 1。
+    let multi_file = files.len() > 1;
     let mut record_blobs: Vec<Vec<u8>> = Vec::new();
     for c in &prog.codes {
         let mut blob = Vec::new();
         let mut prev_off = 0u32;
         let mut prev_line = 0u32;
+        let mut prev_file = 0u8;
         for (i, m) in c.marks.iter().enumerate() {
+            if multi_file {
+                if m.file_id as usize >= files.len() {
+                    return Err(CompileError::new(
+                        "E131",
+                        1,
+                        1,
+                        "调试标记引用了不存在的源文件（编译器内部错误）",
+                    ));
+                }
+                if i == 0 || m.file_id != prev_file {
+                    blob.push(m.file_id + 1);
+                } else {
+                    blob.push(0);
+                }
+            }
             if i == 0 {
                 put_var(m.off.min(65535) as u16, &mut blob);
                 put_var(m.line.min(65535) as u16, &mut blob);
@@ -101,6 +119,7 @@ fn encode_debug(prog: &Program) -> Result<Option<Vec<u8>>> {
             }
             prev_off = m.off;
             prev_line = m.line;
+            prev_file = m.file_id;
         }
         record_blobs.push(blob);
     }
@@ -114,7 +133,7 @@ fn encode_debug(prog: &Program) -> Result<Option<Vec<u8>>> {
     let mut section = Vec::new();
     section.extend_from_slice(b"DBG1");
     section.push(1); // 版本
-    section.push(0); // flags
+    section.push(if multi_file { 2 } else { 0 }); // flags：bit1 = 每条记录带文件标签
     section.push(files.len() as u8);
     section.push(prog.codes.len() as u8);
     section.extend_from_slice(&(header_len as u16).to_le_bytes());

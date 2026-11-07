@@ -13,6 +13,8 @@ pub struct CodeEntry {
 pub struct DebugEntry {
     pub off: u16,
     pub line: u16,
+    /// 该条记录所属源文件；多包合并时同一条指令流里可以有多个文件。
+    pub file_id: u8,
 }
 
 pub struct CodeDebug {
@@ -157,6 +159,7 @@ fn parse_debug(bytes: &[u8], ncodes: usize, max_code_end: usize) -> Option<Debug
     let files_off = u16_at(section, 8)? as usize;
     let codes_off = u16_at(section, 10)? as usize;
     let str_off = u16_at(section, 12)? as usize;
+    let per_record_file = section[5] & 2 != 0;
     if files_off + 2 * nfiles > section.len()
         || codes_off + 6 * ncode_dbg > section.len()
         || str_off > section.len()
@@ -184,7 +187,21 @@ fn parse_debug(bytes: &[u8], ncodes: usize, max_code_end: usize) -> Option<Debug
         let end = start + section.len();
         let mut prev_off = 0u32;
         let mut prev_line = 0u32;
+        let mut cur_file = file_id;
         for j in 0..nentries {
+            if per_record_file {
+                if pos >= end {
+                    return None;
+                }
+                let tag = bytes[pos];
+                pos += 1;
+                if tag != 0 {
+                    cur_file = tag - 1;
+                    if cur_file as usize >= nfiles {
+                        return None;
+                    }
+                }
+            }
             let (a, np) = read_var(bytes, pos, end)?;
             let (b, np2) = read_var(bytes, np, end)?;
             pos = np2;
@@ -202,6 +219,7 @@ fn parse_debug(bytes: &[u8], ncodes: usize, max_code_end: usize) -> Option<Debug
             entries.push(DebugEntry {
                 off: prev_off as u16,
                 line: prev_line as u16,
+                file_id: cur_file,
             });
         }
         codes.push(CodeDebug { file_id, entries });
@@ -220,15 +238,23 @@ impl Image {
             return None;
         }
         let e = &c.entries[idx - 1];
-        Some((d.files.get(c.file_id as usize)?.as_str(), e.line))
+        Some((d.files.get(e.file_id as usize)?.as_str(), e.line))
     }
 
     pub fn file_id(&self, name: &str) -> Option<u8> {
         let d = self.debug.as_ref()?;
         let norm = name.replace('\\', "/");
-        d.files.iter().position(|f| {
-            f == &norm || f.ends_with(&format!("/{}", norm)) || f.ends_with(&norm)
-        }).map(|i| i as u8)
+        let norm = norm.trim_start_matches("//?/");
+        d.files
+            .iter()
+            .position(|f| {
+                let f = f.replace('\\', "/");
+                let f = f.trim_start_matches("//?/");
+                f == norm
+                    || f.ends_with(&format!("/{}", norm))
+                    || norm.ends_with(&format!("/{}", f))
+            })
+            .map(|i| i as u8)
     }
 }
 
@@ -246,17 +272,17 @@ pub fn spans_of_line(image: &Image, file_id: Option<u8>, line: u16) -> Vec<LineS
         return out;
     };
     for (ci, c) in d.codes.iter().enumerate() {
-        if let Some(f) = file_id {
-            if c.file_id != f {
-                continue;
-            }
-        }
         let Some(ce) = image.codes.get(ci) else {
             continue;
         };
         for (i, e) in c.entries.iter().enumerate() {
             if e.line != line {
                 continue;
+            }
+            if let Some(f) = file_id {
+                if e.file_id != f {
+                    continue;
+                }
             }
             let end = c
                 .entries
@@ -298,7 +324,14 @@ pub fn dump(image: &Image) -> String {
                     c.entries.len()
                 ));
                 for e in &c.entries {
-                    s.push_str(&format!("  {:04}  行 {}\n", e.off, e.line));
+                    if d.files.len() > 1 {
+                        s.push_str(&format!(
+                            "  {:04}  文件 {} 行 {}\n",
+                            e.off, e.file_id, e.line
+                        ));
+                    } else {
+                        s.push_str(&format!("  {:04}  行 {}\n", e.off, e.line));
+                    }
                 }
             }
         }

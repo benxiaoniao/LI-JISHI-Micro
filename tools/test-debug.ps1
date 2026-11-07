@@ -136,6 +136,8 @@ try {
     Write-Utf8 (Join-Path $tool "工具.jsh") @"
 函数 加一(数)：
     返回 数 + 1
+
+令 基 = 41
 "@
     Write-Utf8Bom (Join-Path $app "砾包.toml") @"
 [包]
@@ -170,6 +172,83 @@ try {
     }
     $d = (& $micc --debug-dump $appJmb 2>&1 | Out-String)
     Check "调试表列出两个源文件" (($d -match "工具\.jsh") -and ($d -match "应用\.jsh")) $d
+
+    # ---------- 6. 依赖包顶层 `令` 归属依赖自己的文件 ----------
+    $rl = LinesOf $appJmb "工具.jsh" 4
+    $sl = FirstSpan $rl.text
+    Check "依赖包顶层令能反查到工具.jsh" (($rl.code -eq 0) -and $sl) $rl.text
+    if ($sl) {
+        $bl = LineOf $appJmb $sl.code $sl.start
+        Check "依赖包顶层令正向指回工具.jsh:4（不是根包）" `
+            (($bl.code -eq 0) -and $bl.text.EndsWith("工具.jsh:4")) $bl.text
+    }
+    $ra1 = LinesOf $appJmb "应用.jsh" 1
+    $sa1 = FirstSpan $ra1.text
+    if ($sa1) {
+        $ba1 = LineOf $appJmb $sa1.code $sa1.start
+        Check "根包顶层令仍指向应用.jsh:1" `
+            (($ba1.code -eq 0) -and $ba1.text.EndsWith("应用.jsh:1")) $ba1.text
+    }
+
+    # 依赖包顶层执行时出错，错误位置应落到依赖文件
+    $errPkgRoot = Join-Path $sandbox "报错包"
+    $errTool = Join-Path $errPkgRoot "工具"
+    $errApp = Join-Path $errPkgRoot "应用"
+    New-Item -ItemType Directory -Path $errTool -Force | Out-Null
+    New-Item -ItemType Directory -Path $errApp -Force | Out-Null
+    Write-Utf8Bom (Join-Path $errTool "砾包.toml") @"
+[包]
+名字 = "工具"
+版本 = "1.0.0"
+入口 = "工具.jsh"
+"@
+    Write-Utf8 (Join-Path $errTool "工具.jsh") "令 零 = 0`n令 坏 = 1 // 零`n"
+    Write-Utf8Bom (Join-Path $errApp "砾包.toml") @"
+[包]
+名字 = "应用"
+版本 = "1.0.0"
+入口 = "应用.jsh"
+
+[依赖]
+工具 = { 路径 = "../工具", 版本 = "^1.0.0" }
+"@
+    Write-Utf8 (Join-Path $errApp "应用.jsh") "打印(`"不应运行`")`n"
+    & $micc pack --目录 $errApp | Out-Null
+    $errPkgJmb = Join-Path $errApp "应用.jmb"
+    if (Test-Path $errPkgJmb) {
+        $ep = (& $jmrun $errPkgJmb 2>&1 | Out-String)
+        Check "依赖包顶层运行期错误指向依赖文件" `
+            (($ep -match "E007") -and $ep.Contains("工具.jsh:2")) $ep
+    } else {
+        Check "依赖包顶层运行期错误指向依赖文件" $false "打包失败"
+    }
+
+    # ---------- 7. jmrun 运行期错误带源码位置 ----------
+    $errSrc = Join-Path $sandbox "错误.jsh"
+    Write-Utf8 $errSrc "令 甲 = 6`n令 乙 = 0`n打印(甲 // 乙)`n"
+    $errJmb = Join-Path $sandbox "错误.jmb"
+    & $micc $errSrc -o $errJmb | Out-Null
+    $errOut = (& $jmrun $errJmb 2>&1 | Out-String)
+    Check "运行期错误附带 文件:行" `
+        (($LASTEXITCODE -eq 1) -and ($errOut -match "E007") -and ($errOut -match "错误\.jsh:3")) $errOut
+
+    $errStripJmb = Join-Path $sandbox "错误-剥离.jmb"
+    & $micc $errSrc -o $errStripJmb --strip-debug | Out-Null
+    $errStripOut = (& $jmrun $errStripJmb 2>&1 | Out-String)
+    Check "无调试段时错误输出退回原样（无文件:行）" `
+        (($LASTEXITCODE -eq 1) -and ($errStripOut -match "E007") -and ($errStripOut -notmatch "于 ")) $errStripOut
+
+    # ---------- 8. jmrun --break ----------
+    $multiSpec = $f.Replace('\', '/') + ":2"
+    $hitOut = (& $jmrun --break $multiSpec $jmb 2>&1 | Out-String)
+    Check "断点命中并打印源码行" `
+        (($LASTEXITCODE -eq 0) -and ($hitOut -match "断点：") -and ($hitOut -match ":2")) $hitOut
+    $missOut = (& $jmrun --break ($f.Replace('\', '/') + ":999") $jmb 2>&1 | Out-String)
+    Check "断点行号不存在时明确拒绝" `
+        (($LASTEXITCODE -eq 2) -and ($missOut -match "断点无法落地")) $missOut
+    $stripBpOut = (& $jmrun --break $multiSpec $strip 2>&1 | Out-String)
+    Check "剥离后无法使用断点（无调试信息）" `
+        (($LASTEXITCODE -eq 2) -and ($stripBpOut -match "断点无法落地")) $stripBpOut
 
     Write-Host ("共 " + $total + " 个用例，失败 " + $fail + " 个")
     if ($fail -gt 0) { exit 1 }

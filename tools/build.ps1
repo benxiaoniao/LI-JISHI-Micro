@@ -25,7 +25,7 @@ try {
     Write-Host "== 4/5 构建主机运行时"
     if (-not $HostGcc) { throw "没有主机 gcc，无法构建 jmrun" }
     New-Item -ItemType Directory -Force -Path "build" | Out-Null
-    & $HostGcc -std=c99 -Wall -Wextra -O2 `
+    & $HostGcc -std=c99 -Wall -Wextra -O2 -DJM_HOST_DEBUG `
         -I "runtime\include" -I "runtime\src" `
         "runtime\src\jm_heap.c" "runtime\src\jm_vm.c" "runtime\src\jm_builtin.c" `
         "runtime\src\jm_loader.c" "runtime\src\jm_error.c" "runtime\src\jm_native.c" `

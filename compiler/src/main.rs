@@ -260,7 +260,7 @@ fn main() {
         }
     };
 
-    let file_name = input.to_string_lossy().replace('\\', "/");
+    let file_name = pack::display_path(&input);
     match compile_source_opts(&src, &[file_name], !strip_debug) {
         Ok((enc, dump_text)) => {
             if dump {

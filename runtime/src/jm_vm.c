@@ -2,6 +2,20 @@
 
 JmState jm_state;
 
+#ifdef JM_HOST_DEBUG
+/* 由主机端口（runtime/port/host/jm_main.c）实现；返回非 0 表示命中断点。 */
+int jm_host_break_hit(uint8_t code_idx, uint16_t ip);
+
+int jm_last_error_site(uint8_t *code_idx, uint16_t *ip) {
+    if (!jm_state.has_err || !code_idx || !ip) {
+        return -1;
+    }
+    *code_idx = (uint8_t)jm_state.err.code_idx;
+    *ip = (uint16_t)jm_state.err.ip;
+    return 0;
+}
+#endif
+
 int jm_fail(JmState *st, int code, const char *detail) {
     return jm_fail_aux(st, code, detail, 0);
 }
@@ -945,6 +959,11 @@ int jm_execute(JmState *st) {
 
     while (1) {
         cur_ip = ip;
+#ifdef JM_HOST_DEBUG
+        if (jm_host_break_hit(cur_code, cur_ip)) {
+            goto done;
+        }
+#endif
         if (ip >= clen) {
             VM_FAIL(E_OPCODE, "指令流越界");
         }

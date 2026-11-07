@@ -269,12 +269,20 @@ fn load_tree(opts: &Opts) -> Result<Tree> {
 }
 
 /// 调试表里的源文件名：尽量相对当前目录，统一用 `/`。
-fn entry_display(pkg: &Resolved) -> String {
-    let path = pkg.dir.join(&pkg.manifest.entry);
-    let abs = path.canonicalize().unwrap_or(path);
-    let cwd = std::env::current_dir().unwrap_or_default();
-    let rel = abs.strip_prefix(&cwd).unwrap_or(&abs);
+pub(crate) fn display_path(path: &std::path::Path) -> String {
+    let abs = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let cwd = std::env::current_dir()
+        .ok()
+        .and_then(|p| p.canonicalize().ok());
+    let rel = cwd
+        .as_ref()
+        .and_then(|c| abs.strip_prefix(c).ok())
+        .unwrap_or(&abs);
     rel.to_string_lossy().replace('\\', "/")
+}
+
+fn entry_display(pkg: &Resolved) -> String {
+    display_path(&pkg.dir.join(&pkg.manifest.entry))
 }
 
 fn parse_entry(pkg: &Resolved) -> Result<Vec<crate::ast::Stmt>> {
