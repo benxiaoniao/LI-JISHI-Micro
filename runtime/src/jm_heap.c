@@ -196,6 +196,22 @@ JmDec *jm_dec_new_obj(int32_t raw) {
     return d;
 }
 
+JmClosure *jm_closure_new_obj(uint8_t code_idx, uint8_t ncap) {
+    JmClosure *c = (JmClosure *)jm_obj_alloc(
+        JM_T_CLOSURE,
+        (sizeof(JmClosure) - sizeof(JmObj)) + (size_t)ncap * sizeof(JmValue));
+    if (!c) {
+        return NULL;
+    }
+    c->code_idx = code_idx;
+    c->ncap = ncap;
+    c->pad = 0;
+    for (uint8_t i = 0; i < ncap; i++) {
+        c->caps[i] = JM_UNDEF;
+    }
+    return c;
+}
+
 int jm_list_reserve(JmState *st, JmList *l, uint32_t need) {
     if (l->cap >= need) {
         return 0;
@@ -343,6 +359,13 @@ static void free_obj(JmValue v) {
     }
     case JM_T_RANGE:
         break;
+    case JM_T_CLOSURE: {
+        JmClosure *c = (JmClosure *)o;
+        for (uint8_t i = 0; i < c->ncap; i++) {
+            jm_release(c->caps[i]);
+        }
+        break;
+    }
     default:
         break;
     }

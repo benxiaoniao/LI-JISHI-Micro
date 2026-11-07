@@ -210,6 +210,9 @@ int jm_repr(JmState *st, JmValue v, int quoted, JmSink sink, void *ctx, int dept
         case JM_T_ITER:
             S("<迭代器>");
             return 0;
+        case JM_T_CLOSURE:
+            S("<函数>");
+            return 0;
         default:
             S("<对象>");
             return 0;

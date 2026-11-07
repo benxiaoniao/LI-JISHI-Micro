@@ -21,6 +21,8 @@ pub struct CodeObj {
     pub nparams: u8,
     pub nlocals: u8,
     pub code: Vec<u8>,
+    /// 闭包捕获表：`(父帧槽, 子帧槽)`，按出现顺序排列。
+    pub caps: Vec<(u8, u8)>,
 }
 
 #[derive(Debug)]
@@ -153,7 +155,14 @@ struct LoopCtx {
 struct FnState {
     code: Vec<u8>,
     slots: HashMap<String, u8>,
-    parent_names: Vec<String>,
+    /// 本函数捕获的外层变量：名字 → 本帧槽（只读）。
+    captures: HashMap<String, u8>,
+    /// 父帧里可见的槽：名字 → 父帧槽。
+    parent_slots: HashMap<String, u8>,
+    /// 本函数的捕获表，按首次出现顺序追加。
+    caps: Vec<(u8, u8)>,
+    /// 正在编译的函数名，用于拒绝「捕获自己的名字」。
+    self_name: Option<String>,
     nlocals: u8,
     temps: Vec<u8>,
     loops: Vec<LoopCtx>,
@@ -202,25 +211,56 @@ impl FnState {
 
 enum Res {
     Local(u8),
+    /// 闭包捕获槽：读可以，写报 E117。
+    Capture(u8),
     Global(u8),
 }
 
-fn resolve(fs: &FnState, b: &mut Builder, name: &str, line: u32, col: u32) -> Result<Res> {
+fn resolve(fs: &mut FnState, b: &mut Builder, name: &str, line: u32, col: u32) -> Result<Res> {
     if !fs.is_module {
         if let Some(&slot) = fs.slots.get(name) {
             return Ok(Res::Local(slot));
         }
-        if fs.parent_names.iter().any(|n| n == name) {
-            return Err(CompileError::new(
-                "E101",
-                line,
-                col,
-                format!("闭包暂不支持：内层函数读到了外层的局部变量「{}」", name),
-            )
-            .with_hint("v0 只有模块级函数；需要共享数据就放模块级「令」"));
+        if let Some(&slot) = fs.captures.get(name) {
+            return Ok(Res::Capture(slot));
+        }
+        if let Some(&pslot) = fs.parent_slots.get(name) {
+            return capture_from_parent(fs, name, pslot, line, col);
         }
     }
     Ok(Res::Global(b.intern_name(name, line, col)?))
+}
+
+/// 在父帧槽 `pslot` 与子帧之间建立捕获：本帧分配一个新槽并记进捕获表。
+fn capture_from_parent(
+    fs: &mut FnState,
+    name: &str,
+    pslot: u8,
+    line: u32,
+    col: u32,
+) -> Result<Res> {
+    if fs.self_name.as_deref() == Some(name) {
+        return Err(CompileError::new(
+            "E117",
+            line,
+            col,
+            format!("函数「{}」不能捕获自己的名字", name),
+        )
+        .with_hint("要递归请把函数定义在模块顶层，通过全局名字调用"));
+    }
+    if fs.nlocals >= 255 {
+        return Err(CompileError::new(
+            "E116",
+            line,
+            col,
+            format!("闭包捕获的变量超过 255 个（卡在「{}」）", name),
+        ));
+    }
+    let slot = fs.nlocals;
+    fs.nlocals += 1;
+    fs.captures.insert(name.to_string(), slot);
+    fs.caps.push((pslot, slot));
+    Ok(Res::Capture(slot))
 }
 
 fn store_name(fs: &mut FnState, b: &mut Builder, name: &str, line: u32, col: u32) -> Result<()> {
@@ -234,6 +274,17 @@ fn store_name(fs: &mut FnState, b: &mut Builder, name: &str, line: u32, col: u32
     }
     match resolve(fs, b, name, line, col)? {
         Res::Local(s) => fs.emit_u8(OP_STORE_LOCAL, s),
+        Res::Capture(_) => {
+            return Err(CompileError::new(
+                "E117",
+                line,
+                col,
+                format!("「{}」是闭包捕获的变量，不能赋值", name),
+            )
+            .with_hint(
+                "闭包按值捕获、只读；要改状态就放模块级「令」，或在本函数里用「令」新建同名局部变量",
+            ));
+        }
         Res::Global(g) => fs.emit_u8(OP_STORE_GLOBAL, g),
     }
     Ok(())
@@ -241,7 +292,7 @@ fn store_name(fs: &mut FnState, b: &mut Builder, name: &str, line: u32, col: u32
 
 fn load_name(fs: &mut FnState, b: &mut Builder, name: &str, line: u32, col: u32) -> Result<()> {
     match resolve(fs, b, name, line, col)? {
-        Res::Local(s) => fs.emit_u8(OP_LOAD_LOCAL, s),
+        Res::Local(s) | Res::Capture(s) => fs.emit_u8(OP_LOAD_LOCAL, s),
         Res::Global(g) => fs.emit_u8(OP_LOAD_GLOBAL, g),
     }
     Ok(())
@@ -263,6 +314,101 @@ fn collect_decls(stmts: &[Stmt], out: &mut Vec<String>) {
             }
             StmtKind::While(_, body) | StmtKind::Repeat(_, body) => collect_decls(body, out),
             _ => {}
+        }
+    }
+}
+
+fn note_free(out: &mut Vec<String>, bound: &HashSet<String>, name: &str) {
+    if !bound.contains(name) && !out.iter().any(|n| n == name) {
+        out.push(name.to_string());
+    }
+}
+
+fn collect_free_expr(e: &Expr, bound: &HashSet<String>, out: &mut Vec<String>) {
+    match &e.kind {
+        ExprKind::Name(n) => note_free(out, bound, n),
+        ExprKind::List(items) => {
+            for it in items {
+                collect_free_expr(it, bound, out);
+            }
+        }
+        ExprKind::Dict(pairs) => {
+            for (k, v) in pairs {
+                collect_free_expr(k, bound, out);
+                collect_free_expr(v, bound, out);
+            }
+        }
+        ExprKind::Bin(_, l, r) => {
+            collect_free_expr(l, bound, out);
+            collect_free_expr(r, bound, out);
+        }
+        ExprKind::Unary(_, x) => collect_free_expr(x, bound, out),
+        ExprKind::Compare(first, pairs) => {
+            collect_free_expr(first, bound, out);
+            for (_, x) in pairs {
+                collect_free_expr(x, bound, out);
+            }
+        }
+        ExprKind::Call(callee, args) => {
+            collect_free_expr(callee, bound, out);
+            for a in args {
+                collect_free_expr(a, bound, out);
+            }
+        }
+        ExprKind::Index(obj, idx) => {
+            collect_free_expr(obj, bound, out);
+            collect_free_expr(idx, bound, out);
+        }
+        _ => {}
+    }
+}
+
+/// 收集函数体里的自由名字（不含本函数参数与声明）。
+/// 嵌套函数体内的自由名字也会冒泡到本层，供中间层提前建立捕获。
+fn collect_free_stmts(stmts: &[Stmt], bound: &HashSet<String>, out: &mut Vec<String>) {
+    for s in stmts {
+        match &s.kind {
+            StmtKind::Import(_) | StmtKind::Break | StmtKind::Continue => {}
+            StmtKind::Let(_, e) => collect_free_expr(e, bound, out),
+            StmtKind::Assign(n, e) => {
+                collect_free_expr(e, bound, out);
+                note_free(out, bound, n);
+            }
+            StmtKind::AssignIndex(obj, idx, val) => {
+                collect_free_expr(obj, bound, out);
+                collect_free_expr(idx, bound, out);
+                collect_free_expr(val, bound, out);
+            }
+            StmtKind::Expr(e) => collect_free_expr(e, bound, out),
+            StmtKind::Return(Some(e)) => collect_free_expr(e, bound, out),
+            StmtKind::Return(None) => {}
+            StmtKind::If {
+                branches,
+                else_body,
+            } => {
+                for (c, body) in branches {
+                    collect_free_expr(c, bound, out);
+                    collect_free_stmts(body, bound, out);
+                }
+                if let Some(body) = else_body {
+                    collect_free_stmts(body, bound, out);
+                }
+            }
+            StmtKind::While(c, body) | StmtKind::Repeat(c, body) => {
+                collect_free_expr(c, bound, out);
+                collect_free_stmts(body, bound, out);
+            }
+            StmtKind::ForEach(_, iterable, body) => {
+                collect_free_expr(iterable, bound, out);
+                collect_free_stmts(body, bound, out);
+            }
+            StmtKind::FuncDef { params, body, .. } => {
+                let mut child_bound: HashSet<String> = params.iter().cloned().collect();
+                let mut decls = Vec::new();
+                collect_decls(body, &mut decls);
+                child_bound.extend(decls);
+                collect_free_stmts(body, &child_bound, out);
+            }
         }
     }
 }
@@ -295,12 +441,16 @@ pub fn compile(stmts: &[Stmt]) -> Result<Program> {
         nparams: 0,
         nlocals: 0,
         code: Vec::new(),
+        caps: Vec::new(),
     });
 
     let mut fs = FnState {
         code: Vec::new(),
         slots: HashMap::new(),
-        parent_names: Vec::new(),
+        captures: HashMap::new(),
+        parent_slots: HashMap::new(),
+        caps: Vec::new(),
+        self_name: None,
         nlocals: 0,
         temps: Vec::new(),
         loops: Vec::new(),
@@ -333,7 +483,7 @@ fn compile_function(
     name: &str,
     params: &[String],
     body: &[Stmt],
-    parent_names: &[String],
+    parent_slots: HashMap<String, u8>,
     imported: &HashSet<String>,
     line: u32,
     col: u32,
@@ -349,12 +499,16 @@ fn compile_function(
         nparams: params.len() as u8,
         nlocals: params.len() as u8,
         code: Vec::new(),
+        caps: Vec::new(),
     });
 
     let mut fs = FnState {
         code: Vec::new(),
         slots: HashMap::new(),
-        parent_names: parent_names.to_vec(),
+        captures: HashMap::new(),
+        parent_slots,
+        caps: Vec::new(),
+        self_name: Some(name.to_string()),
         nlocals: params.len() as u8,
         temps: Vec::new(),
         loops: Vec::new(),
@@ -397,6 +551,7 @@ fn compile_function(
     fs.emit(OP_RETURN);
 
     b.codes[idx as usize].nlocals = fs.nlocals;
+    b.codes[idx as usize].caps = fs.caps;
     b.codes[idx as usize].code = fs.code;
     Ok(idx)
 }
@@ -533,12 +688,35 @@ fn compile_stmt(fs: &mut FnState, b: &mut Builder, s: &Stmt) -> Result<()> {
             fs.patch(j, target);
         }
         StmtKind::FuncDef { name, params, body } => {
-            let mut parent = fs.parent_names.clone();
-            for k in fs.slots.keys() {
-                parent.push(k.clone());
+            // 父帧里可见的名字：本帧局部槽 + 本帧已有的捕获槽。
+            let mut visible: HashMap<String, u8> = fs.slots.clone();
+            for (n, slot) in &fs.captures {
+                visible.insert(n.clone(), *slot);
             }
-            let idx = compile_function(b, name, params, body, &parent, &fs.imported, s.line, 1)?;
-            fs.emit_u8(OP_MAKE_FUNCTION, idx);
+            // 子函数（含更深层）用到、但本帧还没有的祖先变量，先让本帧捕获，
+            // 这样多层闭包就能沿捕获槽一层层传下去。
+            let mut child_bound: HashSet<String> = params.iter().cloned().collect();
+            let mut decls = Vec::new();
+            collect_decls(body, &mut decls);
+            child_bound.extend(decls);
+            let mut free = Vec::new();
+            collect_free_stmts(body, &child_bound, &mut free);
+            for n in free {
+                if visible.contains_key(&n) {
+                    continue;
+                }
+                if fs.parent_slots.contains_key(&n) {
+                    if let Res::Capture(slot) = resolve(fs, b, &n, s.line, 1)? {
+                        visible.insert(n, slot);
+                    }
+                }
+            }
+            let idx = compile_function(b, name, params, body, visible, &fs.imported, s.line, 1)?;
+            if b.codes[idx as usize].caps.is_empty() {
+                fs.emit_u8(OP_MAKE_FUNCTION, idx);
+            } else {
+                fs.emit_u8(OP_MAKE_CLOSURE, idx);
+            }
             store_name(fs, b, name, s.line, 1)?;
         }
         StmtKind::Return(e) => {

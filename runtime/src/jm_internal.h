@@ -59,6 +59,8 @@ static inline JmValue jm_v_builtin(uint8_t id) {
 #define JM_T_ITER 4u
 #define JM_T_RANGE 5u
 #define JM_T_DEC 6u
+/* 闭包：代码对象下标 + 捕获槽的值（按值快照、只读）。 */
+#define JM_T_CLOSURE 7u
 
 /* 小数：Q12 定点，raw = 真实值 × 4096。
  * raw 用完整 int32（不是 29 位），故值域约 ±524288、精度 1/4096。
@@ -116,6 +118,16 @@ typedef struct {
     JmObj o;
     int32_t raw; /* Q12 原始值：真实值 × 4096 */
 } JmDec;
+
+/* 闭包对象：头部 8 字节 + caps[ncap]（每项 4 字节）。
+ * caps 是创建时父帧槽的值的快照，闭包持有它们的一份引用。 */
+typedef struct {
+    JmObj o;
+    uint8_t code_idx;
+    uint8_t ncap;
+    uint16_t pad;
+    JmValue caps[];
+} JmClosure;
 
 extern uint8_t jm_heap[JM_HEAP_SIZE];
 static inline void *jm_obj_ptr(JmValue v) {
@@ -218,6 +230,7 @@ JmDict *jm_dict_new_obj(void);
 JmIter *jm_iter_new_obj(JmValue container, uint32_t kind);
 JmRange *jm_range_new_obj(int32_t start, int32_t step, uint32_t len);
 JmDec *jm_dec_new_obj(int32_t raw);
+JmClosure *jm_closure_new_obj(uint8_t code_idx, uint8_t ncap);
 
 int jm_list_reserve(JmState *st, JmList *l, uint32_t need);
 int jm_list_push(JmState *st, JmList *l, JmValue v);

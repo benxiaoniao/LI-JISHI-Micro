@@ -269,12 +269,13 @@ const SEMANTICS: &[SemanticRow] = &[
     SemanticRow { topic: "真值", rule: "假：0、0.0、空、假、未定义、空文本、空列表、空字典、空范围；其余为真（含函数与内建）。" },
     SemanticRow { topic: "下标", rule: "列表/文本支持负下标（-1 是最后一个）；字典按键查找，键不存在报 E_INDEX；文本下标按字符而不是字节。" },
     SemanticRow { topic: "原生模块", rule: "`导入 模块` 只能写在模块顶层；导入后模块里的原生函数名才能调用，名字与参数个数在编译期校验（E112/E113/E115）；`.jmb` 仍只带名字，运行期由 native 表绑定。" },
-    SemanticRow { topic: "作用域", rule: "函数内的 `令` 是局部槽；未在函数内声明而同名的读取会落到模块级全局（v0 没有闭包）。" },
-    SemanticRow { topic: "函数", rule: "只有模块级函数；实参按值传递；形参与实参个数必须一致；调用层数上限 32。" },
+    SemanticRow { topic: "作用域", rule: "函数内的 `令` 是局部槽；内层函数读取外层局部变量时会按值捕获（定义时快照、只读）；未在函数内声明而同名的读取会落到模块级全局。" },
+    SemanticRow { topic: "函数", rule: "模块级函数与闭包都是一等值：可以赋值、传参、作为返回值；实参按值传递；形参与实参个数必须一致；调用层数上限 32。" },
+    SemanticRow { topic: "闭包", rule: "内层函数读取外层局部变量即按值捕获（定义那一刻的快照，之后外层再改也不影响）；捕获变量只读（赋值报 E117），不能在函数里捕获自己的名字（E117）；单个函数捕获上限 255（E116）。" },
     SemanticRow { topic: "字符串", rule: "单引号、双引号、中文引号都可定界；反斜杠转义支持 \\n \\t \\\\ \\\" \\'；文本按 UTF-8 存。" },
     SemanticRow { topic: "字典键", rule: "键必须是整数/文本/空/真/假这类不可变值；列表、字典、函数不能当键。" },
     SemanticRow { topic: "迭代", rule: "可遍历：列表、文本（按字符）、字典（按键）、范围。" },
-    SemanticRow { topic: "内存", rule: "脚本对象都放在固定堆里（固件默认 6 KB）；堆满报 E_OOM，不会崩溃。" },
+    SemanticRow { topic: "内存", rule: "脚本对象都放在固定堆里（固件默认 6 KB）；闭包按引用计数释放，但闭包与列表/字典互相引用成环时 rc 不归零，这块堆不会回收（没有 GC），反复创建最终报 E_OOM；其余堆满也报 E_OOM，不会崩溃。" },
 ];
 
 struct LimitRow {
@@ -289,6 +290,7 @@ const LIMITS: &[LimitRow] = &[
     LimitRow { item: "函数", value: "255 个" },
     LimitRow { item: "局部变量/函数", value: "255 个" },
     LimitRow { item: "实参/形参", value: "各 255 个" },
+    LimitRow { item: "闭包捕获/函数", value: "255 个（E116）" },
     LimitRow { item: "列表元素/字典项", value: "各 255 个（字面量编译期）" },
     LimitRow { item: "调用层数", value: "32 层（JM_MAX_FRAMES）" },
     LimitRow { item: "值栈", value: "512 槽（JM_STACK_SLOTS）" },
@@ -355,10 +357,16 @@ const PITFALLS: &[Pitfall] = &[
         why: "Tab 与全角空格在缩进位置报 E109；全角标点只在代码里自动转半角。",
     },
     Pitfall {
-        title: "函数不能读外层局部变量",
-        bad: "函数 外层():\n    令 x = 1\n    函数 内层():\n        返回 x",
-        good: "令 x = 1\n函数 内层():\n    返回 x",
-        why: "v0 没有闭包（E101）；需要共享的数据放模块级 `令`。",
+        title: "闭包按值捕获，捕获变量只读",
+        bad: "函数 外层():\n    令 x = 1\n    函数 内层():\n        x = 2\n        返回 x",
+        good: "函数 外层():\n    令 x = 1\n    函数 内层():\n        返回 x + 1",
+        why: "内层函数读到的 `x` 是定义那一刻的快照，之后外层把 `x` 改成 2 也不影响闭包（仍是 1）。给捕获变量赋值报 E117；要改状态就放模块级 `令`，或在函数里用 `令` 新建同名局部变量。",
+    },
+    Pitfall {
+        title: "闭包成环会一直占堆（没有 GC）",
+        bad: "令 列表 = []\n令 回调 = 造回调(列表)\n列表追加(列表, 回调)",
+        good: "只把闭包传给需要它的函数，不让它再被写回自己捕获的容器",
+        why: "闭包与它捕获的列表/字典互相引用时，引用计数无法归零，这块堆不会回收；反复创建这类环会逐步吃满堆，最终运行期报 E017（E_OOM）。当前没有标记清扫 GC（计划在 JM14）。",
     },
     Pitfall {
         title: "没有类和属性访问",
@@ -429,6 +437,12 @@ const EXAMPLES: &[Example] = &[
         title: "小数与定点除法",
         source: "打印(1.5 + 2.25)\n打印(10.0 / 4)\n打印(4094 / 4095.0 * 3300)",
         prints: "3.75\n2.5\n3299.1943",
+    },
+    Example {
+        id: "closure",
+        title: "闭包（按值捕获，只读）",
+        source: "函数 计数器(起点):\n    令 n = 起点\n    函数 取():\n        返回 n\n    返回 取\n\n令 f = 计数器(10)\n打印(f())",
+        prints: "10",
     },
     Example {
         id: "board-led",
@@ -894,7 +908,7 @@ pub fn render_markdown() -> Result<String, String> {
     m.push_str(&format!("| 字节码 ABI | {} |\n", ABI_VERSION));
     m.push_str("| 编译 | `micc 源码.jsh -o 输出.jmb` |\n");
     m.push_str("| 运行 | STM32F103C8T6 固件内解释器；脚本堆固件 6 KB |\n\n");
-    m.push_str("砾是**中文关键字、缩进式、整数优先**的小语言。它跑在 20 KB RAM 的 MCU 上，整数是 29 位、小数是 Q12 定点；刻意没有类、闭包和通用模块系统；板级硬件能力通过 `导入 模块` 在编译期引入。\n\n");
+    m.push_str("砾是**中文关键字、缩进式、整数优先**的小语言。它跑在 20 KB RAM 的 MCU 上，整数是 29 位、小数是 Q12 定点；没有类、异常和通用模块系统，闭包按值捕获且捕获变量只读；板级硬件能力通过 `导入 模块` 在编译期引入。\n\n");
 
     m.push_str("## 关键字\n\n");
     m.push_str("可用：");
@@ -1130,7 +1144,7 @@ pub fn check() -> Result<(), String> {
             continue;
         }
         let text = read_or_fail(&ent.path(), "编译器源码")?;
-        for code in ["E101", "E102", "E103", "E104", "E105", "E106", "E107", "E108", "E109", "E110", "E111", "E112", "E113", "E114", "E115"] {
+        for code in ["E102", "E103", "E104", "E105", "E106", "E107", "E108", "E109", "E110", "E111", "E112", "E113", "E114", "E115", "E116", "E117"] {
             if text.contains(&format!("\"{}\"", code)) && !used.iter().any(|u| u == code) {
                 used.push(code.to_string());
             }

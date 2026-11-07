@@ -18,8 +18,8 @@ int jm_loader_init(JmState *st, const void *data, size_t len) {
     if (p[0] != 'J' || p[1] != 'M' || p[2] != 'B' || p[3] != '1') {
         return jm_fail(st, E_FILE, "不是 .jmb 文件（魔数不对）");
     }
-    if (p[4] != 1) {
-        return jm_fail(st, E_FILE, "不支持的字节码版本");
+    if (p[4] != 2) {
+        return jm_fail(st, E_FILE, "不支持的字节码版本（需要 JMB v2）");
     }
     st->nconsts = p[6];
     st->nnames = p[7];
@@ -32,7 +32,12 @@ int jm_loader_init(JmState *st, const void *data, size_t len) {
     st->const_start = 12;
     st->name_start = st->const_start + (uint32_t)st->nconsts * 8u;
     st->code_start = st->name_start + (uint32_t)st->nnames * 2u;
-    uint32_t tables_end = st->code_start + (uint32_t)st->ncodes * 8u;
+    uint32_t cap_start = st->code_start + (uint32_t)st->ncodes * 10u;
+    uint32_t ncap_total = 0;
+    for (uint8_t i = 0; i < st->ncodes; i++) {
+        ncap_total += st->base[st->code_start + (uint32_t)i * 10u + 8u];
+    }
+    uint32_t tables_end = cap_start + ncap_total * 2u;
     if (tables_end > st->len) {
         return jm_fail(st, E_FILE, "表区越界");
     }
@@ -58,7 +63,7 @@ int jm_loader_init(JmState *st, const void *data, size_t len) {
         }
     }
     for (uint8_t i = 0; i < st->ncodes; i++) {
-        const uint8_t *e = st->base + st->code_start + (uint32_t)i * 8u;
+        const uint8_t *e = st->base + st->code_start + (uint32_t)i * 10u;
         uint16_t off = rd16(e + 0);
         uint16_t clen = rd16(e + 2);
         if ((uint32_t)off + clen > st->len) {
@@ -70,6 +75,23 @@ int jm_loader_init(JmState *st, const void *data, size_t len) {
         if (e[4] >= st->nnames) {
             return jm_fail(st, E_FILE, "代码名字下标越界");
         }
+    }
+
+    /* 捕获表：每项 (父帧槽, 子帧槽)，子帧槽必须落在该函数的局部槽内。 */
+    uint32_t cap_cur = cap_start;
+    for (uint8_t i = 0; i < st->ncodes; i++) {
+        const uint8_t *e = st->base + st->code_start + (uint32_t)i * 10u;
+        uint8_t ncap = e[8];
+        uint8_t nlocals = e[6];
+        for (uint8_t k = 0; k < ncap; k++, cap_cur += 2u) {
+            uint8_t cslot = st->base[cap_cur + 1u];
+            if (cslot >= nlocals) {
+                return jm_fail(st, E_FILE, "捕获槽越界");
+            }
+        }
+    }
+    if (cap_cur < tables_end) {
+        return jm_fail(st, E_FILE, "捕获表长度不一致");
     }
     return 0;
 }
@@ -89,7 +111,7 @@ int jm_run(const void *jmb, size_t len) {
     }
     jm_builtin_install(st);
 
-    const uint8_t *ce = st->base + st->code_start + (uint32_t)st->entry * 8u;
+    const uint8_t *ce = st->base + st->code_start + (uint32_t)st->entry * 10u;
     uint8_t nlocals = ce[6];
     st->frames[0].code_idx = st->entry;
     st->frames[0].ip = 0;

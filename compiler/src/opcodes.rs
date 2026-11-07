@@ -29,6 +29,8 @@ pub const OP_GET_ITER: u8 = 24;
 pub const OP_FOR_ITER: u8 = 25;
 pub const OP_MAKE_FUNCTION: u8 = 26;
 pub const OP_IMPORT: u8 = 27;
+/// 用当前帧的若干槽创建闭包对象；立即数是代码对象下标，捕获表在代码表里。
+pub const OP_MAKE_CLOSURE: u8 = 28;
 
 /// 运算子码
 pub const BIN_ADD: u8 = 0;
@@ -104,6 +106,7 @@ pub fn op_name(op: u8) -> &'static str {
         OP_FOR_ITER => "FOR_ITER",
         OP_MAKE_FUNCTION => "MAKE_FUNCTION",
         OP_IMPORT => "IMPORT",
+        OP_MAKE_CLOSURE => "MAKE_CLOSURE",
         _ => "?",
     }
 }
@@ -138,7 +141,7 @@ pub fn emit_c_header() -> String {
     let mut s = String::new();
     s.push_str("/* 由 micc --emit-header 生成，请勿手改。 */\n");
     s.push_str("#ifndef JM_OPCODES_H\n#define JM_OPCODES_H\n\n");
-    let ops: [(u8, &str); 28] = [
+    let ops: [(u8, &str); 29] = [
         (OP_HALT, "OP_HALT"),
         (OP_CONST, "OP_CONST"),
         (OP_LOAD_LOCAL, "OP_LOAD_LOCAL"),
@@ -167,6 +170,7 @@ pub fn emit_c_header() -> String {
         (OP_FOR_ITER, "OP_FOR_ITER"),
         (OP_MAKE_FUNCTION, "OP_MAKE_FUNCTION"),
         (OP_IMPORT, "OP_IMPORT"),
+        (OP_MAKE_CLOSURE, "OP_MAKE_CLOSURE"),
     ];
     for (v, n) in ops {
         s.push_str(&format!("#define {n} {v}\n"));

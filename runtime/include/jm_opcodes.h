@@ -30,6 +30,7 @@
 #define OP_FOR_ITER 25
 #define OP_MAKE_FUNCTION 26
 #define OP_IMPORT 27
+#define OP_MAKE_CLOSURE 28
 
 #define BIN_ADD 0
 #define BIN_SUB 1

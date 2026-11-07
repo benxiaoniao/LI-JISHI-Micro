@@ -5,7 +5,10 @@ use crate::opcodes::*;
 const HEADER_LEN: usize = 12;
 const CONST_ENTRY: usize = 8;
 const NAME_ENTRY: usize = 2;
-const CODE_ENTRY: usize = 8;
+/// JMB v2：代码表每项 10 字节（新增 `ncap`）。（版本 2 起不再兼容 v1。）
+const CODE_ENTRY: usize = 10;
+/// 捕获表每项 2 字节：`(父帧槽, 子帧槽)`。
+const CAP_ENTRY: usize = 2;
 
 pub fn write(prog: &Program) -> Result<Vec<u8>> {
     let nconsts = prog.consts.len();
@@ -23,7 +26,9 @@ pub fn write(prog: &Program) -> Result<Vec<u8>> {
     let const_start = HEADER_LEN;
     let name_start = const_start + CONST_ENTRY * nconsts;
     let code_start = name_start + NAME_ENTRY * nnames;
-    let pool_start = code_start + CODE_ENTRY * ncodes;
+    let ncap_total: usize = prog.codes.iter().map(|c| c.caps.len()).sum();
+    let cap_start = code_start + CODE_ENTRY * ncodes;
+    let pool_start = cap_start + CAP_ENTRY * ncap_total;
 
     // 字符串池：名字在前，字符串常量在后
     let mut pool: Vec<u8> = Vec::new();
@@ -71,7 +76,7 @@ pub fn write(prog: &Program) -> Result<Vec<u8>> {
     let mut out = Vec::with_capacity(total);
     // 头
     out.extend_from_slice(b"JMB1");
-    out.push(1); // version
+    out.push(2); // version：JMB v2，代码表带捕获表
     out.push(0); // flags
     out.push(nconsts as u8);
     out.push(nnames as u8);
@@ -128,6 +133,16 @@ pub fn write(prog: &Program) -> Result<Vec<u8>> {
         out.push(c.nparams);
         out.push(c.nlocals);
         out.push(0);
+        out.push(c.caps.len() as u8);
+        out.push(0);
+    }
+
+    // 捕获表：按代码对象顺序排列，每项 (父帧槽, 子帧槽)
+    for c in &prog.codes {
+        for (pslot, cslot) in &c.caps {
+            out.push(*pslot);
+            out.push(*cslot);
+        }
     }
 
     // 字符串池
@@ -147,11 +162,12 @@ pub fn disassemble(prog: &Program) -> String {
     let mut s = String::new();
     for (ci, c) in prog.codes.iter().enumerate() {
         s.push_str(&format!(
-            "== 代码 {} 「{}」 参数 {} 局部 {}\n",
+            "== 代码 {} 「{}」 参数 {} 局部 {} 捕获 {}\n",
             ci,
             prog.names.get(c.name_idx as usize).map(|x| x.as_str()).unwrap_or("?"),
             c.nparams,
-            c.nlocals
+            c.nlocals,
+            c.caps.len()
         ));
         let mut ip = 0usize;
         while ip < c.code.len() {

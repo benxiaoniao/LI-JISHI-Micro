@@ -28,7 +28,16 @@ static const uint8_t *const_entry(JmState *st, uint8_t i) {
     return st->base + st->const_start + (uint32_t)i * 8u;
 }
 static const uint8_t *code_entry(JmState *st, uint8_t i) {
-    return st->base + st->code_start + (uint32_t)i * 8u;
+    return st->base + st->code_start + (uint32_t)i * 10u;
+}
+
+/* 代码对象 i 的捕获表起始偏移（捕获表紧跟在全部代码表项之后）。 */
+static uint32_t cap_offset(JmState *st, uint8_t i) {
+    uint32_t off = st->code_start + (uint32_t)st->ncodes * 10u;
+    for (uint8_t k = 0; k < i; k++) {
+        off += (uint32_t)code_entry(st, k)[8] * 2u;
+    }
+    return off;
 }
 static const char *name_at(JmState *st, uint8_t i) {
     uint16_t off = rd16(st->base + st->name_start + (uint32_t)i * 2u);
@@ -237,6 +246,9 @@ int jm_type_name(JmValue v, const char **name) {
             return 0;
         case JM_T_DEC:
             *name = "小数";
+            return 0;
+        case JM_T_CLOSURE:
+            *name = "函数";
             return 0;
         default:
             *name = "对象";
@@ -1121,6 +1133,54 @@ int jm_execute(JmState *st) {
                 ip = 0;
                 break;
             }
+            if (JM_TAG(callee) == JM_TAG_HEAP && jm_obj(callee)->type == JM_T_CLOSURE) {
+                JmClosure *cl = (JmClosure *)jm_obj(callee);
+                uint8_t idx = cl->code_idx;
+                if (idx >= st->ncodes) {
+                    VM_FAIL(E_CODE, "闭包代码对象越界");
+                }
+                const uint8_t *nce = code_entry(st, idx);
+                uint8_t nparams = nce[5];
+                uint8_t nl = nce[6];
+                uint8_t ncap = nce[8];
+                if (ncap != cl->ncap) {
+                    VM_FAIL(E_CODE, "闭包捕获数与代码对象不符");
+                }
+                if (argc != nparams) {
+                    VM_FAIL(E_ARGC, "实参个数与形参不符");
+                }
+                if (st->fp + 1 >= JM_MAX_FRAMES) {
+                    VM_FAIL(E_FRAMES, "调用层数太深");
+                }
+                f->ip = ip;
+                st->fp++;
+                JmFrame *nf = &st->frames[st->fp];
+                nf->code_idx = idx;
+                nf->ip = 0;
+                nf->base = (uint16_t)(st->sp - argc);
+                for (uint8_t i = nparams; i < nl; i++) {
+                    PUSH_V(JM_UNDEF);
+                }
+                /* 捕获槽在本帧入口填值（帧自己持有一份引用）。 */
+                uint32_t capoff = cap_offset(st, idx);
+                for (uint8_t k = 0; k < ncap; k++, capoff += 2u) {
+                    uint8_t cslot = st->base[capoff + 1];
+                    if (cslot < nparams || cslot >= nl) {
+                        VM_FAIL(E_CODE, "闭包捕获槽越界");
+                    }
+                    JmValue cv = cl->caps[k];
+                    jm_retain(cv);
+                    st->stack[nf->base + cslot] = cv;
+                }
+                f = nf;
+                cur_code = idx;
+                cur_nlocals = nl;
+                ce = nce;
+                code = st->base + rd16(ce + 0);
+                clen = rd16(ce + 2);
+                ip = 0;
+                break;
+            }
             VM_FAIL(E_NOT_CALLABLE, "这个值不能调用");
         }
         case OP_RETURN: {
@@ -1250,6 +1310,39 @@ int jm_execute(JmState *st) {
                 VM_FAIL(E_CODE, "代码对象越界");
             }
             PUSH_V(jm_v_func(a));
+            break;
+        }
+        case OP_MAKE_CLOSURE: {
+            uint8_t a = code[ip++];
+            if (a >= st->ncodes) {
+                VM_FAIL(E_CODE, "代码对象越界");
+            }
+            const uint8_t *nce = code_entry(st, a);
+            uint8_t ncap = nce[8];
+            if (ncap == 0) {
+                PUSH_V(jm_v_func(a));
+                break;
+            }
+            JmClosure *cl = jm_closure_new_obj(a, ncap);
+            if (!cl) {
+                VM_FAIL(E_OOM, "创建闭包失败");
+            }
+            uint32_t capoff = cap_offset(st, a);
+            for (uint8_t k = 0; k < ncap; k++, capoff += 2u) {
+                uint8_t pslot = st->base[capoff];
+                if (pslot >= cur_nlocals) {
+                    jm_release(jm_heap_value(cl));
+                    VM_FAIL(E_CODE, "捕获的父槽越界");
+                }
+                JmValue v = st->stack[f->base + pslot];
+                if (v == JM_UNDEF) {
+                    jm_release(jm_heap_value(cl));
+                    VM_FAIL(E_LOCAL, "捕获了尚未初始化的局部变量");
+                }
+                cl->caps[k] = v;
+                jm_retain(v);
+            }
+            PUSH_V(jm_heap_value(cl));
             break;
         }
         case OP_IMPORT:
