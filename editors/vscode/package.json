@@ -16,6 +16,7 @@
   "categories": [
     "Programming Languages"
   ],
+  "icon": "./icon-128.png",
   "main": "./out/extension.js",
   "activationEvents": [
     "onLanguage:li",

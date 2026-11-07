@@ -32,3 +32,6 @@
 /editors/vscode/node_modules/
 /editors/vscode/out/
 /editors/vscode/dist/
+
+# 图标：icon/ 入库 SVG + 512 + 透明版；这张 1024 白底与透明版同画布、仅底色不同，属重复
+/icon/砾-icon.png

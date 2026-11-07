@@ -1,3 +1,5 @@
+<p align="center"><img src="icon/砾-icon.svg" width="128" height="128" alt="砾"></p>
+
 # 砾（LI）
 
 > **基石语言（JISHI）面向单片机的分支。**
