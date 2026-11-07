@@ -1,12 +1,18 @@
 {
   "schema": "jishi.langcard/1",
   "lang_version": "Micro Core v0",
+  "bytecode_magic": "JMB1",
+  "bytecode_version": 4,
+  "native_abi_version": 1,
   "abi_version": "JMB1",
+  "abi_version_note": "已弃用：字节码版本看 bytecode_version，Native ABI 看 native_abi_version；abi_version 仅保留给旧消费者。",
   "name": "砾（Micro Core v0）语言卡",
   "target": "STM32F103C8T6 固件内解释器（64 KB Flash / 20 KB RAM），宿主侧用 micc 编译为 .jmb",
   "purpose": "给大模型与工具读的机器可读参考：语法、语义、内建 API、惯用法、错误与可编译示例。",
   "single_source": {
     "opcodes": "compiler/src/opcodes.rs",
+    "bytecode_format": "compiler/src/writer.rs（MAGIC / VERSION）",
+    "native_abi": "runtime/include/jm_native.h（JM_NATIVE_ABI_VERSION）",
     "keywords": "compiler/src/lexer.rs",
     "builtins": "runtime/src/jm_builtin.c",
     "native_modules": "compiler/src/native_spec.rs",

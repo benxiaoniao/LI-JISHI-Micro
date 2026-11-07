@@ -12,11 +12,11 @@
 use crate::lexer;
 use crate::native_spec;
 use crate::opcodes::{self, Operand};
+use crate::writer::{MAGIC, VERSION};
 use std::path::{Path, PathBuf};
 
 pub const SCHEMA: &str = "jishi.langcard/1";
 pub const LANG_VERSION: &str = "Micro Core v0";
-pub const ABI_VERSION: &str = "JMB1";
 
 pub struct BuiltinDoc {
     pub name: &'static str,
@@ -609,6 +609,25 @@ fn c_runtime_errors() -> Result<Vec<(String, u8)>, String> {
     Ok(out)
 }
 
+/// 从 `jm_native.h` 解析 Native ABI 版本号（`#define JM_NATIVE_ABI_VERSION 1u`）。
+fn c_native_abi_version() -> Result<u8, String> {
+    let path = repo_root().join("runtime/include/jm_native.h");
+    let src = read_or_fail(&path, "Native ABI 版本")?;
+    for line in src.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("#define JM_NATIVE_ABI_VERSION") {
+            let value = rest.trim().trim_end_matches('u').trim();
+            return value.parse::<u8>().map_err(|_| {
+                format!(
+                    "jm_native.h 里 JM_NATIVE_ABI_VERSION 不是 0~255 的整数：{}",
+                    value
+                )
+            });
+        }
+    }
+    Err("jm_native.h 里没找到 #define JM_NATIVE_ABI_VERSION".to_string())
+}
+
 fn builtin_table() -> Result<Vec<(u8, String, u8, u8, &'static str)>, String> {
     let c = c_builtins()?;
     let mut out = Vec::new();
@@ -677,12 +696,20 @@ fn json_str_array(items: &[&str], indent: &str) -> String {
 pub fn render_json() -> Result<String, String> {
     let builtins = builtin_table()?;
     let runtime_errs = c_runtime_errors()?;
+    let native_abi = c_native_abi_version()?;
+    let magic = std::str::from_utf8(&MAGIC)
+        .map_err(|_| "writer.rs 里的 JMB 魔数不是合法 UTF-8".to_string())?;
 
     let mut j = String::new();
     j.push_str("{\n");
     j.push_str(&format!("  \"schema\": \"{}\",\n", SCHEMA));
     j.push_str(&format!("  \"lang_version\": \"{}\",\n", LANG_VERSION));
-    j.push_str(&format!("  \"abi_version\": \"{}\",\n", ABI_VERSION));
+    j.push_str(&format!("  \"bytecode_magic\": \"{}\",\n", magic));
+    j.push_str(&format!("  \"bytecode_version\": {},\n", VERSION));
+    j.push_str(&format!("  \"native_abi_version\": {},\n", native_abi));
+    // 兼容字段：旧消费者读 abi_version，值仍等同于魔数；新消费者改用上面两个字段。
+    j.push_str(&format!("  \"abi_version\": \"{}\",\n", magic));
+    j.push_str("  \"abi_version_note\": \"已弃用：字节码版本看 bytecode_version，Native ABI 看 native_abi_version；abi_version 仅保留给旧消费者。\",\n");
     j.push_str("  \"name\": \"砾（Micro Core v0）语言卡\",\n");
     j.push_str(
         "  \"target\": \"STM32F103C8T6 固件内解释器（64 KB Flash / 20 KB RAM），宿主侧用 micc 编译为 .jmb\",\n",
@@ -690,6 +717,8 @@ pub fn render_json() -> Result<String, String> {
     j.push_str("  \"purpose\": \"给大模型与工具读的机器可读参考：语法、语义、内建 API、惯用法、错误与可编译示例。\",\n");
     j.push_str("  \"single_source\": {\n");
     j.push_str("    \"opcodes\": \"compiler/src/opcodes.rs\",\n");
+    j.push_str("    \"bytecode_format\": \"compiler/src/writer.rs（MAGIC / VERSION）\",\n");
+    j.push_str("    \"native_abi\": \"runtime/include/jm_native.h（JM_NATIVE_ABI_VERSION）\",\n");
     j.push_str("    \"keywords\": \"compiler/src/lexer.rs\",\n");
     j.push_str("    \"builtins\": \"runtime/src/jm_builtin.c\",\n");
     j.push_str("    \"native_modules\": \"compiler/src/native_spec.rs\",\n");
@@ -950,6 +979,9 @@ fn code_block(s: &str) -> String {
 pub fn render_markdown() -> Result<String, String> {
     let builtins = builtin_table()?;
     let runtime_errs = c_runtime_errors()?;
+    let native_abi = c_native_abi_version()?;
+    let magic = std::str::from_utf8(&MAGIC)
+        .map_err(|_| "writer.rs 里的 JMB 魔数不是合法 UTF-8".to_string())?;
     let kws = lexer::keyword_table();
 
     let mut m = String::new();
@@ -962,9 +994,17 @@ pub fn render_markdown() -> Result<String, String> {
     m.push_str("## 概览\n\n");
     m.push_str("| 项 | 值 |\n|---|---|\n");
     m.push_str(&format!("| 语言版本 | {} |\n", LANG_VERSION));
-    m.push_str(&format!("| 字节码 ABI | {} |\n", ABI_VERSION));
+    m.push_str(&format!(
+        "| 字节码格式 | JMB v{}（魔数 `{}`） |\n",
+        VERSION, magic
+    ));
+    m.push_str(&format!(
+        "| Native ABI | v{}（`JM_NATIVE_ABI_VERSION`） |\n",
+        native_abi
+    ));
     m.push_str("| 编译 | `micc 源码.jsh -o 输出.jmb` |\n");
     m.push_str("| 运行 | STM32F103C8T6 固件内解释器；脚本堆固件 6 KB |\n\n");
+    m.push_str("> 机器可读字段：`bytecode_magic` / `bytecode_version` / `native_abi_version`；`abi_version` 已弃用，仅为旧消费者保留（值等于魔数）。\n\n");
     m.push_str("砾是**中文关键字、缩进式、整数优先**的小语言。它跑在 20 KB RAM 的 MCU 上，整数是 29 位、小数是 Q12 定点；类没有继承，`最后` 和通用模块系统也没有，异常用显式 `抛出` / `尝试` / `捕获`；闭包按值捕获且捕获变量只读；板级硬件能力通过 `导入 模块` 在编译期引入。\n\n");
 
     m.push_str("## 关键字\n\n");

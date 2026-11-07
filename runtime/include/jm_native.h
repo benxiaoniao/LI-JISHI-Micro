@@ -10,7 +10,7 @@
  * 版本规则：
  *   - 只增表项、不改签名 → 不升版本
  *   - 改签名 / 改值编码 / 改错误码含义 → 必须升 JM_NATIVE_ABI_VERSION，
- *     并与语言卡的 abi_version 一起发布
+ *     并与语言卡的 native_abi_version 一起发布
  */
 
 #include <stddef.h>

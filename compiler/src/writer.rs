@@ -2,6 +2,11 @@ use crate::codegen::{ConstVal, Program};
 use crate::error::{CompileError, Result};
 use crate::opcodes::*;
 
+/// `.jmb` 魔数；`--check-langcard` 也从这里取，避免语言卡手写漂移。
+pub const MAGIC: [u8; 4] = *b"JMB1";
+/// 当前字节码格式版本（JMB v4：类表）。
+pub const VERSION: u8 = 4;
+
 const HEADER_LEN: usize = 12;
 const CONST_ENTRY: usize = 8;
 const NAME_ENTRY: usize = 2;
@@ -83,8 +88,8 @@ pub fn write(prog: &Program) -> Result<Vec<u8>> {
 
     let mut out = Vec::with_capacity(total);
     // 头
-    out.extend_from_slice(b"JMB1");
-    out.push(4); // version：JMB v4（类表）
+    out.extend_from_slice(&MAGIC);
+    out.push(VERSION); // version：JMB v4（类表）
     out.push(0); // flags
     out.push(nconsts as u8);
     out.push(nnames as u8);
