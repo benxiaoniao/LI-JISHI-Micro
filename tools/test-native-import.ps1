@@ -38,6 +38,15 @@ else {
     Write-Host "  [PASS] 编译通过（导入 任务）"
 }
 
+& $micc (Join-Path $root "examples\队列.jsh") -o (Join-Path $root "build\native-ipc-ok.jmb") | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "  [FAIL] 队列 / 信号量示例被拒绝"
+    $script:fail++
+}
+else {
+    Write-Host "  [PASS] 编译通过（导入 队列 + 信号量）"
+}
+
 function Expect-CompileError {
     param([string]$File, [string]$Code, [string]$Title)
     Write-Host ("== " + $Title)
@@ -72,9 +81,17 @@ Expect-CompileError "tests\errors\定时器未导入.jsh" "E113" "定时器：�
 Expect-CompileError "tests\errors\任务参数个数.jsh" "E115" "任务：参数个数不符应报 E115"
 Expect-CompileError "tests\errors\任务未导入.jsh" "E113" "任务：未导入就调用应报 E113"
 
+Expect-CompileError "tests\errors\队列名拼错.jsh" "E115" "队列：名字拼错应报 E115"
+Expect-CompileError "tests\errors\队列参数个数.jsh" "E115" "队列：参数个数不符应报 E115"
+Expect-CompileError "tests\errors\队列未导入.jsh" "E113" "队列：未导入就调用应报 E113"
+
+Expect-CompileError "tests\errors\信号量名拼错.jsh" "E115" "信号量：名字拼错应报 E115"
+Expect-CompileError "tests\errors\信号量参数个数.jsh" "E115" "信号量：参数个数不符应报 E115"
+Expect-CompileError "tests\errors\信号量未导入.jsh" "E113" "信号量：未导入就调用应报 E113"
+
 if ($script:fail -ne 0) {
     Write-Host ("原生导入回归失败：" + $script:fail + " 项")
     exit 1
 }
-Write-Host "原生导入回归：14/14 通过（引脚 / ADC / 定时器各 3 个错误用例，任务 2 个错误用例；3 个正确示例）"
+Write-Host "原生导入回归：21/21 通过（引脚 / ADC / 定时器 / 队列 / 信号量各 3 个错误用例，任务 2 个错误用例；4 个正确示例）"
 exit 0

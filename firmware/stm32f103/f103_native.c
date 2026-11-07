@@ -198,6 +198,248 @@ static int n_task_delay(JmStateRef st, const JmValue *args, uint8_t nargs,
     return JM_NATIVE_OK;
 }
 
+/* ---- 语言层任务间通信（JM8 续）：整数句柄 → 静态 JMK 对象槽 ----
+ * 句柄是「槽位号 + 1」，0 与越界都算无效。对象在启动后第一次创建时分配，
+ * 不释放（.jsh 没有销毁入口）；同一份 .jsh 在主机端口也用同样的句柄编号。
+ */
+#define JM_IPC_SLOTS       3u
+#define JM_IPC_QUEUE_DEPTH 8u
+
+static JmkQueue g_ipc_queue[JM_IPC_SLOTS];
+static uint32_t g_ipc_queue_buf[JM_IPC_SLOTS][JM_IPC_QUEUE_DEPTH];
+static uint8_t g_ipc_queue_used[JM_IPC_SLOTS];
+
+static JmkSem g_ipc_sem[JM_IPC_SLOTS];
+static uint8_t g_ipc_sem_used[JM_IPC_SLOTS];
+
+static JmkQueue *queue_of(int32_t handle) {
+    if (handle < 1 || handle > (int32_t)JM_IPC_SLOTS) {
+        return 0;
+    }
+    if (!g_ipc_queue_used[handle - 1]) {
+        return 0;
+    }
+    return &g_ipc_queue[handle - 1];
+}
+
+static JmkSem *sem_of(int32_t handle) {
+    if (handle < 1 || handle > (int32_t)JM_IPC_SLOTS) {
+        return 0;
+    }
+    if (!g_ipc_sem_used[handle - 1]) {
+        return 0;
+    }
+    return &g_ipc_sem[handle - 1];
+}
+
+/* 可选超时参数：缺省 0（不等待），范围 0–60000 毫秒。 */
+static int arg_timeout(JmStateRef st, const JmValue *args, uint8_t nargs,
+                       uint8_t index, uint32_t *out) {
+    int32_t ms = 0;
+    *out = JMK_NO_WAIT;
+    if (nargs <= index) {
+        return 0;
+    }
+    if (jm_value_to_int(args[index], &ms) != 0) {
+        return jm_native_fail(st, JM_NE_TYPE, "超时参数必须是整数");
+    }
+    if (ms < 0 || ms > 60000) {
+        return jm_native_fail(st, JM_NE_PARAM, "超时范围 0–60000 毫秒");
+    }
+    *out = (uint32_t)ms;
+    return 0;
+}
+
+/* JMK 的失败码 → 原生错误：E_STATE 只有一种成因（不在任务上下文），单独说清。 */
+static int ipc_fail(JmStateRef st, int rc) {
+    if (rc == JMK_E_STATE) {
+        return jm_native_fail(st, JM_NE_STATE, "只能在 JMK 任务上下文调用");
+    }
+    return jm_native_fail(st, JM_NE_HW, "JMK 对象操作失败");
+}
+
+static int n_queue_create(JmStateRef st, const JmValue *args, uint8_t nargs,
+                          JmValue *out) {
+    int32_t cap = 0;
+    uint8_t i;
+    if (arg_int(st, args, nargs, &cap, "队列创建需要一个参数：槽数") != 0) {
+        return -1;
+    }
+    if (cap < 1 || cap > (int32_t)JM_IPC_QUEUE_DEPTH) {
+        return jm_native_fail(st, JM_NE_PARAM, "槽数范围 1–8");
+    }
+    for (i = 0; i < JM_IPC_SLOTS; i++) {
+        if (g_ipc_queue_used[i]) {
+            continue;
+        }
+        if (jmk_queue_init(&g_ipc_queue[i], g_ipc_queue_buf[i],
+                           sizeof(uint32_t), (uint32_t)cap) != JMK_OK) {
+            return jm_native_fail(st, JM_NE_STATE, "队列初始化失败");
+        }
+        g_ipc_queue_used[i] = 1u;
+        *out = jm_value_int((int32_t)i + 1);
+        return JM_NATIVE_OK;
+    }
+    return jm_native_fail(st, JM_NE_NOMEM, "队列对象已用完（最多 3 个）");
+}
+
+static int n_queue_send(JmStateRef st, const JmValue *args, uint8_t nargs,
+                        JmValue *out) {
+    int32_t handle = 0;
+    int32_t value = 0;
+    uint32_t timeout = JMK_NO_WAIT;
+    JmkQueue *q;
+    int rc;
+    if (jm_value_to_int(args[0], &handle) != 0 ||
+        jm_value_to_int(args[1], &value) != 0) {
+        return jm_native_fail(st, JM_NE_TYPE, "队列发送：句柄与值必须是整数");
+    }
+    if (arg_timeout(st, args, nargs, 2, &timeout) != 0) {
+        return -1;
+    }
+    q = queue_of(handle);
+    if (!q) {
+        return jm_native_fail(st, JM_NE_PARAM, "队列句柄无效");
+    }
+    rc = jmk_queue_send(q, &value, timeout);
+    if (rc == JMK_OK) {
+        *out = jm_value_bool(1);
+        return JM_NATIVE_OK;
+    }
+    if (rc == JMK_E_TIMEOUT) {
+        *out = jm_value_bool(0);
+        return JM_NATIVE_OK;
+    }
+    return ipc_fail(st, rc);
+}
+
+static int n_queue_recv(JmStateRef st, const JmValue *args, uint8_t nargs,
+                        JmValue *out) {
+    int32_t handle = 0;
+    uint32_t value = 0u;
+    uint32_t timeout = JMK_NO_WAIT;
+    JmkQueue *q;
+    int rc;
+    if (jm_value_to_int(args[0], &handle) != 0) {
+        return jm_native_fail(st, JM_NE_TYPE, "队列接收：句柄必须是整数");
+    }
+    if (arg_timeout(st, args, nargs, 1, &timeout) != 0) {
+        return -1;
+    }
+    q = queue_of(handle);
+    if (!q) {
+        return jm_native_fail(st, JM_NE_PARAM, "队列句柄无效");
+    }
+    rc = jmk_queue_recv(q, &value, timeout);
+    if (rc == JMK_OK) {
+        *out = jm_value_int((int32_t)value);
+        return JM_NATIVE_OK;
+    }
+    if (rc == JMK_E_TIMEOUT) {
+        *out = jm_value_nil();
+        return JM_NATIVE_OK;
+    }
+    return ipc_fail(st, rc);
+}
+
+static int n_queue_count(JmStateRef st, const JmValue *args, uint8_t nargs,
+                         JmValue *out) {
+    int32_t handle = 0;
+    JmkQueue *q;
+    if (arg_int(st, args, nargs, &handle, "队列数量需要一个参数：句柄") != 0) {
+        return -1;
+    }
+    q = queue_of(handle);
+    if (!q) {
+        return jm_native_fail(st, JM_NE_PARAM, "队列句柄无效");
+    }
+    *out = jm_value_int((int32_t)jmk_queue_count(q));
+    return JM_NATIVE_OK;
+}
+
+static int n_sem_create(JmStateRef st, const JmValue *args, uint8_t nargs,
+                        JmValue *out) {
+    int32_t initial = 0;
+    int32_t max = 1;
+    uint8_t i;
+    if (jm_value_to_int(args[0], &initial) != 0) {
+        return jm_native_fail(st, JM_NE_TYPE, "信号量创建：初值必须是整数");
+    }
+    if (nargs > 1 && jm_value_to_int(args[1], &max) != 0) {
+        return jm_native_fail(st, JM_NE_TYPE, "信号量创建：上限必须是整数");
+    }
+    if (initial < 0 || initial > 255 || max < 1 || max > 255) {
+        return jm_native_fail(st, JM_NE_PARAM, "初值 0–255，上限 1–255");
+    }
+    if (initial > max) {
+        return jm_native_fail(st, JM_NE_PARAM, "初值不能大于上限");
+    }
+    for (i = 0; i < JM_IPC_SLOTS; i++) {
+        if (g_ipc_sem_used[i]) {
+            continue;
+        }
+        if (jmk_sem_init(&g_ipc_sem[i], initial, max) != JMK_OK) {
+            return jm_native_fail(st, JM_NE_STATE, "信号量初始化失败");
+        }
+        g_ipc_sem_used[i] = 1u;
+        *out = jm_value_int((int32_t)i + 1);
+        return JM_NATIVE_OK;
+    }
+    return jm_native_fail(st, JM_NE_NOMEM, "信号量对象已用完（最多 3 个）");
+}
+
+static int n_sem_wait(JmStateRef st, const JmValue *args, uint8_t nargs,
+                      JmValue *out) {
+    int32_t handle = 0;
+    uint32_t timeout = JMK_NO_WAIT;
+    JmkSem *s;
+    int rc;
+    if (jm_value_to_int(args[0], &handle) != 0) {
+        return jm_native_fail(st, JM_NE_TYPE, "信号量等待：句柄必须是整数");
+    }
+    if (arg_timeout(st, args, nargs, 1, &timeout) != 0) {
+        return -1;
+    }
+    s = sem_of(handle);
+    if (!s) {
+        return jm_native_fail(st, JM_NE_PARAM, "信号量句柄无效");
+    }
+    rc = jmk_sem_wait(s, timeout);
+    if (rc == JMK_OK) {
+        *out = jm_value_bool(1);
+        return JM_NATIVE_OK;
+    }
+    if (rc == JMK_E_TIMEOUT) {
+        *out = jm_value_bool(0);
+        return JM_NATIVE_OK;
+    }
+    return ipc_fail(st, rc);
+}
+
+static int n_sem_post(JmStateRef st, const JmValue *args, uint8_t nargs,
+                      JmValue *out) {
+    int32_t handle = 0;
+    JmkSem *s;
+    int rc;
+    if (arg_int(st, args, nargs, &handle, "信号量给出需要一个参数：句柄") != 0) {
+        return -1;
+    }
+    s = sem_of(handle);
+    if (!s) {
+        return jm_native_fail(st, JM_NE_PARAM, "信号量句柄无效");
+    }
+    rc = jmk_sem_post(s);
+    if (rc == JMK_OK) {
+        *out = jm_value_bool(1);
+        return JM_NATIVE_OK;
+    }
+    if (rc == JMK_E_FULL) {
+        *out = jm_value_bool(0);
+        return JM_NATIVE_OK;
+    }
+    return ipc_fail(st, rc);
+}
+
 /* 表项由 micc --emit-native-header 生成，见 runtime/include/jm_native_table.h */
 static const JmNativeEntry F103_TABLE[] = {
     F103_NATIVE_TABLE_INIT
@@ -215,6 +457,14 @@ static const JmNativeEntry TASK_TABLE[] = {
     JM_TASK_TABLE_INIT
 };
 
+static const JmNativeEntry QUEUE_TABLE[] = {
+    JM_QUEUE_TABLE_INIT
+};
+
+static const JmNativeEntry SEM_TABLE[] = {
+    JM_SEM_TABLE_INIT
+};
+
 int f103_native_register(void) {
     if (jm_native_register(F103_TABLE, (uint8_t)F103_NATIVE_ENTRY_COUNT) != 0) {
         return -1;
@@ -226,6 +476,12 @@ int f103_native_register(void) {
         return -1;
     }
     if (jm_native_register(TASK_TABLE, (uint8_t)JM_TASK_ENTRY_COUNT) != 0) {
+        return -1;
+    }
+    if (jm_native_register(QUEUE_TABLE, (uint8_t)JM_QUEUE_ENTRY_COUNT) != 0) {
+        return -1;
+    }
+    if (jm_native_register(SEM_TABLE, (uint8_t)JM_SEM_ENTRY_COUNT) != 0) {
         return -1;
     }
     return 0;

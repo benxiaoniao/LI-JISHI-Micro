@@ -148,6 +148,69 @@ pub const MODULES: &[NativeModuleSpec] = &[
             },
         ],
     },
+    NativeModuleSpec {
+        name: "队列",
+        table: "ipc_queue",
+        c_prefix: "JM_QUEUE",
+        entries: &[
+            NativeEntrySpec {
+                name: "队列创建",
+                min_args: 1,
+                max_args: 1,
+                c_fn: "n_queue_create",
+                doc: "队列创建(槽数)，槽数 1–8；返回整数句柄（1 起）。队列项固定是 32 位整数。",
+            },
+            NativeEntrySpec {
+                name: "队列发送",
+                min_args: 2,
+                max_args: 3,
+                c_fn: "n_queue_send",
+                doc: "队列发送(句柄, 整数[, 超时毫秒])；成功返回 真，队列满且超时返回 假。超时默认 0（不等待），范围 0–60000。",
+            },
+            NativeEntrySpec {
+                name: "队列接收",
+                min_args: 1,
+                max_args: 2,
+                c_fn: "n_queue_recv",
+                doc: "队列接收(句柄[, 超时毫秒])；有数据返回整数，超时返回 空。超时默认 0。",
+            },
+            NativeEntrySpec {
+                name: "队列数量",
+                min_args: 1,
+                max_args: 1,
+                c_fn: "n_queue_count",
+                doc: "返回队列里当前的整数条数。",
+            },
+        ],
+    },
+    NativeModuleSpec {
+        name: "信号量",
+        table: "ipc_sem",
+        c_prefix: "JM_SEM",
+        entries: &[
+            NativeEntrySpec {
+                name: "信号量创建",
+                min_args: 1,
+                max_args: 2,
+                c_fn: "n_sem_create",
+                doc: "信号量创建(初值[, 上限])；上限默认 1（二值信号量），两者都在 0–255；返回整数句柄（1 起）。",
+            },
+            NativeEntrySpec {
+                name: "信号量等待",
+                min_args: 1,
+                max_args: 2,
+                c_fn: "n_sem_wait",
+                doc: "信号量等待(句柄[, 超时毫秒])；计数大于 0 时减一并返回 真，超时返回 假。超时默认 0。",
+            },
+            NativeEntrySpec {
+                name: "信号量给出",
+                min_args: 1,
+                max_args: 1,
+                c_fn: "n_sem_post",
+                doc: "计数加一或唤醒一个等待者；已到上限返回 假。",
+            },
+        ],
+    },
 ];
 
 pub const NATIVE_HEADER_PATH: &str = "runtime/include/jm_native_table.h";

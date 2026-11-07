@@ -17,6 +17,12 @@
 #define JMK_STACK_CHURN_DEMO 0
 #endif
 
+/* 让出证据开关（默认关）：与 vm 同优先级建一个对端任务，每轮打印后 jmk_yield()；
+ * 配合 examples/让出.jsh（循环里 让出()）观察两个任务是否交替执行。 */
+#ifndef JMK_YIELD_DEMO
+#define JMK_YIELD_DEMO 0
+#endif
+
 /* 由构建脚本从 .jmb 生成 */
 extern const unsigned char jm_app_jmb[];
 extern const uint32_t jm_app_jmb_len;
@@ -239,6 +245,23 @@ static void task_churn(void *arg)
 }
 #endif /* JMK_STACK_CHURN_DEMO */
 
+#if JMK_YIELD_DEMO
+/* 让出对端：与 vm 同优先级（2），每轮打印一次就主动让出。
+ * vm 里的 .jsh 也每轮 让出()，两个任务应交替拿到 CPU。 */
+static void task_peer(void *arg)
+{
+    uint32_t n = 0;
+    (void)arg;
+    for (;;) {
+        n++;
+        port_log("[让出] 乙 ");
+        port_log_u32(n);
+        port_log("\r\n");
+        jmk_yield();
+    }
+}
+#endif
+
 /* 砾程序作为独立 JMK 任务运行：让语言层 让出()/延时() 真正落到调度器上。 */
 static void task_vm(void *arg)
 {
@@ -296,6 +319,10 @@ int main(void)
         port_log(F103_TIMER_TABLE_NAME);
         port_log(", ");
         port_log(JM_TASK_TABLE_NAME);
+        port_log(", ");
+        port_log(JM_QUEUE_TABLE_NAME);
+        port_log(", ");
+        port_log(JM_SEM_TABLE_NAME);
         port_log("\r\n");
     }
     port_log("\r\n");
@@ -313,6 +340,11 @@ int main(void)
         jmk_sem_init(&g_probe_sem, 0, 1) != JMK_OK) {
         port_log("[同步] 初始化失败\r\n");
     }
+#endif
+
+#if JMK_YIELD_DEMO
+    port_log("\r\n[内核] 启动调度器：vm(优先2) / peer(让出对端,优先2) / led(优先2) / log(优先1)\r\n");
+#elif JMK_IPC_DEMO
     port_log("\r\n[内核] 启动调度器：vm(优先2) / led(生产,优先2) / log(消费,优先1)\r\n");
 #elif JMK_STACK_CHURN_DEMO
     port_log("\r\n[内核] 启动调度器：churn(优先3) / vm(优先2) / led(优先2) / log(优先1)\r\n");
@@ -333,6 +365,11 @@ int main(void)
 #if JMK_STACK_CHURN_DEMO
     if (jmk_task_create(task_churn, 0, 3u, "churn") < 0) {
         port_log("[内核] 创建 churn 任务失败\r\n");
+    }
+#endif
+#if JMK_YIELD_DEMO
+    if (jmk_task_create(task_peer, 0, 2u, "peer") < 0) {
+        port_log("[内核] 创建 peer 任务失败\r\n");
     }
 #endif
 

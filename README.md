@@ -239,7 +239,7 @@ docs/                      路径图、字节码规格、原生函数表、调�
 | [tools/capture-serial.ps1](tools/capture-serial.ps1) | 串口录制到 `build\uart\`（`-Port` / `-Seconds` / `-Out`） |
 | [tools/test.ps1](tools/test.ps1) | 输出回归（逐字节对比 `tests\expected`） |
 | [tools/test-errors.ps1](tools/test-errors.ps1) | 错误码回归（E004 / E007 / E009 / E013 / E023 / E027 / E028 / E035 / E036 / E037 / E102 / E103 / E117 / E118 / E120 / E121 / E122 / E123） |
-| [tools/test-native-import.ps1](tools/test-native-import.ps1) | 原生导入回归（引脚 / ADC / 定时器各三类错误 + 正确用例） |
+| [tools/test-native-import.ps1](tools/test-native-import.ps1) | 原生导入回归（引脚 / ADC / 定时器 / 队列 / 信号量各三类错误 + 任务 + 正确用例，21/21） |
 | [tools/test-packages.ps1](tools/test-packages.ps1) | 包用例回归（单包/双包/菱形/离线/预算等） |
 | [tools/test-debug.ps1](tools/test-debug.ps1) | 调试表回归（双向查询/跨函数/跨包/剥离/损坏/旧文件） |
 | [tools/size-report.ps1](tools/size-report.ps1) | 固件 Flash/RAM 体积报告与基线对比（`-Label` 命名，`-UpdateBaseline` 更新基线） |
