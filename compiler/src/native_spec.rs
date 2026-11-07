@@ -2,8 +2,9 @@
 //!
 //! 这是「导入 模块」与 C 侧 `JmNativeEntry` 表的**唯一事实来源**：
 //! - `micc` 编译 `.jsh` 时据此做名字存在性、导入状态与参数个数的静态检查；
-//! - `micc --emit-native-header` 据此生成 `firmware/stm32f103/f103_native_table.h`，
+//! - `micc --emit-native-header` 据此生成 `runtime/include/jm_native_table.h`，
 //!   C 侧不再手写名字表（名字、参数个数、C 函数名都从同一份规格来）；
+//!   板级（`f103_native.c`）与主机端口（`jm_host_native.c`）展开同一份宏；
 //! - `micc --check-native` 校验入库的生成头与规格一致，防止有人只改一侧。
 //!
 //! 运行期仍然只按名字绑定：`.jmb` 里只有名字，`jm_native_bind_name` 在 `jm_run`
@@ -126,9 +127,30 @@ pub const MODULES: &[NativeModuleSpec] = &[
             },
         ],
     },
+    NativeModuleSpec {
+        name: "任务",
+        table: "task",
+        c_prefix: "JM_TASK",
+        entries: &[
+            NativeEntrySpec {
+                name: "让出",
+                min_args: 0,
+                max_args: 0,
+                c_fn: "n_task_yield",
+                doc: "主动让出 CPU 一次；板上交给 JMK 调度（同优先级轮转），主机是空操作。",
+            },
+            NativeEntrySpec {
+                name: "延时",
+                min_args: 1,
+                max_args: 1,
+                c_fn: "n_task_delay",
+                doc: "延时 0–60000 毫秒；板上阻塞当前任务并把 CPU 让给其他 JMK 任务，主机睡眠同样时长。",
+            },
+        ],
+    },
 ];
 
-pub const BOARD_HEADER_PATH: &str = "firmware/stm32f103/f103_native_table.h";
+pub const NATIVE_HEADER_PATH: &str = "runtime/include/jm_native_table.h";
 
 pub fn module(name: &str) -> Option<&'static NativeModuleSpec> {
     MODULES.iter().find(|m| m.name == name)
@@ -220,8 +242,9 @@ fn validate() -> Result<(), String> {
     Ok(())
 }
 
-/// 生成板级原生表头（`firmware/stm32f103/f103_native_table.h`）。
+/// 生成原生表头（`runtime/include/jm_native_table.h`）。
 /// 每个模块生成独立的一组宏：`<前缀>_TABLE_NAME` / `_ENTRY_COUNT` / `_TABLE_INIT`。
+/// 板级与主机端口都包含这一份头文件，只展开各自需要的表。
 pub fn render_c_header() -> Result<String, String> {
     validate()?;
 
@@ -264,7 +287,7 @@ pub fn render_c_header() -> Result<String, String> {
 }
 
 fn header_path() -> PathBuf {
-    crate::langcard::repo_root().join(BOARD_HEADER_PATH)
+    crate::langcard::repo_root().join(NATIVE_HEADER_PATH)
 }
 
 fn first_diff(expected: &str, actual: &str) -> String {
@@ -289,7 +312,7 @@ pub fn check() -> Result<(), String> {
             "{} 与 compiler/src/native_spec.rs 不一致：{}\n请运行 `micc --emit-native-header > {}` 重新生成",
             path.display(),
             first_diff(&want, &got),
-            BOARD_HEADER_PATH
+            NATIVE_HEADER_PATH
         ));
     }
     println!("原生表头通过校验：{} 与规格一致", path.display());

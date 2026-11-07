@@ -29,7 +29,8 @@ try {
         -I "runtime\include" -I "runtime\src" `
         "runtime\src\jm_heap.c" "runtime\src\jm_vm.c" "runtime\src\jm_builtin.c" `
         "runtime\src\jm_loader.c" "runtime\src\jm_error.c" "runtime\src\jm_native.c" `
-        "runtime\port\host\jm_port_host.c" "runtime\port\host\jm_main.c" `
+        "runtime\port\host\jm_port_host.c" "runtime\port\host\jm_host_native.c" `
+        "runtime\port\host\jm_main.c" `
         -o "build\jmrun.exe"
     if ($LASTEXITCODE -ne 0) { throw "jmrun 构建失败" }
 

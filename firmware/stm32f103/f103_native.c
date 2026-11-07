@@ -3,6 +3,7 @@
 #include "jm_port.h"
 #include "stm32f103_port.h"
 #include "f103_native.h"
+#include "jmk.h"
 
 /*
  * F103C8T6 板级原生函数表。
@@ -171,7 +172,33 @@ static int n_timer_count(JmStateRef st, const JmValue *args, uint8_t nargs,
     return JM_NATIVE_OK;
 }
 
-/* 表项由 micc --emit-native-header 生成，见 f103_native_table.h */
+/* 语言层「任务」模块：板上直接落到 JMK。 */
+static int n_task_yield(JmStateRef st, const JmValue *args, uint8_t nargs,
+                        JmValue *out) {
+    (void)args;
+    if (nargs != 0) {
+        return jm_native_fail(st, JM_NE_PARAM, "让出不接受参数");
+    }
+    jmk_yield();
+    *out = jm_value_nil();
+    return JM_NATIVE_OK;
+}
+
+static int n_task_delay(JmStateRef st, const JmValue *args, uint8_t nargs,
+                        JmValue *out) {
+    int32_t ms = 0;
+    if (arg_int(st, args, nargs, &ms, "延时需要一个参数：毫秒") != 0) {
+        return -1;
+    }
+    if (ms < 0 || ms > 60000) {
+        return jm_native_fail(st, JM_NE_PARAM, "延时范围 0–60000");
+    }
+    jmk_delay((uint32_t)ms);
+    *out = jm_value_nil();
+    return JM_NATIVE_OK;
+}
+
+/* 表项由 micc --emit-native-header 生成，见 runtime/include/jm_native_table.h */
 static const JmNativeEntry F103_TABLE[] = {
     F103_NATIVE_TABLE_INIT
 };
@@ -184,6 +211,10 @@ static const JmNativeEntry TIMER_TABLE[] = {
     F103_TIMER_TABLE_INIT
 };
 
+static const JmNativeEntry TASK_TABLE[] = {
+    JM_TASK_TABLE_INIT
+};
+
 int f103_native_register(void) {
     if (jm_native_register(F103_TABLE, (uint8_t)F103_NATIVE_ENTRY_COUNT) != 0) {
         return -1;
@@ -192,6 +223,9 @@ int f103_native_register(void) {
         return -1;
     }
     if (jm_native_register(TIMER_TABLE, (uint8_t)F103_TIMER_ENTRY_COUNT) != 0) {
+        return -1;
+    }
+    if (jm_native_register(TASK_TABLE, (uint8_t)JM_TASK_ENTRY_COUNT) != 0) {
         return -1;
     }
     return 0;

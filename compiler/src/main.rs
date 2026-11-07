@@ -27,7 +27,7 @@ fn usage() {
     eprintln!("      micc --symbols <x.jsh>                     # 列出定义：种类 名字 行 列");
     eprintln!("      micc --pack-files <包目录>                 # 包与依赖的入口文件（给编辑器跳转）");
     eprintln!("      micc --emit-header        # 导出 jm_opcodes.h");
-    eprintln!("      micc --emit-native-header # 导出板级原生表头 f103_native_table.h");
+    eprintln!("      micc --emit-native-header # 导出运行时原生表头 runtime/include/jm_native_table.h");
     eprintln!("      micc --check-native       # CI 校验原生表头没漂移（不一致则退出码 1）");
     eprintln!("      micc --langcard           # 生成 docs/语言卡.md 与 spec/langcard.json");
     eprintln!("      micc --check-langcard     # CI 校验语言卡没漂移（不一致则退出码 1）");

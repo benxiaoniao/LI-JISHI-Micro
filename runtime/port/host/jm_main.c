@@ -3,6 +3,9 @@
 #include <string.h>
 #include "jishim.h"
 
+/* 主机端口登记的原生表（见 jm_host_native.c） */
+int jm_host_native_register(void);
+
 #ifdef _WIN32
 #include <windows.h>
 /* argv 是系统 ANSI（中文 Windows 为 GBK）；输出前转成 UTF-8，避免中文路径乱码。 */
@@ -199,6 +202,12 @@ int main(int argc, char **argv) {
         return 2;
     }
     fclose(f);
+
+    if (jm_host_native_register() != 0) {
+        fprintf(stderr, "原生表登记失败（任务模块）\n");
+        free(buf);
+        return 2;
+    }
 
     int rc = jm_run(buf, (size_t)n);
     if (rc != 0) {

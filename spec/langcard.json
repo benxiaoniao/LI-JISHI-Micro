@@ -210,6 +210,14 @@
         {"name": "定时器延时", "min_args": 1, "max_args": 1, "doc": "按 TIM2 毫秒计数忙等 0–60000 毫秒；需先调用 定时器初始化。"},
         {"name": "定时器计数", "min_args": 0, "max_args": 0, "doc": "返回 TIM2 当前毫秒计数（0–65535，约 65.5 秒回绕）。"}
       ]
+    },
+    {
+      "module": "任务",
+      "table": "task",
+      "entries": [
+        {"name": "让出", "min_args": 0, "max_args": 0, "doc": "主动让出 CPU 一次；板上交给 JMK 调度（同优先级轮转），主机是空操作。"},
+        {"name": "延时", "min_args": 1, "max_args": 1, "doc": "延时 0–60000 毫秒；板上阻塞当前任务并把 CPU 让给其他 JMK 任务，主机睡眠同样时长。"}
+      ]
     }
   ],
   "opcodes": [

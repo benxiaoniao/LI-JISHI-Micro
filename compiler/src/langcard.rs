@@ -1114,7 +1114,7 @@ pub fn render_markdown() -> Result<String, String> {
         }
         m.push('\n');
     }
-    m.push_str("单一事实来源：`compiler/src/native_spec.rs`。`micc --emit-native-header` 生成 `firmware/stm32f103/f103_native_table.h`，C 侧 `JmNativeEntry` 表由该头展开；`micc --check-native` 在构建里比对，防止只改一侧。运行期仍由 `jm_native_register` 按名字绑定。\n\n");
+    m.push_str("单一事实来源：`compiler/src/native_spec.rs`。`micc --emit-native-header` 生成 `runtime/include/jm_native_table.h`，板级与主机端口都展开同一份头；`micc --check-native` 在构建里比对，防止只改一侧。运行期仍由 `jm_native_register` 按名字绑定。\n\n");
 
     m.push_str("## 操作码\n\n");
     m.push_str("字节码由 `micc` 生成，运行时要与 `runtime/include/jm_opcodes.h` 逐条对齐。\n\n");

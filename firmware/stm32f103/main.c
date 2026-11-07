@@ -21,6 +21,14 @@
 extern const unsigned char jm_app_jmb[];
 extern const uint32_t jm_app_jmb_len;
 
+/* 砾程序任务的栈：VM 自身用固定状态区，C 栈只留函数帧与格式化缓冲。 */
+#define VM_TASK_STACK_BYTES 1024u
+
+/* vm 栈诊断：程序结束后用 0xA5 哨兵峰值与耗时打一行；默认开，可 -DJM_STACK_DIAG=0 关掉。 */
+#ifndef JM_STACK_DIAG
+#define JM_STACK_DIAG 1
+#endif
+
 #if JMK_IPC_DEMO
 /* ---- 任务间通信示例：led 生产，log 消费 ----
  * 数据路径：led 每 200 ms 产生一个序号 → 入队（调用方提供 8 × 4 B 缓冲）
@@ -231,6 +239,40 @@ static void task_churn(void *arg)
 }
 #endif /* JMK_STACK_CHURN_DEMO */
 
+/* 砾程序作为独立 JMK 任务运行：让语言层 让出()/延时() 真正落到调度器上。 */
+static void task_vm(void *arg)
+{
+#if JM_STACK_DIAG
+    uint32_t t0 = jmk_ticks();
+#endif
+
+    (void)arg;
+    if (jm_run(jm_app_jmb, (size_t)jm_app_jmb_len) == 0) {
+        port_log("\r\n[砾] 程序正常结束\r\n");
+    } else {
+        port_log("\r\n[砾] 运行失败: ");
+        port_log(jm_last_error());
+        port_log("\r\n");
+    }
+
+#if JM_STACK_DIAG
+    /* 栈峰值：栈创建时已用 0xA5 填满，jmk_stack_used 扫描未被覆盖的部分 */
+    if (jmk_current) {
+        uint32_t cap = jmk_current->stack_words * 4u;
+        uint32_t used = jmk_stack_used(jmk_current);
+        port_log("[砾] vm 栈峰值=");
+        port_log_u32(used);
+        port_log(" B / ");
+        port_log_u32(cap);
+        port_log(" B，余量=");
+        port_log_u32(cap - used);
+        port_log(" B，耗时=");
+        port_log_u32(jmk_ticks() - t0);
+        port_log(" ms\r\n");
+    }
+#endif
+}
+
 int main(void)
 {
     port_init();
@@ -252,17 +294,11 @@ int main(void)
         port_log(F103_ADC_TABLE_NAME);
         port_log(", ");
         port_log(F103_TIMER_TABLE_NAME);
+        port_log(", ");
+        port_log(JM_TASK_TABLE_NAME);
         port_log("\r\n");
     }
     port_log("\r\n");
-
-    if (jm_run(jm_app_jmb, (size_t)jm_app_jmb_len) == 0) {
-        port_log("\r\n[砾] 程序正常结束\r\n");
-    } else {
-        port_log("\r\n[砾] 运行失败: ");
-        port_log(jm_last_error());
-        port_log("\r\n");
-    }
 
 #if JMK_IPC_DEMO
     port_log("[同步] 队列缓冲: ");
@@ -277,13 +313,17 @@ int main(void)
         jmk_sem_init(&g_probe_sem, 0, 1) != JMK_OK) {
         port_log("[同步] 初始化失败\r\n");
     }
-    port_log("\r\n[内核] 启动调度器：led(生产,优先2) / log(消费,优先1)\r\n");
+    port_log("\r\n[内核] 启动调度器：vm(优先2) / led(生产,优先2) / log(消费,优先1)\r\n");
 #elif JMK_STACK_CHURN_DEMO
-    port_log("\r\n[内核] 启动调度器：churn(优先3) / led(优先2) / log(优先1)\r\n");
+    port_log("\r\n[内核] 启动调度器：churn(优先3) / vm(优先2) / led(优先2) / log(优先1)\r\n");
 #else
-    port_log("\r\n[内核] 启动调度器：led(优先2) / log(优先1)\r\n");
+    port_log("\r\n[内核] 启动调度器：vm(优先2) / led(优先2) / log(优先1)\r\n");
 #endif
 
+    if (jmk_task_create_ex(task_vm, 0, 2u, "vm", VM_TASK_STACK_BYTES) < 0) {
+        port_log("[内核] 创建 vm 任务失败（栈池不足），退回主上下文运行\r\n");
+        task_vm(0);
+    }
     if (jmk_task_create(task_led, 0, 2u, "led") < 0) {
         port_log("[内核] 创建 led 任务失败\r\n");
     }

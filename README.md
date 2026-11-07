@@ -26,7 +26,7 @@ PC 上：  .jsh 源码 ──micc──▶  .jmb 微字节码
 | 语言能力 | `令`/赋值/复合赋值、`如果/否则如果/否则`、`当`、`循环 N 次`、`遍历`、`中断/继续`、`函数/返回/递归`、闭包（值捕获、只读）、`抛出/尝试/捕获`、类（`类`/`新建`/`本`/字段与方法，无继承）；列表、字典、文本（UTF-8 码点）、小数（Q12 定点） |
 | 内建 | `打印 文本 整数 小数 长度 范围 类型 总和 最大 最小 绝对值` |
 | JMK 内核 | 抢占式固定优先级调度（PendSV 切换）、SysTick 1 kHz、6 个用户任务 + 空闲任务、4 档优先级、动态栈池（默认 3200 B）或静态 6×512 B、信号量、消息队列、毫秒延时/让出 |
-| 板级原生表 | `引脚`（5 项）、`ADC`（2 项）、`定时器`（3 项）；由 `compiler/src/native_spec.rs` 单一事实来源生成 `f103_native_table.h` |
+| 板级原生表 | `引脚`（5 项）、`ADC`（2 项）、`定时器`（3 项）、`任务`（2 项）；由 `compiler/src/native_spec.rs` 单一事实来源生成 `runtime/include/jm_native_table.h`，板级与主机端口共用 |
 | 语言卡 | [docs/语言卡.md](docs/语言卡.md) + [spec/langcard.json](spec/langcard.json)，由操作码/原生表/内建/错误码渲染；`--check-langcard` 防漂移 |
 | 规范校验 | `--check-native`、`--check-langcard` 进构建链路，头文件或语言卡落后于规范即失败 |
 | 可复现工具链 | `tools/toolchains/toolchain.lock.json` + `tools/fetch-toolchain.ps1`，按锁文件哈希安装 |
@@ -91,7 +91,7 @@ powershell -ExecutionPolicy Bypass -File tools\build-firmware.ps1 -Example board
 ```powershell
 compiler\target\release\micc.exe --langcard          # 生成 docs\语言卡.md 与 spec\langcard.json
 compiler\target\release\micc.exe --check-langcard    # 校验语言卡没漂移
-compiler\target\release\micc.exe --check-native      # 校验 f103_native_table.h 没漂移
+compiler\target\release\micc.exe --check-native      # 校验 runtime\include\jm_native_table.h 没漂移
 compiler\target\release\micc.exe --emit-header       # 重新导出 runtime\include\jm_opcodes.h
 compiler\target\release\micc.exe --emit-native-header
 ```
@@ -201,22 +201,22 @@ compiler/                  Rust 编译器 micc
   src/parser.rs              语法（砾 Core 子集）
   src/codegen.rs             作用域分析与代码生成
   src/opcodes.rs             操作码唯一事实来源（导出 jm_opcodes.h）
-  src/native_spec.rs         板级原生表唯一事实来源（导出 f103_native_table.h）
+  src/native_spec.rs         原生表唯一事实来源（导出 runtime/include/jm_native_table.h）
   src/langcard.rs            语言卡生成器
   src/error.rs               编译期错误码与文案
   src/writer.rs              .jmb 写出与反汇编
   src/debug.rs               .jmb 调试段解析与行号双向查询
 runtime/                   C99 运行时（不依赖 HAL，可移植）
-  include/                   jishim.h / jm_native.h / jm_port.h / jm_opcodes.h（生成）
+  include/                   jishim.h / jm_native.h / jm_port.h / jm_opcodes.h / jm_native_table.h（后两者生成）
   src/                       vm / heap / builtin / loader / native / error
-  port/host/                 PC 端口（stdout）与 jmrun 入口
+  port/host/                 PC 端口（stdout、任务表）与 jmrun 入口
 firmware/stm32f103/        板级固件
   startup_stm32f103c8.s      启动与向量表
   stm32f103c8.ld             64 KB Flash / 20 KB RAM 链接脚本
   jmk.c / jmk.h / jmk_port_cm3.s   JMK 任务内核
   stm32f103_port.c / .h      USART1 / SysTick / GPIO / ADC1 / TIM2
-  f103_native.c / f103_native_table.h  原生函数实现与生成表
-  main.c                     启动横幅、注册原生表、跑内嵌字节码
+  f103_native.c             原生函数实现（展开 runtime/include/jm_native_table.h）
+  main.c                     启动横幅、注册原生表、把内嵌字节码放进 JMK 任务运行
 examples/                  砾源码示例（board/ 下是上板示例）
 tests/expected/            主机回归基准输出
 tests/errors/              编译期 / 运行期错误用例
