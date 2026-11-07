@@ -7,10 +7,13 @@ try {
     $jmrun = "build\jmrun.exe"
     $cases = @(
         @{ file = "除零.jsh";       code = "E007"; stage = "运行" },
+        @{ file = "小数除零.jsh";   code = "E007"; stage = "运行" },
         @{ file = "真除法.jsh";     code = "E023"; stage = "运行" },
         @{ file = "未定义名字.jsh"; code = "E004"; stage = "运行" },
+        @{ file = "小数溢出.jsh";   code = "E009"; stage = "运行" },
+        @{ file = "小数下标.jsh";   code = "E013"; stage = "运行" },
         @{ file = "闭包.jsh";       code = "E101"; stage = "编译" },
-        @{ file = "小数.jsh";       code = "E102"; stage = "编译" },
+        @{ file = "指数.jsh";       code = "E102"; stage = "编译" },
         @{ file = "类.jsh";         code = "E103"; stage = "编译" }
     )
     $fail = 0

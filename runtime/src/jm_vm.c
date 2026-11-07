@@ -69,6 +69,25 @@ static int load_const(JmState *st, uint8_t idx, JmValue *out) {
         *out = v;
         return 0;
     }
+    case K_DEC: {
+        if (st->const_cache[idx] != JM_UNDEF) {
+            *out = st->const_cache[idx];
+            jm_retain(*out);
+            return 0;
+        }
+        int32_t raw = (int32_t)rd32(e + 4);
+        if (raw < JM_DEC_RAW_MIN || raw > JM_DEC_RAW_MAX) {
+            return jm_fail(st, E_CONST, "小数常量超出 Q12 值域");
+        }
+        JmValue v;
+        if (jm_dec_new(st, raw, &v)) {
+            return -1;
+        }
+        st->const_cache[idx] = v;
+        jm_retain(v);
+        *out = v;
+        return 0;
+    }
     case K_NIL:
         *out = JM_NIL;
         return 0;
@@ -106,6 +125,8 @@ int jm_truthy(JmValue v) {
             return ((JmDict *)o)->len != 0;
         case JM_T_RANGE:
             return ((JmRange *)o)->len != 0;
+        case JM_T_DEC:
+            return ((JmDec *)o)->raw != 0;
         default:
             return 1;
         }
@@ -119,6 +140,13 @@ int jm_equal(JmValue a, JmValue b) {
     uint8_t ta = JM_TAG(a), tb = JM_TAG(b);
     if (ta == JM_TAG_INT && tb == JM_TAG_INT) {
         return jm_int(a) == jm_int(b);
+    }
+    /* 整数与小数按数值比较：整数 × 4096 对齐到 Q12。 */
+    if (ta == JM_TAG_INT && jm_is_dec(b)) {
+        return (int64_t)jm_int(a) * JM_DEC_SCALE == (int64_t)jm_dec_raw(b);
+    }
+    if (tb == JM_TAG_INT && jm_is_dec(a)) {
+        return (int64_t)jm_int(b) * JM_DEC_SCALE == (int64_t)jm_dec_raw(a);
     }
     if (ta != tb) {
         return 0;
@@ -146,6 +174,9 @@ int jm_equal(JmValue a, JmValue b) {
             JmStr *sb = (JmStr *)ob;
             return sa->len == sb->len &&
                    (sa->len == 0 || memcmp(sa->data, sb->data, sa->len) == 0);
+        }
+        if (oa->type == JM_T_DEC && ob->type == JM_T_DEC) {
+            return ((JmDec *)oa)->raw == ((JmDec *)ob)->raw;
         }
         if (oa->type == JM_T_LIST) {
             JmList *la = (JmList *)oa;
@@ -204,6 +235,9 @@ int jm_type_name(JmValue v, const char **name) {
         case JM_T_ITER:
             *name = "迭代器";
             return 0;
+        case JM_T_DEC:
+            *name = "小数";
+            return 0;
         default:
             *name = "对象";
             return 0;
@@ -217,6 +251,63 @@ int jm_type_name(JmValue v, const char **name) {
 
 static int int_range_ok(int64_t v) {
     return v >= JM_INT_MIN && v <= JM_INT_MAX;
+}
+
+/* 数值统一取 Q12 raw：整数 × 4096，小数直接取 raw。 */
+static int num_raw(JmValue v, int64_t *raw) {
+    if (JM_TAG(v) == JM_TAG_INT) {
+        *raw = (int64_t)jm_int(v) * JM_DEC_SCALE;
+        return 1;
+    }
+    if (jm_is_dec(v)) {
+        *raw = (int64_t)jm_dec_raw(v);
+        return 1;
+    }
+    return 0;
+}
+
+static int dec_raw_ok(int64_t raw) {
+    return raw >= JM_DEC_RAW_MIN && raw <= JM_DEC_RAW_MAX;
+}
+
+/* 四舍五入（远离零），d 必须为正。 */
+static int64_t round_div(int64_t n, int64_t d) {
+    if (n >= 0) {
+        return (n + d / 2) / d;
+    }
+    return -(((-n) + d / 2) / d);
+}
+
+static int64_t floor_div64(int64_t a, int64_t b) {
+    int64_t q = a / b;
+    int64_t m = a % b;
+    if (m != 0 && ((m < 0) != (b < 0))) {
+        q--;
+    }
+    return q;
+}
+
+/* 64 位乘法：先判断是否越界，避免 C 的有符号乘法回绕。
+ * a、b 的绝对值都远小于 INT64_MAX；预留舍入用的半个除数。 */
+static int mul_guard(int64_t a, int64_t b, int64_t *out) {
+    if (a == 0 || b == 0) {
+        *out = 0;
+        return 1;
+    }
+    int64_t aa = a < 0 ? -a : a;
+    int64_t bb = b < 0 ? -b : b;
+    if (aa > (INT64_MAX - JM_DEC_SCALE / 2) / bb) {
+        return 0;
+    }
+    *out = a * b;
+    return 1;
+}
+
+static int dec_result(JmState *st, int64_t raw, JmValue *out) {
+    if (!dec_raw_ok(raw)) {
+        return jm_fail(st, E_OVERFLOW, "小数溢出（Q12 值域约 ±524288）");
+    }
+    return jm_dec_new(st, (int32_t)raw, out);
 }
 
 int jm_binop(JmState *st, uint8_t sub, JmValue l, JmValue r, JmValue *out) {
@@ -239,7 +330,8 @@ int jm_binop(JmState *st, uint8_t sub, JmValue l, JmValue r, JmValue *out) {
                 return jm_fail(st, E_ZERO_DIV, "除以零");
             }
             if (a % b != 0) {
-                return jm_fail(st, E_DIV_NONINT, "真除法结果不是整数（v0 无小数）");
+                return jm_fail(st, E_DIV_NONINT,
+                               "整数真除法结果不是整数；改用 // 或写成小数（如 3300.0）");
             }
             res = a / b;
             break;
@@ -287,6 +379,91 @@ int jm_binop(JmState *st, uint8_t sub, JmValue l, JmValue r, JmValue *out) {
         }
         *out = jm_v_int((int32_t)res);
         return 0;
+    }
+
+    /* 小数路径：任一操作数是小数，结果按 Q12 计算（/ 不再要求整除）。 */
+    {
+        int64_t A = 0, B = 0;
+        if ((jm_is_dec(l) || jm_is_dec(r)) && num_raw(l, &A) && num_raw(r, &B)) {
+            int64_t raw = 0;
+            switch (sub) {
+            case BIN_ADD:
+                raw = A + B;
+                break;
+            case BIN_SUB:
+                raw = A - B;
+                break;
+            case BIN_MUL: {
+                int64_t prod;
+                if (!mul_guard(A, B, &prod)) {
+                    return jm_fail(st, E_OVERFLOW, "小数溢出（Q12 值域约 ±524288）");
+                }
+                raw = round_div(prod, JM_DEC_SCALE);
+                break;
+            }
+            case BIN_DIV: {
+                if (B == 0) {
+                    return jm_fail(st, E_ZERO_DIV, "除以零");
+                }
+                int64_t n = A * JM_DEC_SCALE;
+                int64_t d = B;
+                if (d < 0) {
+                    d = -d;
+                    n = -n;
+                }
+                raw = round_div(n, d);
+                break;
+            }
+            case BIN_FLOORDIV: {
+                if (B == 0) {
+                    return jm_fail(st, E_ZERO_DIV, "除以零");
+                }
+                int64_t q = floor_div64(A, B);
+                if (!int_range_ok(q)) {
+                    return jm_fail(st, E_OVERFLOW, "整数溢出");
+                }
+                *out = jm_v_int((int32_t)q);
+                return 0;
+            }
+            case BIN_MOD: {
+                if (B == 0) {
+                    return jm_fail(st, E_ZERO_MOD, "取模零");
+                }
+                int64_t q = floor_div64(A, B);
+                raw = A - B * q;
+                break;
+            }
+            case BIN_POW: {
+                int64_t e;
+                if (JM_TAG(r) == JM_TAG_INT) {
+                    e = jm_int(r);
+                } else if (jm_is_dec(r) && jm_dec_raw(r) % JM_DEC_SCALE == 0) {
+                    e = jm_dec_raw(r) / JM_DEC_SCALE;
+                } else {
+                    return jm_fail(st, E_POW, "幂指数必须是整数");
+                }
+                if (e < 0) {
+                    return jm_fail(st, E_POW, "幂指数不能是负数");
+                }
+                int64_t acc = JM_DEC_SCALE; /* 1.0 */
+                for (int64_t i = 0; i < e; i++) {
+                    int64_t prod;
+                    if (!mul_guard(acc, A, &prod)) {
+                        return jm_fail(st, E_OVERFLOW, "小数溢出");
+                    }
+                    acc = round_div(prod, JM_DEC_SCALE);
+                    if (!dec_raw_ok(acc)) {
+                        return jm_fail(st, E_OVERFLOW, "小数溢出");
+                    }
+                }
+                raw = acc;
+                break;
+            }
+            default:
+                return jm_fail(st, E_TYPE, "未知运算");
+            }
+            return dec_result(st, raw, out);
+        }
     }
 
     if (sub == BIN_ADD && JM_TAG(l) == JM_TAG_HEAP && JM_TAG(r) == JM_TAG_HEAP) {
@@ -353,6 +530,25 @@ int jm_compare(JmState *st, uint8_t sub, JmValue l, JmValue r, JmValue *out) {
         case CMP_GE:
             *out = jm_v_bool(a >= b);
             return 0;
+        }
+    }
+    {
+        int64_t A = 0, B = 0;
+        if ((jm_is_dec(l) || jm_is_dec(r)) && num_raw(l, &A) && num_raw(r, &B)) {
+            switch (sub) {
+            case CMP_LT:
+                *out = jm_v_bool(A < B);
+                return 0;
+            case CMP_GT:
+                *out = jm_v_bool(A > B);
+                return 0;
+            case CMP_LE:
+                *out = jm_v_bool(A <= B);
+                return 0;
+            case CMP_GE:
+                *out = jm_v_bool(A >= B);
+                return 0;
+            }
         }
     }
     if (JM_TAG(l) == JM_TAG_HEAP && JM_TAG(r) == JM_TAG_HEAP) {
@@ -766,9 +962,22 @@ int jm_execute(JmState *st) {
         case OP_NEG: {
             JmValue v;
             POP_V(v);
+            if (jm_is_dec(v)) {
+                int64_t n = -(int64_t)jm_dec_raw(v);
+                jm_release(v);
+                if (!dec_raw_ok(n)) {
+                    VM_FAIL(E_OVERFLOW, "小数溢出");
+                }
+                JmValue out;
+                if (jm_dec_new(st, (int32_t)n, &out)) {
+                    VM_FAIL(E_OOM, "创建小数失败");
+                }
+                PUSH_V(out);
+                break;
+            }
             if (JM_TAG(v) != JM_TAG_INT) {
                 jm_release(v);
-                VM_FAIL(E_TYPE, "只有整数能取负");
+                VM_FAIL(E_TYPE, "只有整数或小数能取负");
             }
             int64_t n = -(int64_t)jm_int(v);
             jm_release(v);

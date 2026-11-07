@@ -34,6 +34,8 @@ pub enum Tok {
     Eof,
     Ident(String),
     Int(i64),
+    /// 小数字面量：已折算成 Q12 定点原始值（真实值 × 4096）。
+    Dec(i64),
     Str(String),
     Kw(Kw),
     Op(&'static str),
@@ -262,12 +264,8 @@ impl Lexer {
             }
             let col = i as u32 + 1;
             if c.is_ascii_digit() {
-                let (val, next) = self.read_number(chars, i, line, col)?;
-                self.tokens.push(Token {
-                    tok: Tok::Int(val),
-                    line,
-                    col,
-                });
+                let (tok, next) = self.read_number(chars, i, line, col)?;
+                self.tokens.push(Token { tok, line, col });
                 i = next;
                 continue;
             }
@@ -366,32 +364,86 @@ impl Lexer {
         start: usize,
         line: u32,
         col: u32,
-    ) -> Result<(i64, usize)> {
+    ) -> Result<(Tok, usize)> {
+        const MAX_RAW: u128 = (1u128 << 31) - 1; // int32 原始值上限，对应值域 ±524288
+        const FRAC_BITS: u32 = 12;
+        const FRAC_SCALE: u128 = 1u128 << FRAC_BITS;
+
         let mut i = start;
         while i < chars.len() && chars[i].is_ascii_digit() {
             i += 1;
         }
-        if i < chars.len() {
-            let n = norm(chars[i]);
-            if (n == '.' && i + 1 < chars.len() && chars[i + 1].is_ascii_digit())
-                || n == '.'
-                || n == 'e'
-                || n == 'E'
-            {
+
+        let is_dec = i < chars.len() && norm(chars[i]) == '.';
+        if !is_dec {
+            if i < chars.len() && matches!(norm(chars[i]), 'e' | 'E') {
                 return Err(CompileError::new(
                     "E102",
                     line,
                     col,
-                    "Micro Core v0 不支持小数",
-                )
-                .with_hint("先用整数；小数在 JM5 加入"));
+                    "不支持指数形式的数字字面量（如 1e3）",
+                ));
             }
+            let text: String = chars[start..i].iter().collect();
+            return match text.parse::<i64>() {
+                Ok(v) => Ok((Tok::Int(v), i)),
+                Err(_) => Err(CompileError::new("E110", line, col, "整数太大")),
+            };
         }
-        let text: String = chars[start..i].iter().collect();
-        match text.parse::<i64>() {
-            Ok(v) => Ok((v, i)),
-            Err(_) => Err(CompileError::new("E110", line, col, "整数太大")),
+
+        // 小数：小数点后必须有数字；不支持指数。
+        let mut j = i + 1;
+        while j < chars.len() && chars[j].is_ascii_digit() {
+            j += 1;
         }
+        if j == i + 1 {
+            return Err(CompileError::new(
+                "E102",
+                line,
+                col,
+                "小数点后要有数字（如 3.14）",
+            ));
+        }
+        if j < chars.len() && matches!(norm(chars[j]), 'e' | 'E') {
+            return Err(CompileError::new(
+                "E102",
+                line,
+                col,
+                "不支持指数形式的数字字面量（如 1e3）",
+            ));
+        }
+
+        let mut int_part: u128 = 0;
+        for c in &chars[start..i] {
+            let d = (*c as u32 - '0' as u32) as u128;
+            int_part = match int_part.checked_mul(10).and_then(|x| x.checked_add(d)) {
+                Some(v) => v,
+                None => return Err(CompileError::new("E110", line, col, "小数太大")),
+            };
+        }
+
+        // 1/4096 精度只需前 12 位，其余位不影响 Q12 舍入。
+        let mut frac_num: u128 = 0;
+        let mut frac_den: u128 = 1;
+        for (k, c) in chars[i + 1..j].iter().enumerate() {
+            if k >= 12 {
+                break;
+            }
+            frac_num = frac_num * 10 + ((*c as u32 - '0' as u32) as u128);
+            frac_den *= 10;
+        }
+        let frac_raw = (frac_num * FRAC_SCALE + frac_den / 2) / frac_den;
+
+        let raw = int_part * FRAC_SCALE + frac_raw;
+        if raw > MAX_RAW {
+            return Err(CompileError::new(
+                "E110",
+                line,
+                col,
+                "小数超出 Q12 值域（约 ±524288）",
+            ));
+        }
+        Ok((Tok::Dec(raw as i64), j))
     }
 
     fn read_ident(&self, chars: &[char], start: usize) -> (String, usize) {

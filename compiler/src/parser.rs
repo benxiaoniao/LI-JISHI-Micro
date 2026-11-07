@@ -551,6 +551,14 @@ impl Parser {
                     col,
                 })
             }
+            Tok::Dec(v) => {
+                self.pos += 1;
+                Ok(Expr {
+                    kind: ExprKind::Dec(v),
+                    line,
+                    col,
+                })
+            }
             Tok::Str(s) => {
                 self.pos += 1;
                 Ok(Expr {

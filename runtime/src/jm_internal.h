@@ -58,6 +58,15 @@ static inline JmValue jm_v_builtin(uint8_t id) {
 #define JM_T_DICT 3u
 #define JM_T_ITER 4u
 #define JM_T_RANGE 5u
+#define JM_T_DEC 6u
+
+/* 小数：Q12 定点，raw = 真实值 × 4096。
+ * raw 用完整 int32（不是 29 位），故值域约 ±524288、精度 1/4096。
+ * 混算时整数按 ×4096 提升到 Q12，中间量用 int64。 */
+#define JM_DEC_FRAC_BITS 12
+#define JM_DEC_SCALE 4096
+#define JM_DEC_RAW_MAX 2147483647
+#define JM_DEC_RAW_MIN (-2147483647)
 
 typedef struct {
     uint16_t type;
@@ -103,6 +112,11 @@ typedef struct {
     uint32_t len;
 } JmRange;
 
+typedef struct {
+    JmObj o;
+    int32_t raw; /* Q12 原始值：真实值 × 4096 */
+} JmDec;
+
 extern uint8_t jm_heap[JM_HEAP_SIZE];
 static inline void *jm_obj_ptr(JmValue v) {
     return (void *)(jm_heap + JM_PAYLOAD(v));
@@ -110,6 +124,13 @@ static inline void *jm_obj_ptr(JmValue v) {
 static inline JmObj *jm_obj(JmValue v) { return (JmObj *)jm_obj_ptr(v); }
 static inline JmValue jm_heap_value(const void *p) {
     return jm_v_heap((uint32_t)((const uint8_t *)p - jm_heap));
+}
+
+static inline int jm_is_dec(JmValue v) {
+    return JM_TAG(v) == JM_TAG_HEAP && jm_obj(v)->type == JM_T_DEC;
+}
+static inline int32_t jm_dec_raw(JmValue v) {
+    return ((JmDec *)jm_obj(v))->raw;
 }
 
 /* ---------------- 错误 ---------------- */
@@ -196,12 +217,14 @@ JmList *jm_list_new_obj(void);
 JmDict *jm_dict_new_obj(void);
 JmIter *jm_iter_new_obj(JmValue container, uint32_t kind);
 JmRange *jm_range_new_obj(int32_t start, int32_t step, uint32_t len);
+JmDec *jm_dec_new_obj(int32_t raw);
 
 int jm_list_reserve(JmState *st, JmList *l, uint32_t need);
 int jm_list_push(JmState *st, JmList *l, JmValue v);
 int jm_dict_set(JmState *st, JmDict *d, JmValue k, JmValue v);
 int jm_str_new(JmState *st, const char *s, uint32_t len, JmValue *out);
 int jm_list_new(JmState *st, JmValue *out);
+int jm_dec_new(JmState *st, int32_t raw, JmValue *out);
 
 void jm_retain(JmValue v);
 void jm_release(JmValue v);

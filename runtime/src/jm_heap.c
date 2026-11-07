@@ -187,6 +187,15 @@ JmRange *jm_range_new_obj(int32_t start, int32_t step, uint32_t len) {
     return r;
 }
 
+JmDec *jm_dec_new_obj(int32_t raw) {
+    JmDec *d = (JmDec *)jm_obj_alloc(JM_T_DEC, sizeof(JmDec) - sizeof(JmObj));
+    if (!d) {
+        return NULL;
+    }
+    d->raw = raw;
+    return d;
+}
+
 int jm_list_reserve(JmState *st, JmList *l, uint32_t need) {
     if (l->cap >= need) {
         return 0;
@@ -266,6 +275,15 @@ int jm_list_new(JmState *st, JmValue *out) {
         return jm_fail(st, E_OOM, "创建列表失败");
     }
     *out = jm_heap_value(l);
+    return 0;
+}
+
+int jm_dec_new(JmState *st, int32_t raw, JmValue *out) {
+    JmDec *d = jm_dec_new_obj(raw);
+    if (!d) {
+        return jm_fail(st, E_OOM, "创建小数失败");
+    }
+    *out = jm_heap_value(d);
     return 0;
 }
 

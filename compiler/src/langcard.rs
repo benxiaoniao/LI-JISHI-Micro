@@ -44,7 +44,13 @@ pub const BUILTIN_DOCS: &[BuiltinDoc] = &[
         name: "整数",
         min_args: 1,
         max_args: 1,
-        doc: "整数原样返回；数字文本按十进制解析；其他值报类型错误。",
+        doc: "整数原样返回；小数向零截断；数字文本按十进制解析；其他值报类型错误。",
+    },
+    BuiltinDoc {
+        name: "小数",
+        min_args: 1,
+        max_args: 1,
+        doc: "整数或小数转成 Q12 定点小数；超出 ±524288 报溢出。",
     },
     BuiltinDoc {
         name: "长度",
@@ -62,7 +68,7 @@ pub const BUILTIN_DOCS: &[BuiltinDoc] = &[
         name: "类型",
         min_args: 1,
         max_args: 1,
-        doc: "返回类型名文本：整数 / 文本 / 列表 / 字典 / 范围 / 函数 / 内建 / 空 / 真 / 假 / 未定义。",
+        doc: "返回类型名文本：整数 / 小数 / 文本 / 列表 / 字典 / 范围 / 函数 / 内建 / 空 / 真 / 假 / 未定义。",
     },
     BuiltinDoc {
         name: "总和",
@@ -86,7 +92,7 @@ pub const BUILTIN_DOCS: &[BuiltinDoc] = &[
         name: "绝对值",
         min_args: 1,
         max_args: 1,
-        doc: "整数的绝对值；超出 29 位范围报整数溢出。",
+        doc: "整数或小数的绝对值；超出各自范围报溢出。",
     },
 ];
 
@@ -118,7 +124,7 @@ pub const RUNTIME_ERROR_DOCS: &[RuntimeErrorDoc] = &[
     RuntimeErrorDoc { name: "E_CODE", meaning: "函数代码对象越界" },
     RuntimeErrorDoc { name: "E_FRAMES", meaning: "调用层数太深（上限 32）" },
     RuntimeErrorDoc { name: "E_OPCODE", meaning: "未知指令或指令流越界" },
-    RuntimeErrorDoc { name: "E_DIV_NONINT", meaning: "真除法结果不是整数（v0 没有小数）" },
+    RuntimeErrorDoc { name: "E_DIV_NONINT", meaning: "整数真除法结果不是整数；改用 //，或让任一操作数成为小数（如 3300.0）" },
     RuntimeErrorDoc { name: "E_POW", meaning: "幂指数不能是负数" },
     RuntimeErrorDoc { name: "E_IMPORT", meaning: "导入指令保留（编译期导入不生成该指令）" },
     RuntimeErrorDoc { name: "E_FILE", meaning: "字节码文件损坏或超出边界" },
@@ -255,12 +261,12 @@ struct SemanticRow {
 
 const SEMANTICS: &[SemanticRow] = &[
     SemanticRow { topic: "整数", rule: "29 位有符号：-268435456 .. 268435455；字面量与运算结果越界都报错。" },
-    SemanticRow { topic: "没有小数", rule: "v0 只有整数；带小数点或指数的字面量是编译错误（E102），`/` 不能整除也是运行错误（E_DIV_NONINT）。" },
-    SemanticRow { topic: "加法重载", rule: "`+` 支持 整数+整数、文本+文本（拼接）、列表+列表（连接）；其他组合报类型错误。" },
-    SemanticRow { topic: "除法", rule: "`/` 要求整除；`//` 向下取整（负数也向下）；`%` 结果非负（符号跟随除数）。" },
-    SemanticRow { topic: "幂", rule: "`**` 的指数必须是非负整数，按循环乘实现，溢出即报错。" },
-    SemanticRow { topic: "比较", rule: "`< > <= >=` 只支持 整数对整数、文本对文本（按 UTF-8 字节字典序）；`== !=` 对所有类型成立。" },
-    SemanticRow { topic: "真值", rule: "假：0、空、假、未定义、空文本、空列表、空字典、空范围；其余为真（含函数与内建）。" },
+    SemanticRow { topic: "小数", rule: "Q12 定点：raw = 值 × 4096，值域约 ±524288，精度 1/4096（0.000244）；字面量小数点后必须有数字，不支持指数（E102）。" },
+    SemanticRow { topic: "加法重载", rule: "`+` 支持 整数/小数相加、文本+文本（拼接）、列表+列表（连接）；其他组合报类型错误。" },
+    SemanticRow { topic: "除法", rule: "整数/整数时 `/` 要求整除，否则报 E023；任一操作数是小数时 `/` 返回小数（四舍五入）。`//` 向下取整且返回整数；`%` 结果符号跟随除数。" },
+    SemanticRow { topic: "幂", rule: "`**` 的指数必须是非负整数；结果按重复乘实现，溢出即报错。" },
+    SemanticRow { topic: "比较", rule: "`< > <= >=` 支持整数/小数混合按数值比较、文本对文本（按 UTF-8 字节字典序）；`== !=` 对所有类型成立。" },
+    SemanticRow { topic: "真值", rule: "假：0、0.0、空、假、未定义、空文本、空列表、空字典、空范围；其余为真（含函数与内建）。" },
     SemanticRow { topic: "下标", rule: "列表/文本支持负下标（-1 是最后一个）；字典按键查找，键不存在报 E_INDEX；文本下标按字符而不是字节。" },
     SemanticRow { topic: "原生模块", rule: "`导入 模块` 只能写在模块顶层；导入后模块里的原生函数名才能调用，名字与参数个数在编译期校验（E112/E113/E115）；`.jmb` 仍只带名字，运行期由 native 表绑定。" },
     SemanticRow { topic: "作用域", rule: "函数内的 `令` 是局部槽；未在函数内声明而同名的读取会落到模块级全局（v0 没有闭包）。" },
@@ -278,6 +284,7 @@ struct LimitRow {
 
 const LIMITS: &[LimitRow] = &[
     LimitRow { item: "整数范围", value: "-268435456 .. 268435455（29 位）" },
+    LimitRow { item: "小数范围/精度", value: "约 ±524288，精度 1/4096（Q12 定点）" },
     LimitRow { item: "名字/常量", value: "各 255 个" },
     LimitRow { item: "函数", value: "255 个" },
     LimitRow { item: "局部变量/函数", value: "255 个" },
@@ -330,16 +337,16 @@ struct Pitfall {
 
 const PITFALLS: &[Pitfall] = &[
     Pitfall {
-        title: "小数不存在",
-        bad: "令 x = 1.5",
-        good: "令 x = 3 / 2\n令 余 = 3 % 2",
-        why: "v0 只有整数，字面量小数直接编译失败（E102），真除法不整除也是运行错误。",
+        title: "小数范围只有 ±524288，换算要先除后乘",
+        bad: "打印(4094 * 3300.0)",
+        good: "打印(4094 / 4095.0 * 3300)",
+        why: "小数是 Q12 定点，值域约 ±524288。先乘会得到 13,510,200，超出范围报 E009；先除后乘把中间量压在 1 附近，结果 3299.1943。整数运算需要取整时仍用 `//`。",
     },
     Pitfall {
-        title: "缩放换算用整除 //，不要用真除法 /",
+        title: "整数真除法要整除，否则改用 // 或小数",
         bad: "打印(4094 * 3300 / 4095)",
-        good: "打印(4094 * 3300 // 4095)\n打印((4094 * 3300 + 2047) // 4095)",
-        why: "v0 是 29 位整数，`/` 是真除法：结果必须整除，否则运行期报 E023（E_DIV_NONINT）。真实案例：ADC 读 4094、`4094 * 3300 / 4095 = 3299.19…` 在板上直接 E023 中止；改成 `//` 得 3299。通用写法先乘后整除，需要四舍五入时加半个除数：`(原始值 * 3300 + 2047) // 4095`。",
+        good: "打印(4094 * 3300 // 4095)\n打印((4094 * 3300 + 2047) // 4095)\n打印(4094 / 4095.0 * 3300)",
+        why: "整数/整数的 `/` 仍是真除法：结果必须整除，否则运行期报 E023（E_DIV_NONINT）。真实案例：ADC 读 4094、`4094 * 3300 / 4095 = 3299.19…` 在板上直接 E023 中止；改成 `//` 得 3299，或让除数写成 `4095.0` 得到小数 3299.1943。需要四舍五入时加半个除数：`(原始值 * 3300 + 2047) // 4095`。",
     },
     Pitfall {
         title: "缩进必须是 4 个半角空格",
@@ -416,6 +423,12 @@ const EXAMPLES: &[Example] = &[
         title: "文本拼接与内建",
         source: "令 n = 3\n打印(\"n = \" + 文本(n), 绝对值(-n))",
         prints: "n = 3 3",
+    },
+    Example {
+        id: "decimal",
+        title: "小数与定点除法",
+        source: "打印(1.5 + 2.25)\n打印(10.0 / 4)\n打印(4094 / 4095.0 * 3300)",
+        prints: "3.75\n2.5\n3299.1943",
     },
     Example {
         id: "board-led",
@@ -648,7 +661,8 @@ pub fn render_json() -> Result<String, String> {
         ("文本", "双引号、单引号、中文引号都可定界；支持 \\n \\t \\\\ \\\" \\'"),
         ("全角标点", "代码区的全角标点自动转半角（字符串内部不转）"),
         ("标识符", "字母或下划线开头，后接字母/数字/下划线"),
-        ("整数", "十进制数字；带小数点或指数报 E102"),
+        ("整数", "十进制数字；带指数报 E102"),
+        ("小数", "如 1.5、0.25；小数点后必须有数字，不支持指数（E102）"),
     ];
     for (i, (k, v)) in lexical.iter().enumerate() {
         j.push_str(&format!(
@@ -880,7 +894,7 @@ pub fn render_markdown() -> Result<String, String> {
     m.push_str(&format!("| 字节码 ABI | {} |\n", ABI_VERSION));
     m.push_str("| 编译 | `micc 源码.jsh -o 输出.jmb` |\n");
     m.push_str("| 运行 | STM32F103C8T6 固件内解释器；脚本堆固件 6 KB |\n\n");
-    m.push_str("砾是**中文关键字、缩进式、整数优先**的小语言。它跑在 20 KB RAM 的 MCU 上，所以刻意没有小数、类、闭包和通用模块系统；板级硬件能力通过 `导入 模块` 在编译期引入。\n\n");
+    m.push_str("砾是**中文关键字、缩进式、整数优先**的小语言。它跑在 20 KB RAM 的 MCU 上，整数是 29 位、小数是 Q12 定点；刻意没有类、闭包和通用模块系统；板级硬件能力通过 `导入 模块` 在编译期引入。\n\n");
 
     m.push_str("## 关键字\n\n");
     m.push_str("可用：");
@@ -907,7 +921,8 @@ pub fn render_markdown() -> Result<String, String> {
         ("文本", "双引号、单引号、中文引号都可定界；支持 \\n \\t \\\\ \\\" \\'"),
         ("全角标点", "代码区的全角标点自动转半角（字符串内部不转）"),
         ("标识符", "字母或下划线开头，后接字母/数字/下划线"),
-        ("整数", "十进制；带小数点或指数报 E102（v0 没有小数）"),
+        ("整数", "十进制；带指数报 E102"),
+        ("小数", "如 1.5、0.25；小数点后必须有数字，不支持指数（E102）"),
     ];
     for (k, v) in lexical {
         m.push_str(&format!("| {} | {} |\n", k, v));

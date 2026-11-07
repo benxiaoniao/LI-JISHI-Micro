@@ -7,6 +7,8 @@ use std::collections::{HashMap, HashSet};
 #[derive(Clone, Debug)]
 pub enum ConstVal {
     Int(i32),
+    /// 小数：Q12 定点原始值（真实值 × 4096）。
+    Dec(i32),
     Str(String),
     Nil,
     True,
@@ -82,6 +84,18 @@ impl Builder {
             }
         }
         self.push_const(ConstVal::Int(v), line, col)
+    }
+
+    fn const_dec(&mut self, v: i64, line: u32, col: u32) -> Result<u8> {
+        let v = v as i32;
+        for (i, c) in self.consts.iter().enumerate() {
+            if let ConstVal::Dec(x) = c {
+                if *x == v {
+                    return Ok(i as u8);
+                }
+            }
+        }
+        self.push_const(ConstVal::Dec(v), line, col)
     }
 
     fn const_str(&mut self, s: &str, line: u32, col: u32) -> Result<u8> {
@@ -595,6 +609,10 @@ fn compile_expr(fs: &mut FnState, b: &mut Builder, e: &Expr) -> Result<()> {
     match &e.kind {
         ExprKind::Int(v) => {
             let c = b.const_int(*v, e.line, e.col)?;
+            fs.emit_u8(OP_CONST, c);
+        }
+        ExprKind::Dec(v) => {
+            let c = b.const_dec(*v, e.line, e.col)?;
             fs.emit_u8(OP_CONST, c);
         }
         ExprKind::Str(s) => {

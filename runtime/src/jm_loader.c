@@ -40,7 +40,7 @@ int jm_loader_init(JmState *st, const void *data, size_t len) {
     for (uint8_t i = 0; i < st->nconsts; i++) {
         const uint8_t *e = st->base + st->const_start + (uint32_t)i * 8u;
         uint8_t kind = e[0];
-        if (kind > K_FALSE) {
+        if (kind > K_DEC) {
             return jm_fail(st, E_FILE, "未知常量种类");
         }
         if (kind == K_STR) {

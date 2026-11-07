@@ -37,6 +37,8 @@ pub struct Expr {
 #[derive(Clone, Debug)]
 pub enum ExprKind {
     Int(i64),
+    /// 小数：Q12 定点原始值（真实值 × 4096）。
+    Dec(i64),
     Str(String),
     Nil,
     True,

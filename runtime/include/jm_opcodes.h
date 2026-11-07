@@ -51,5 +51,6 @@
 #define K_NIL 2
 #define K_TRUE 3
 #define K_FALSE 4
+#define K_DEC 5
 
 #endif

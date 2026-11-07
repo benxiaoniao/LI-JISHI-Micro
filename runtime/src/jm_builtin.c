@@ -10,6 +10,7 @@
 #define B_MAX 7
 #define B_MIN 8
 #define B_ABS 9
+#define B_DEC 10
 
 typedef struct {
     const char *name;
@@ -19,7 +20,7 @@ typedef struct {
 static const JmBuiltinDef BUILTINS[] = {
     {"打印", B_PRINT}, {"文本", B_TEXT}, {"整数", B_INT},   {"长度", B_LEN},
     {"范围", B_RANGE}, {"类型", B_TYPE}, {"总和", B_SUM},   {"最大", B_MAX},
-    {"最小", B_MIN},   {"绝对值", B_ABS},
+    {"最小", B_MIN},   {"绝对值", B_ABS}, {"小数", B_DEC},
 };
 #define NBUILTINS ((int)(sizeof(BUILTINS) / sizeof(BUILTINS[0])))
 
@@ -71,6 +72,52 @@ static void put_int(JmSink sink, void *ctx, int32_t v) {
     }
     while (t > 0) {
         buf[n++] = tmp[--t];
+    }
+    sink(ctx, buf, (uint32_t)n);
+}
+
+static void put_dec(JmSink sink, void *ctx, int32_t raw) {
+    char buf[24];
+    int n = 0;
+    int64_t v = raw;
+    if (v < 0) {
+        buf[n++] = '-';
+        v = -v;
+    }
+    uint32_t ip = (uint32_t)(v >> JM_DEC_FRAC_BITS);
+    uint32_t frac = (uint32_t)(v & (JM_DEC_SCALE - 1));
+    /* 4 位小数：足够覆盖 1/4096 精度 */
+    uint32_t d = (uint32_t)(((uint64_t)frac * 10000u + JM_DEC_SCALE / 2) / JM_DEC_SCALE);
+    if (d >= 10000u) {
+        d -= 10000u;
+        ip++;
+    }
+
+    char tmp[12];
+    int t = 0;
+    if (ip == 0) {
+        tmp[t++] = '0';
+    }
+    while (ip > 0) {
+        tmp[t++] = (char)('0' + (ip % 10u));
+        ip /= 10u;
+    }
+    while (t > 0) {
+        buf[n++] = tmp[--t];
+    }
+    buf[n++] = '.';
+
+    char f[4];
+    f[0] = (char)('0' + (d / 1000u));
+    f[1] = (char)('0' + ((d / 100u) % 10u));
+    f[2] = (char)('0' + ((d / 10u) % 10u));
+    f[3] = (char)('0' + (d % 10u));
+    int fl = 4;
+    while (fl > 1 && f[fl - 1] == '0') {
+        fl--;
+    }
+    for (int i = 0; i < fl; i++) {
+        buf[n++] = f[i];
     }
     sink(ctx, buf, (uint32_t)n);
 }
@@ -154,6 +201,9 @@ int jm_repr(JmState *st, JmValue v, int quoted, JmSink sink, void *ctx, int dept
             sink(ctx, "}", 1);
             return 0;
         }
+        case JM_T_DEC:
+            put_dec(sink, ctx, ((JmDec *)o)->raw);
+            return 0;
         case JM_T_RANGE:
             S("<范围>");
             return 0;
@@ -383,7 +433,30 @@ int jm_builtin_call(JmState *st, uint8_t id, JmValue *args, uint8_t nargs,
                 return 0;
             }
         }
-        return jm_fail(st, E_TYPE, "整数() 只接受整数或数字文本");
+        if (jm_is_dec(args[0])) {
+            /* 向零截断 */
+            *out = jm_v_int((int32_t)(jm_dec_raw(args[0]) / JM_DEC_SCALE));
+            return 0;
+        }
+        return jm_fail(st, E_TYPE, "整数() 只接受整数、小数或数字文本");
+    }
+    case B_DEC: {
+        if (nargs != 1) {
+            return jm_fail(st, E_ARGC, "小数() 要 1 个参数");
+        }
+        int64_t raw;
+        if (JM_TAG(args[0]) == JM_TAG_INT) {
+            int64_t x = jm_int(args[0]);
+            raw = x * JM_DEC_SCALE;
+        } else if (jm_is_dec(args[0])) {
+            raw = jm_dec_raw(args[0]);
+        } else {
+            return jm_fail(st, E_TYPE, "小数() 只接受整数或小数");
+        }
+        if (raw < JM_DEC_RAW_MIN || raw > JM_DEC_RAW_MAX) {
+            return jm_fail(st, E_OVERFLOW, "小数超出 Q12 值域（约 ±524288）");
+        }
+        return jm_dec_new(st, (int32_t)raw, out);
     }
     case B_LEN: {
         if (nargs != 1) {
@@ -494,8 +567,18 @@ int jm_builtin_call(JmState *st, uint8_t id, JmValue *args, uint8_t nargs,
         if (nargs != 1) {
             return jm_fail(st, E_ARGC, "绝对值() 要 1 个参数");
         }
+        if (jm_is_dec(args[0])) {
+            int64_t v = jm_dec_raw(args[0]);
+            if (v < 0) {
+                v = -v;
+            }
+            if (v > JM_DEC_RAW_MAX) {
+                return jm_fail(st, E_OVERFLOW, "小数溢出");
+            }
+            return jm_dec_new(st, (int32_t)v, out);
+        }
         if (JM_TAG(args[0]) != JM_TAG_INT) {
-            return jm_fail(st, E_TYPE, "绝对值() 只接受整数");
+            return jm_fail(st, E_TYPE, "绝对值() 只接受整数或小数");
         }
         int64_t v = jm_int(args[0]);
         if (v < 0) {

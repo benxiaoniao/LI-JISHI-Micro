@@ -88,6 +88,12 @@ pub fn write(prog: &Program) -> Result<Vec<u8>> {
                 out.extend_from_slice(&[0, 0]);
                 out.extend_from_slice(&(*v as u32).to_le_bytes());
             }
+            ConstVal::Dec(v) => {
+                out.push(K_DEC);
+                out.push(0);
+                out.extend_from_slice(&[0, 0]);
+                out.extend_from_slice(&(*v as u32).to_le_bytes());
+            }
             ConstVal::Str(s) => {
                 out.push(K_STR);
                 out.push(0);

@@ -53,6 +53,8 @@ pub const K_STR: u8 = 1;
 pub const K_NIL: u8 = 2;
 pub const K_TRUE: u8 = 3;
 pub const K_FALSE: u8 = 4;
+/// 小数常量：4 字节 int32 为 Q12 定点原始值（真实值 × 4096）。
+pub const K_DEC: u8 = 5;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Operand {
@@ -187,7 +189,8 @@ pub fn emit_c_header() -> String {
     s.push_str(&format!("#define K_STR {K_STR}\n"));
     s.push_str(&format!("#define K_NIL {K_NIL}\n"));
     s.push_str(&format!("#define K_TRUE {K_TRUE}\n"));
-    s.push_str(&format!("#define K_FALSE {K_FALSE}\n\n"));
+    s.push_str(&format!("#define K_FALSE {K_FALSE}\n"));
+    s.push_str(&format!("#define K_DEC {K_DEC}\n\n"));
     s.push_str("#endif\n");
     s
 }
