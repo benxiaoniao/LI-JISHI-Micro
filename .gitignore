@@ -24,3 +24,8 @@
 # 编辑器
 .vscode/
 .idea/
+
+# VS Code 扩展产物
+/editors/vscode/node_modules/
+/editors/vscode/out/
+/editors/vscode/dist/

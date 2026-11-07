@@ -1,0 +1,140 @@
+{
+  "name": "li-vscode",
+  "displayName": "砾（LI）",
+  "description": "砾语言（.jsh）的编辑器支持：语法高亮、编译诊断、构建/烧录命令与语言卡补全。",
+  "version": "0.1.0",
+  "publisher": "jishim",
+  "license": "MIT-0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/benxiaoniao/LI-JISHI-Micro.git",
+    "directory": "editors/vscode"
+  },
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onLanguage:li",
+    "workspaceContains:spec/langcard.json"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "li",
+        "aliases": [
+          "砾",
+          "LI"
+        ],
+        "extensions": [
+          ".jsh"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "li",
+        "scopeName": "source.li",
+        "path": "./syntaxes/li.tmLanguage.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "li.check",
+        "title": "砾：诊断当前文件",
+        "icon": "$(check)"
+      },
+      {
+        "command": "li.build",
+        "title": "砾：构建（micc + jmrun + 回归）",
+        "icon": "$(play)"
+      },
+      {
+        "command": "li.buildFirmware",
+        "title": "砾：构建固件（STM32）",
+        "icon": "$(zap)"
+      },
+      {
+        "command": "li.flash",
+        "title": "砾：烧录固件（需确认）",
+        "icon": "$(cloud-upload)"
+      },
+      {
+        "command": "li.reloadLangcard",
+        "title": "砾：重新加载语言卡补全",
+        "icon": "$(refresh)"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "li.build",
+          "group": "navigation",
+          "when": "editorLangId == li"
+        },
+        {
+          "command": "li.flash",
+          "group": "navigation",
+          "when": "editorLangId == li"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "li.build",
+        "key": "ctrl+shift+b",
+        "when": "editorLangId == li"
+      },
+      {
+        "command": "li.buildFirmware",
+        "key": "ctrl+alt+b",
+        "when": "editorLangId == li"
+      }
+    ],
+    "configuration": {
+      "title": "砾",
+      "properties": {
+        "li.miccPath": {
+          "type": "string",
+          "default": "compiler/target/release/micc.exe",
+          "markdownDescription": "`micc` 可执行文件路径。相对路径按工作区根目录解析；找不到时回退到 `compiler/target/release` 与 `compiler/target/debug`。"
+        },
+        "li.powershell": {
+          "type": "string",
+          "default": "powershell.exe",
+          "markdownDescription": "执行 `tools/*.ps1` 使用的 PowerShell 可执行文件。"
+        },
+        "li.firmwareExample": {
+          "type": "string",
+          "default": "你好",
+          "markdownDescription": "构建固件时传给 `tools/build-firmware.ps1 -Example` 的示例名。当前编辑的 `.jsh` 位于 `examples/` 下时优先使用它（不含扩展名，可带子目录）。"
+        },
+        "li.diagnosticsOnType": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "输入时（防抖 700 ms）调用 `micc` 刷新诊断。保存与打开文件时始终刷新。"
+        },
+        "li.langcardPath": {
+          "type": "string",
+          "default": "spec/langcard.json",
+          "markdownDescription": "语言卡路径（相对工作区根目录），用于生成关键字/内建/原生补全。"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p .",
+    "watch": "tsc -w -p .",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.80.0",
+    "typescript": "^5.4.0"
+  }
+}

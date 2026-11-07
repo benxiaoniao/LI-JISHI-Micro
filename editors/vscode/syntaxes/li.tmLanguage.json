@@ -1,0 +1,196 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "砾",
+  "scopeName": "source.li",
+  "fileTypes": [
+    "jsh"
+  ],
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#imports" },
+    { "include": "#unsupported" },
+    { "include": "#keywords" },
+    { "include": "#numbers" },
+    { "include": "#builtins" },
+    { "include": "#native-functions" },
+    { "include": "#punctuation" },
+    { "include": "#operators" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.number-sign.li",
+          "begin": "#",
+          "beginCaptures": {
+            "0": { "name": "punctuation.definition.comment.li" }
+          },
+          "end": "$"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.li",
+          "begin": "\"",
+          "beginCaptures": {
+            "0": { "name": "punctuation.definition.string.begin.li" }
+          },
+          "end": "\"",
+          "endCaptures": {
+            "0": { "name": "punctuation.definition.string.end.li" }
+          },
+          "patterns": [
+            { "match": "\\\\(?:n|t|\\\\|\"|')", "name": "constant.character.escape.li" },
+            { "match": "\\\\.", "name": "invalid.illegal.li" }
+          ]
+        },
+        {
+          "name": "string.quoted.single.li",
+          "begin": "'",
+          "beginCaptures": {
+            "0": { "name": "punctuation.definition.string.begin.li" }
+          },
+          "end": "'",
+          "endCaptures": {
+            "0": { "name": "punctuation.definition.string.end.li" }
+          },
+          "patterns": [
+            { "match": "\\\\(?:n|t|\\\\|\"|')", "name": "constant.character.escape.li" },
+            { "match": "\\\\.", "name": "invalid.illegal.li" }
+          ]
+        },
+        {
+          "name": "string.quoted.double.chinese.li",
+          "begin": "“",
+          "beginCaptures": {
+            "0": { "name": "punctuation.definition.string.begin.li" }
+          },
+          "end": "”",
+          "endCaptures": {
+            "0": { "name": "punctuation.definition.string.end.li" }
+          },
+          "patterns": [
+            { "match": "\\\\(?:n|t|\\\\|\"|')", "name": "constant.character.escape.li" }
+          ]
+        },
+        {
+          "name": "string.quoted.single.chinese.li",
+          "begin": "‘",
+          "beginCaptures": {
+            "0": { "name": "punctuation.definition.string.begin.li" }
+          },
+          "end": "’",
+          "endCaptures": {
+            "0": { "name": "punctuation.definition.string.end.li" }
+          },
+          "patterns": [
+            { "match": "\\\\(?:n|t|\\\\|\"|')", "name": "constant.character.escape.li" }
+          ]
+        }
+      ]
+    },
+    "imports": {
+      "patterns": [
+        {
+          "match": "(导入)(\\s+)(\\S+)",
+          "captures": {
+            "1": { "name": "keyword.declaration.li" },
+            "2": { "name": "meta.import.li" },
+            "3": { "name": "support.module.li" }
+          }
+        }
+      ]
+    },
+    "unsupported": {
+      "patterns": [
+        {
+          "match": "(?<![A-Za-z0-9_\\u4e00-\\u9fff])(?:类|继承|新建|尝试|捕获|最终|抛出|匹配|情形|枚举|用|断言|超)(?![A-Za-z0-9_\\u4e00-\\u9fff])",
+          "name": "invalid.illegal.deprecated.li"
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "match": "(?<![A-Za-z0-9_\\u4e00-\\u9fff])(?:否则如果|否则|如果|当|循环|次|遍历|在|中断|继续|返回)(?![A-Za-z0-9_\\u4e00-\\u9fff])",
+          "name": "keyword.control.li"
+        },
+        {
+          "match": "(?<![A-Za-z0-9_\\u4e00-\\u9fff])(?:令|函数|导入)(?![A-Za-z0-9_\\u4e00-\\u9fff])",
+          "name": "keyword.declaration.li"
+        },
+        {
+          "match": "(?<![A-Za-z0-9_\\u4e00-\\u9fff])(?:真|假|空)(?![A-Za-z0-9_\\u4e00-\\u9fff])",
+          "name": "constant.language.li"
+        },
+        {
+          "match": "(?<![A-Za-z0-9_\\u4e00-\\u9fff])(?:与|或|非)(?![A-Za-z0-9_\\u4e00-\\u9fff])",
+          "name": "keyword.operator.word.li"
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "match": "(?<![A-Za-z0-9_.])[0-9][0-9.]*[eE][+-]?[0-9]+",
+          "name": "invalid.illegal.numeric.li"
+        },
+        {
+          "match": "(?<![A-Za-z0-9_.])[0-9]+\\.[0-9]+",
+          "name": "constant.numeric.float.li"
+        },
+        {
+          "match": "(?<![A-Za-z0-9_.])[0-9]+",
+          "name": "constant.numeric.integer.li"
+        }
+      ]
+    },
+    "builtins": {
+      "patterns": [
+        {
+          "match": "(?<![A-Za-z0-9_\\u4e00-\\u9fff])(?:打印|文本|整数|小数|长度|范围|类型|总和|最大|最小|绝对值)(?![A-Za-z0-9_\\u4e00-\\u9fff])",
+          "name": "support.function.builtin.li"
+        }
+      ]
+    },
+    "native-functions": {
+      "patterns": [
+        {
+          "match": "(?<![A-Za-z0-9_\\u4e00-\\u9fff])(?:引脚写|引脚读|引脚翻转|串口写|等待毫秒)(?![A-Za-z0-9_\\u4e00-\\u9fff])",
+          "name": "support.function.native.li"
+        },
+        {
+          "match": "(?<![A-Za-z0-9_\\u4e00-\\u9fff])ADC(?:初始化|读)(?![A-Za-z0-9_\\u4e00-\\u9fff])",
+          "name": "support.function.native.li"
+        },
+        {
+          "match": "(?<![A-Za-z0-9_\\u4e00-\\u9fff])定时器(?:初始化|计数|延时)(?![A-Za-z0-9_\\u4e00-\\u9fff])",
+          "name": "support.function.native.li"
+        }
+      ]
+    },
+    "punctuation": {
+      "patterns": [
+        {
+          "match": "[()\\[\\]{},:]",
+          "name": "punctuation.separator.li"
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "match": "//=|\\*\\*=|\\*\\*|//|==|!=|<=|>=|\\+=|-=|\\*=|/=|%=|->",
+          "name": "keyword.operator.li"
+        },
+        {
+          "match": "[-+*/%<>=]",
+          "name": "keyword.operator.li"
+        }
+      ]
+    }
+  }
+}
