@@ -102,11 +102,97 @@ static int n_delay(JmStateRef st, const JmValue *args, uint8_t nargs,
     return JM_NATIVE_OK;
 }
 
+static int n_adc_init(JmStateRef st, const JmValue *args, uint8_t nargs,
+                      JmValue *out) {
+    (void)args;
+    if (nargs != 0) {
+        return jm_native_fail(st, JM_NE_PARAM, "ADC初始化不接受参数");
+    }
+    port_adc_init();
+    *out = jm_value_nil();
+    return JM_NATIVE_OK;
+}
+
+static int n_adc_read(JmStateRef st, const JmValue *args, uint8_t nargs,
+                      JmValue *out) {
+    int32_t channel = 0;
+    uint32_t raw = 0;
+    if (arg_int(st, args, nargs, &channel, "ADC读需要一个参数：通道") != 0) {
+        return -1;
+    }
+    if (channel < 0 || channel > 7) {
+        return jm_native_fail(st, JM_NE_PARAM, "ADC通道范围 0–7（PA0–PA7）");
+    }
+    if (port_adc_read((uint32_t)channel, &raw) != 0) {
+        return jm_native_fail(st, JM_NE_STATE, "ADC 未初始化，先调用 ADC初始化()");
+    }
+    *out = jm_value_int((int32_t)raw);
+    return JM_NATIVE_OK;
+}
+
+static int n_timer_init(JmStateRef st, const JmValue *args, uint8_t nargs,
+                        JmValue *out) {
+    (void)args;
+    if (nargs != 0) {
+        return jm_native_fail(st, JM_NE_PARAM, "定时器初始化不接受参数");
+    }
+    port_timer_init();
+    *out = jm_value_nil();
+    return JM_NATIVE_OK;
+}
+
+static int n_timer_delay(JmStateRef st, const JmValue *args, uint8_t nargs,
+                         JmValue *out) {
+    int32_t ms = 0;
+    if (arg_int(st, args, nargs, &ms, "定时器延时需要一个参数：毫秒") != 0) {
+        return -1;
+    }
+    if (ms < 0 || ms > 60000) {
+        return jm_native_fail(st, JM_NE_PARAM, "定时器延时范围 0–60000");
+    }
+    if (port_timer_delay_ms((uint32_t)ms) != 0) {
+        return jm_native_fail(st, JM_NE_STATE, "定时器未初始化，先调用 定时器初始化()");
+    }
+    *out = jm_value_nil();
+    return JM_NATIVE_OK;
+}
+
+static int n_timer_count(JmStateRef st, const JmValue *args, uint8_t nargs,
+                         JmValue *out) {
+    uint32_t ms = 0;
+    (void)args;
+    if (nargs != 0) {
+        return jm_native_fail(st, JM_NE_PARAM, "定时器计数不接受参数");
+    }
+    if (port_timer_count(&ms) != 0) {
+        return jm_native_fail(st, JM_NE_STATE, "定时器未初始化，先调用 定时器初始化()");
+    }
+    *out = jm_value_int((int32_t)ms);
+    return JM_NATIVE_OK;
+}
+
 /* 表项由 micc --emit-native-header 生成，见 f103_native_table.h */
 static const JmNativeEntry F103_TABLE[] = {
     F103_NATIVE_TABLE_INIT
 };
 
+static const JmNativeEntry ADC_TABLE[] = {
+    F103_ADC_TABLE_INIT
+};
+
+static const JmNativeEntry TIMER_TABLE[] = {
+    F103_TIMER_TABLE_INIT
+};
+
 int f103_native_register(void) {
-    return jm_native_register(F103_TABLE, (uint8_t)F103_NATIVE_ENTRY_COUNT);
+    if (jm_native_register(F103_TABLE, (uint8_t)F103_NATIVE_ENTRY_COUNT) != 0) {
+        return -1;
+    }
+    if (jm_native_register(ADC_TABLE, (uint8_t)F103_ADC_ENTRY_COUNT) != 0) {
+        return -1;
+    }
+    if (jm_native_register(TIMER_TABLE, (uint8_t)F103_TIMER_ENTRY_COUNT) != 0) {
+        return -1;
+    }
+    return 0;
 }

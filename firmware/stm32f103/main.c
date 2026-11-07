@@ -248,6 +248,10 @@ int main(void)
     } else {
         port_log("[原生] 板级函数表已登记：");
         port_log(F103_NATIVE_TABLE_NAME);
+        port_log(", ");
+        port_log(F103_ADC_TABLE_NAME);
+        port_log(", ");
+        port_log(F103_TIMER_TABLE_NAME);
         port_log("\r\n");
     }
     port_log("\r\n");

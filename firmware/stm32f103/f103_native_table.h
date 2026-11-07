@@ -15,3 +15,33 @@
     {"等待毫秒", n_delay, 1u, 1u, 0u, 0u}
 
 #endif /* F103_NATIVE_TABLE_H */
+
+/* 原生表 f103_adc：2 项 */
+#ifndef F103_ADC_TABLE_H
+#define F103_ADC_TABLE_H
+
+#define F103_ADC_TABLE_NAME "f103_adc"
+#define F103_ADC_ENTRY_COUNT 2u
+
+/* 在 JmNativeEntry 数组初始化处展开；名字、参数个数、C 函数名都来自同一份规格。 */
+#define F103_ADC_TABLE_INIT \
+    {"ADC初始化", n_adc_init, 0u, 0u, 0u, 0u}, \
+    {"ADC读", n_adc_read, 1u, 1u, 0u, 0u}
+
+#endif /* F103_ADC_TABLE_H */
+
+/* 原生表 f103_timer：3 项 */
+#ifndef F103_TIMER_TABLE_H
+#define F103_TIMER_TABLE_H
+
+#define F103_TIMER_TABLE_NAME "f103_timer"
+#define F103_TIMER_ENTRY_COUNT 3u
+
+/* 在 JmNativeEntry 数组初始化处展开；名字、参数个数、C 函数名都来自同一份规格。 */
+#define F103_TIMER_TABLE_INIT \
+    {"定时器初始化", n_timer_init, 0u, 0u, 0u, 0u}, \
+    {"定时器延时", n_timer_delay, 1u, 1u, 0u, 0u}, \
+    {"定时器计数", n_timer_count, 0u, 0u, 0u, 0u}
+
+#endif /* F103_TIMER_TABLE_H */
+

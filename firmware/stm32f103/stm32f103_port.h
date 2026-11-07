@@ -35,4 +35,15 @@ int  port_gpio_read(uint32_t pin);
 /* 忙等延时（不带调度，供 native 函数使用） */
 void port_delay_ms(uint32_t ms);
 
+/* ADC1：PA0–PA7 = 通道 0–7，12 位，参考电压 VDDA（3.3V） */
+void port_adc_init(void);
+/* 返回 0 = 成功；-1 = 未初始化或通道越界 */
+int  port_adc_read(uint32_t channel, uint32_t *raw);
+
+/* TIM2：1 kHz 自由运行计数器（毫秒级，16 位，约 65.5 秒回绕） */
+void port_timer_init(void);
+/* 返回 0 = 成功；-1 = 未初始化 */
+int  port_timer_delay_ms(uint32_t ms);
+int  port_timer_count(uint32_t *ms);
+
 #endif

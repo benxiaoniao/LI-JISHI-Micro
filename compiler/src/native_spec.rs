@@ -30,51 +30,101 @@ pub struct NativeModuleSpec {
     pub entries: &'static [NativeEntrySpec],
 }
 
-pub const MODULES: &[NativeModuleSpec] = &[NativeModuleSpec {
-    name: "引脚",
-    table: "f103_board",
-    c_prefix: "F103_NATIVE",
-    entries: &[
-        NativeEntrySpec {
-            name: "引脚写",
-            min_args: 2,
-            max_args: 2,
-            c_fn: "n_pin_write",
-            doc: "向指定引脚写电平；v0 只支持引脚 13（PC13），电平 0/1。PC13 低电平点亮。",
-        },
-        NativeEntrySpec {
-            name: "引脚读",
-            min_args: 1,
-            max_args: 1,
-            c_fn: "n_pin_read",
-            doc: "读指定引脚的输入寄存器值（0/1）；v0 只支持引脚 13（PC13）。",
-        },
-        NativeEntrySpec {
-            name: "引脚翻转",
-            min_args: 1,
-            max_args: 1,
-            c_fn: "n_pin_toggle",
-            doc: "读当前电平再取反；v0 只支持引脚 13（PC13）。",
-        },
-        NativeEntrySpec {
-            name: "串口写",
-            min_args: 1,
-            max_args: 1,
-            c_fn: "n_uart_write",
-            doc: "直接写 USART1（115200 8N1），不换行、不加前缀。",
-        },
-        NativeEntrySpec {
-            name: "等待毫秒",
-            min_args: 1,
-            max_args: 1,
-            c_fn: "n_delay",
-            doc: "忙等 0–60000 毫秒；SysTick 中断仍在跑，调度器不参与。",
-        },
-    ],
-}];
+pub const MODULES: &[NativeModuleSpec] = &[
+    NativeModuleSpec {
+        name: "引脚",
+        table: "f103_board",
+        c_prefix: "F103_NATIVE",
+        entries: &[
+            NativeEntrySpec {
+                name: "引脚写",
+                min_args: 2,
+                max_args: 2,
+                c_fn: "n_pin_write",
+                doc: "向指定引脚写电平；v0 只支持引脚 13（PC13），电平 0/1。PC13 低电平点亮。",
+            },
+            NativeEntrySpec {
+                name: "引脚读",
+                min_args: 1,
+                max_args: 1,
+                c_fn: "n_pin_read",
+                doc: "读指定引脚的输入寄存器值（0/1）；v0 只支持引脚 13（PC13）。",
+            },
+            NativeEntrySpec {
+                name: "引脚翻转",
+                min_args: 1,
+                max_args: 1,
+                c_fn: "n_pin_toggle",
+                doc: "读当前电平再取反；v0 只支持引脚 13（PC13）。",
+            },
+            NativeEntrySpec {
+                name: "串口写",
+                min_args: 1,
+                max_args: 1,
+                c_fn: "n_uart_write",
+                doc: "直接写 USART1（115200 8N1），不换行、不加前缀。",
+            },
+            NativeEntrySpec {
+                name: "等待毫秒",
+                min_args: 1,
+                max_args: 1,
+                c_fn: "n_delay",
+                doc: "忙等 0–60000 毫秒；SysTick 中断仍在跑，调度器不参与。",
+            },
+        ],
+    },
+    NativeModuleSpec {
+        name: "ADC",
+        table: "f103_adc",
+        c_prefix: "F103_ADC",
+        entries: &[
+            NativeEntrySpec {
+                name: "ADC初始化",
+                min_args: 0,
+                max_args: 0,
+                c_fn: "n_adc_init",
+                doc: "上电并校准 ADC1；PA0–PA7 对应通道 0–7，参考电压 VDDA（3.3V）。",
+            },
+            NativeEntrySpec {
+                name: "ADC读",
+                min_args: 1,
+                max_args: 1,
+                c_fn: "n_adc_read",
+                doc: "对指定通道（0–7，对应 PA0–PA7）做一次单次转换，返回 0–4095（12 位）。",
+            },
+        ],
+    },
+    NativeModuleSpec {
+        name: "定时器",
+        table: "f103_timer",
+        c_prefix: "F103_TIMER",
+        entries: &[
+            NativeEntrySpec {
+                name: "定时器初始化",
+                min_args: 0,
+                max_args: 0,
+                c_fn: "n_timer_init",
+                doc: "启动 TIM2 为 1 kHz 自由运行计数（16 位，约 65.5 秒回绕）。",
+            },
+            NativeEntrySpec {
+                name: "定时器延时",
+                min_args: 1,
+                max_args: 1,
+                c_fn: "n_timer_delay",
+                doc: "按 TIM2 毫秒计数忙等 0–60000 毫秒；需先调用 定时器初始化。",
+            },
+            NativeEntrySpec {
+                name: "定时器计数",
+                min_args: 0,
+                max_args: 0,
+                c_fn: "n_timer_count",
+                doc: "返回 TIM2 当前毫秒计数（0–65535，约 65.5 秒回绕）。",
+            },
+        ],
+    },
+];
 
 pub const BOARD_HEADER_PATH: &str = "firmware/stm32f103/f103_native_table.h";
-const BOARD_TABLE: &str = "f103_board";
 
 pub fn module(name: &str) -> Option<&'static NativeModuleSpec> {
     MODULES.iter().find(|m| m.name == name)
@@ -167,46 +217,45 @@ fn validate() -> Result<(), String> {
 }
 
 /// 生成板级原生表头（`firmware/stm32f103/f103_native_table.h`）。
+/// 每个模块生成独立的一组宏：`<前缀>_TABLE_NAME` / `_ENTRY_COUNT` / `_TABLE_INIT`。
 pub fn render_c_header() -> Result<String, String> {
     validate()?;
-    let m = MODULES
-        .iter()
-        .find(|m| m.table == BOARD_TABLE)
-        .ok_or_else(|| format!("规格里没有表 {}", BOARD_TABLE))?;
 
-    let guard = format!("{}_TABLE_H", m.c_prefix);
     let mut s = String::new();
     s.push_str("/* 本文件由 `micc --emit-native-header` 从 compiler/src/native_spec.rs 生成，不要手改。 */\n");
-    s.push_str(&format!(
-        "/* 原生表 {}：{} 项 */\n",
-        m.table,
-        m.entries.len()
-    ));
-    s.push_str(&format!("#ifndef {}\n", guard));
-    s.push_str(&format!("#define {}\n\n", guard));
-    s.push_str(&format!(
-        "#define {}_TABLE_NAME \"{}\"\n",
-        m.c_prefix, m.table
-    ));
-    s.push_str(&format!(
-        "#define {}_ENTRY_COUNT {}u\n\n",
-        m.c_prefix,
-        m.entries.len()
-    ));
-    s.push_str("/* 在 JmNativeEntry 数组初始化处展开；名字、参数个数、C 函数名都来自同一份规格。 */\n");
-    s.push_str(&format!("#define {}_TABLE_INIT \\\n", m.c_prefix));
-    let n = m.entries.len();
-    for (i, e) in m.entries.iter().enumerate() {
+    for m in MODULES {
+        let guard = format!("{}_TABLE_H", m.c_prefix);
         s.push_str(&format!(
-            "    {{\"{}\", {}, {}u, {}u, 0u, 0u}}{}\n",
-            e.name,
-            e.c_fn,
-            e.min_args,
-            e.max_args,
-            if i + 1 < n { ", \\" } else { "" }
+            "/* 原生表 {}：{} 项 */\n",
+            m.table,
+            m.entries.len()
         ));
+        s.push_str(&format!("#ifndef {}\n", guard));
+        s.push_str(&format!("#define {}\n\n", guard));
+        s.push_str(&format!(
+            "#define {}_TABLE_NAME \"{}\"\n",
+            m.c_prefix, m.table
+        ));
+        s.push_str(&format!(
+            "#define {}_ENTRY_COUNT {}u\n\n",
+            m.c_prefix,
+            m.entries.len()
+        ));
+        s.push_str("/* 在 JmNativeEntry 数组初始化处展开；名字、参数个数、C 函数名都来自同一份规格。 */\n");
+        s.push_str(&format!("#define {}_TABLE_INIT \\\n", m.c_prefix));
+        let n = m.entries.len();
+        for (i, e) in m.entries.iter().enumerate() {
+            s.push_str(&format!(
+                "    {{\"{}\", {}, {}u, {}u, 0u, 0u}}{}\n",
+                e.name,
+                e.c_fn,
+                e.min_args,
+                e.max_args,
+                if i + 1 < n { ", \\" } else { "" }
+            ));
+        }
+        s.push_str(&format!("\n#endif /* {} */\n\n", guard));
     }
-    s.push_str(&format!("\n#endif /* {} */\n", guard));
     Ok(s)
 }
 

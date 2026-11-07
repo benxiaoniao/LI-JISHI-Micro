@@ -17,7 +17,16 @@ if ($LASTEXITCODE -ne 0) {
     $script:fail++
 }
 else {
-    Write-Host "  [PASS] 编译通过"
+    Write-Host "  [PASS] 编译通过（导入 引脚）"
+}
+
+& $micc (Join-Path $root "examples\board\ADC采样.jsh") -o (Join-Path $root "build\native-adc-ok.jmb") | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "  [FAIL] ADC / 定时器示例被拒绝"
+    $script:fail++
+}
+else {
+    Write-Host "  [PASS] 编译通过（导入 ADC + 定时器）"
 }
 
 function Expect-CompileError {
@@ -39,13 +48,21 @@ function Expect-CompileError {
     }
 }
 
-Expect-CompileError "tests\errors\原生名拼错.jsh" "E115" "名字拼错应报 E115"
-Expect-CompileError "tests\errors\原生参数个数.jsh" "E115" "参数个数不符应报 E115"
-Expect-CompileError "tests\errors\原生未导入.jsh" "E113" "未导入就调用应报 E113"
+Expect-CompileError "tests\errors\原生名拼错.jsh" "E115" "引脚：名字拼错应报 E115"
+Expect-CompileError "tests\errors\原生参数个数.jsh" "E115" "引脚：参数个数不符应报 E115"
+Expect-CompileError "tests\errors\原生未导入.jsh" "E113" "引脚：未导入就调用应报 E113"
+
+Expect-CompileError "tests\errors\ADC名拼错.jsh" "E115" "ADC：名字拼错应报 E115"
+Expect-CompileError "tests\errors\ADC参数个数.jsh" "E115" "ADC：参数个数不符应报 E115"
+Expect-CompileError "tests\errors\ADC未导入.jsh" "E113" "ADC：未导入就调用应报 E113"
+
+Expect-CompileError "tests\errors\定时器名拼错.jsh" "E115" "定时器：名字拼错应报 E115"
+Expect-CompileError "tests\errors\定时器参数个数.jsh" "E115" "定时器：参数个数不符应报 E115"
+Expect-CompileError "tests\errors\定时器未导入.jsh" "E113" "定时器：未导入就调用应报 E113"
 
 if ($script:fail -ne 0) {
     Write-Host ("原生导入回归失败：" + $script:fail + " 项")
     exit 1
 }
-Write-Host "原生导入回归：4/4 通过"
+Write-Host "原生导入回归：11/11 通过（引脚 / ADC / 定时器各 3 个错误用例 + 2 个正确示例）"
 exit 0

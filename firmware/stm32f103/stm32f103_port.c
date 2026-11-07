@@ -11,6 +11,7 @@
 #define RCC_CR          REG32(0x40021000u)
 #define RCC_CFGR        REG32(0x40021004u)
 #define RCC_APB2ENR     REG32(0x40021018u)
+#define RCC_APB1ENR     REG32(0x4002101Cu)
 
 #define RCC_CR_HSEON    (1u << 16)
 #define RCC_CR_HSERDY   (1u << 17)
@@ -24,7 +25,14 @@
 
 #define RCC_APB2ENR_IOPAEN  (1u << 2)
 #define RCC_APB2ENR_IOPCEN  (1u << 4)
+#define RCC_APB2ENR_ADC1EN  (1u << 9)
 #define RCC_APB2ENR_USART1EN (1u << 14)
+
+#define RCC_APB1ENR_TIM2EN  (1u << 0)
+
+/* ADC 预分频：时钟 / 6（72 MHz → 12 MHz，上限 14 MHz） */
+#define RCC_CFGR_ADCPRE_MASK  (3u << 14)
+#define RCC_CFGR_ADCPRE_DIV6  (2u << 14)
 
 /* FLASH */
 #define FLASH_ACR       REG32(0x40022000u)
@@ -32,6 +40,7 @@
 #define FLASH_ACR_PRFTBE   (1u << 4)
 
 /* GPIOA / GPIOC */
+#define GPIOA_CRL       REG32(0x40010800u)
 #define GPIOA_CRH       REG32(0x40010804u)
 #define GPIOC_CRH       REG32(0x40011004u)
 #define GPIOC_IDR       REG32(0x40011008u)
@@ -56,12 +65,38 @@
 #define STK_LOAD        REG32(0xE000E014u)
 #define STK_VAL         REG32(0xE000E018u)
 
+/* ADC1（PA0–PA7 = 通道 0–7） */
+#define ADC1_SR         REG32(0x40012400u)
+#define ADC1_CR1        REG32(0x40012404u)
+#define ADC1_CR2        REG32(0x40012408u)
+#define ADC1_SMPR2      REG32(0x40012410u)
+#define ADC1_SQR1       REG32(0x4001242Cu)
+#define ADC1_SQR3       REG32(0x40012434u)
+#define ADC1_DR         REG32(0x4001244Cu)
+
+#define ADC_SR_EOC         (1u << 1)
+#define ADC_CR2_ADON       (1u << 0)
+#define ADC_CR2_CAL        (1u << 2)
+#define ADC_CR2_RSTCAL     (1u << 3)
+#define ADC_CR2_EXTTRIG    (1u << 20)
+#define ADC_CR2_EXTSEL_SWSTART (7u << 17)
+#define ADC_CR2_SWSTART    (1u << 22)
+
+/* TIM2（1 kHz 自由运行） */
+#define TIM2_CR1        REG32(0x40000000u)
+#define TIM2_EGR        REG32(0x40000014u)
+#define TIM2_CNT        REG32(0x40000024u)
+#define TIM2_PSC        REG32(0x40000028u)
+#define TIM2_ARR        REG32(0x4000002Cu)
+
 #define UART_BAUD       115200u
 
 /* ---------------- 状态 ---------------- */
 
 static uint32_t g_sysclk = 8000000u;
 static volatile uint32_t g_ms = 0;
+static volatile uint8_t g_adc_ready = 0u;
+static volatile uint8_t g_timer_ready = 0u;
 
 /* ---------------- 时钟 ---------------- */
 
@@ -250,6 +285,108 @@ void port_delay_ms(uint32_t ms)
     while ((uint32_t)(g_ms - start) < ms) {
         /* 忙等：SysTick 中断在跑，g_ms 会自增 */
     }
+}
+
+/* ---------------- ADC1（PA0–PA7 = 通道 0–7） ---------------- */
+
+void port_adc_init(void)
+{
+    uint32_t i;
+
+    RCC_APB2ENR |= RCC_APB2ENR_IOPAEN | RCC_APB2ENR_ADC1EN;
+    /* ADC 时钟 = PCLK2 / 6：72 MHz 时 12 MHz，未超过 14 MHz 上限 */
+    RCC_CFGR = (RCC_CFGR & ~RCC_CFGR_ADCPRE_MASK) | RCC_CFGR_ADCPRE_DIV6;
+
+    /* PA0–PA7 全部设为模拟输入（每个引脚 4 位，0x8 = 输入/模拟） */
+    GPIOA_CRL = 0x88888888u;
+
+    ADC1_CR1 = 0u;
+    ADC1_CR2 = ADC_CR2_ADON;
+    for (i = 0u; i < 1000u; i++) {
+        /* 上电稳定：ADON 置位后需要一段建立时间 */
+    }
+
+    /* 先复位校准，再做校准；两位都由硬件清零 */
+    ADC1_CR2 |= ADC_CR2_RSTCAL;
+    while ((ADC1_CR2 & ADC_CR2_RSTCAL) != 0u) {
+    }
+    ADC1_CR2 |= ADC_CR2_CAL;
+    while ((ADC1_CR2 & ADC_CR2_CAL) != 0u) {
+    }
+
+    /* 采样时间 239.5 周期（通道 0–9 全设），提高高阻信号源的稳定性 */
+    ADC1_SMPR2 = 0x3FFFFFFFu;
+    ADC1_SQR1 = 0u;                       /* 规则组长度 1（L=0） */
+    /* 软件触发：SWSTART + 外部触发使能，避免 ADON 直接启动转换 */
+    ADC1_CR2 |= ADC_CR2_EXTTRIG | ADC_CR2_EXTSEL_SWSTART;
+
+    g_adc_ready = 1u;
+}
+
+int port_adc_read(uint32_t channel, uint32_t *raw)
+{
+    if (g_adc_ready == 0u || raw == 0) {
+        return -1;
+    }
+    if (channel > 7u) {
+        return -1;
+    }
+
+    ADC1_SQR3 = channel & 0x1Fu;
+    ADC1_CR2 |= ADC_CR2_SWSTART;
+    while ((ADC1_SR & ADC_SR_EOC) == 0u) {
+    }
+    *raw = ADC1_DR & 0x0FFFu;   /* 读 DR 同时清 EOC */
+    return 0;
+}
+
+/* ---------------- TIM2（1 kHz 毫秒计数） ---------------- */
+
+void port_timer_init(void)
+{
+    uint32_t psc = g_sysclk / 1000u;
+
+    if (psc == 0u) {
+        psc = 1u;
+    }
+    psc -= 1u;   /* 计数频率 = TIM2CLK / (PSC + 1) = 1 kHz */
+
+    RCC_APB1ENR |= RCC_APB1ENR_TIM2EN;
+    TIM2_CR1 = 0u;
+    TIM2_PSC = psc;
+    TIM2_ARR = 0xFFFFu;   /* 16 位自由运行，约 65.5 秒回绕 */
+    TIM2_EGR = 1u;        /* UG：立即把 PSC/ARR 装进影子寄存器 */
+    TIM2_CNT = 0u;
+    TIM2_CR1 = 1u;        /* CEN = 1 */
+
+    g_timer_ready = 1u;
+}
+
+int port_timer_delay_ms(uint32_t ms)
+{
+    uint16_t last;
+    uint32_t elapsed = 0u;
+
+    if (g_timer_ready == 0u || ms > 60000u) {
+        return -1;
+    }
+
+    last = (uint16_t)(TIM2_CNT & 0xFFFFu);
+    while (elapsed < ms) {
+        uint16_t now = (uint16_t)(TIM2_CNT & 0xFFFFu);
+        elapsed += (uint16_t)(now - last);   /* 16 位差值，天然处理回绕 */
+        last = now;
+    }
+    return 0;
+}
+
+int port_timer_count(uint32_t *ms)
+{
+    if (g_timer_ready == 0u || ms == 0) {
+        return -1;
+    }
+    *ms = TIM2_CNT & 0xFFFFu;
+    return 0;
 }
 
 /* ---------------- 运行时端口（jm_port.h） ---------------- */
