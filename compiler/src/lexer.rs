@@ -76,44 +76,52 @@ fn norm(c: char) -> char {
     }
 }
 
+/// 关键字表 —— 词法器与语言卡生成共用的唯一清单。
+pub const KEYWORDS: &[(&str, Kw)] = &[
+    ("令", Kw::Ling),
+    ("如果", Kw::If),
+    ("否则如果", Kw::Elif),
+    ("否则", Kw::Else),
+    ("当", Kw::While),
+    ("循环", Kw::Loop),
+    ("次", Kw::Times),
+    ("遍历", Kw::ForEach),
+    ("在", Kw::In),
+    ("中断", Kw::Break),
+    ("继续", Kw::Continue),
+    ("函数", Kw::Func),
+    ("返回", Kw::Return),
+    ("真", Kw::True),
+    ("假", Kw::False),
+    ("空", Kw::Nil),
+    ("与", Kw::And),
+    ("或", Kw::Or),
+    ("非", Kw::Not),
+    ("导入", Kw::Import),
+    ("类", Kw::Unsupported("类")),
+    ("继承", Kw::Unsupported("继承")),
+    ("新建", Kw::Unsupported("新建")),
+    ("尝试", Kw::Unsupported("尝试")),
+    ("捕获", Kw::Unsupported("捕获")),
+    ("最终", Kw::Unsupported("最终")),
+    ("抛出", Kw::Unsupported("抛出")),
+    ("匹配", Kw::Unsupported("匹配")),
+    ("情形", Kw::Unsupported("情形")),
+    ("枚举", Kw::Unsupported("枚举")),
+    ("用", Kw::Unsupported("用")),
+    ("断言", Kw::Unsupported("断言")),
+    ("超", Kw::Unsupported("超")),
+];
+
+pub fn keyword_table() -> &'static [(&'static str, Kw)] {
+    KEYWORDS
+}
+
 fn keyword(s: &str) -> Option<Kw> {
-    Some(match s {
-        "令" => Kw::Ling,
-        "如果" => Kw::If,
-        "否则如果" => Kw::Elif,
-        "否则" => Kw::Else,
-        "当" => Kw::While,
-        "循环" => Kw::Loop,
-        "次" => Kw::Times,
-        "遍历" => Kw::ForEach,
-        "在" => Kw::In,
-        "中断" => Kw::Break,
-        "继续" => Kw::Continue,
-        "函数" => Kw::Func,
-        "返回" => Kw::Return,
-        "真" => Kw::True,
-        "假" => Kw::False,
-        "空" => Kw::Nil,
-        "与" => Kw::And,
-        "或" => Kw::Or,
-        "非" => Kw::Not,
-        "导入" => Kw::Import,
-        "类" => Kw::Unsupported("类"),
-        "继承" => Kw::Unsupported("继承"),
-        "新建" => Kw::Unsupported("新建"),
-        "尝试" => Kw::Unsupported("尝试"),
-        "捕获" => Kw::Unsupported("捕获"),
-        "最终" => Kw::Unsupported("最终"),
-        "抛出" => Kw::Unsupported("抛出"),
-        "匹配" => Kw::Unsupported("匹配"),
-        "情形" => Kw::Unsupported("情形"),
-        "枚举" => Kw::Unsupported("枚举"),
-        "用" => Kw::Unsupported("用"),
-        "断言" => Kw::Unsupported("断言"),
-        "超" => Kw::Unsupported("超"),
-        "自身" => return None, // 普通标识符（v0 没有类）
-        _ => return None,
-    })
+    KEYWORDS
+        .iter()
+        .find(|(w, _)| *w == s)
+        .map(|(_, k)| *k)
 }
 
 fn is_ident_start(c: char) -> bool {

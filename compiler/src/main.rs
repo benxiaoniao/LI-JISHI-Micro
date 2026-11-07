@@ -1,6 +1,7 @@
 mod ast;
 mod codegen;
 mod error;
+mod langcard;
 mod lexer;
 mod opcodes;
 mod parser;
@@ -12,6 +13,8 @@ use std::process::exit;
 fn usage() {
     eprintln!("用法：micc <输入.jsh> [-o 输出.jmb] [--dump]");
     eprintln!("      micc --emit-header        # 导出 jm_opcodes.h");
+    eprintln!("      micc --langcard           # 生成 docs/语言卡.md 与 spec/langcard.json");
+    eprintln!("      micc --check-langcard     # CI 校验语言卡没漂移（不一致则退出码 1）");
 }
 
 fn main() {
@@ -22,6 +25,20 @@ fn main() {
     }
     if args[0] == "--emit-header" {
         print!("{}", opcodes::emit_c_header());
+        return;
+    }
+    if args[0] == "--langcard" {
+        if let Err(e) = langcard::write_files() {
+            eprintln!("{}", e);
+            exit(1);
+        }
+        return;
+    }
+    if args[0] == "--check-langcard" {
+        if let Err(e) = langcard::check() {
+            eprintln!("{}", e);
+            exit(1);
+        }
         return;
     }
 
@@ -94,7 +111,7 @@ fn main() {
     }
 }
 
-fn compile_source(src: &str) -> Result<(Vec<u8>, String), error::CompileError> {
+pub(crate) fn compile_source(src: &str) -> Result<(Vec<u8>, String), error::CompileError> {
     let tokens = lexer::tokenize(src)?;
     let mut p = parser::Parser::new(tokens);
     let stmts = p.parse_program()?;
