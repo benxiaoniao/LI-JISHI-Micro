@@ -19,6 +19,26 @@ void jm_heap_init(void) {
     b->free = 1;
 }
 
+uint32_t jm_heap_total(void) {
+    return JM_HEAP_BYTES;
+}
+
+uint32_t jm_heap_used(void) {
+    uint32_t used = 0;
+    uint8_t *p = jm_heap;
+    while (p < JM_HEAP_END) {
+        JmBlk *b = (JmBlk *)p;
+        if (b->size < JM_BLK_HDR || (uint8_t *)b + b->size > JM_HEAP_END) {
+            break;
+        }
+        if (!b->free) {
+            used += b->size;
+        }
+        p += b->size;
+    }
+    return used;
+}
+
 void *jm_raw_alloc(size_t n) {
     if (n == 0) {
         n = 4;

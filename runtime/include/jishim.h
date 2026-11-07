@@ -28,4 +28,8 @@ int jm_run(const void *jmb, size_t len);
 /* 最近一次运行的错误说明（静态缓冲区，短文案）。 */
 const char *jm_last_error(void);
 
+/* 静态堆使用统计：已分配字节数（含块头）与总容量。 */
+uint32_t jm_heap_used(void);
+uint32_t jm_heap_total(void);
+
 #endif
