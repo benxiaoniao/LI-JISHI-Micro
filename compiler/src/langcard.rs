@@ -10,6 +10,7 @@
 //! `micc --check-langcard` 会重新渲染并比对入库文件，任何一侧改动而卡没更新都会失败。
 
 use crate::lexer;
+use crate::native_spec;
 use crate::opcodes::{self, Operand};
 use std::path::{Path, PathBuf};
 
@@ -119,7 +120,7 @@ pub const RUNTIME_ERROR_DOCS: &[RuntimeErrorDoc] = &[
     RuntimeErrorDoc { name: "E_OPCODE", meaning: "未知指令或指令流越界" },
     RuntimeErrorDoc { name: "E_DIV_NONINT", meaning: "真除法结果不是整数（v0 没有小数）" },
     RuntimeErrorDoc { name: "E_POW", meaning: "幂指数不能是负数" },
-    RuntimeErrorDoc { name: "E_IMPORT", meaning: "导入功能尚未实现" },
+    RuntimeErrorDoc { name: "E_IMPORT", meaning: "导入指令保留（编译期导入不生成该指令）" },
     RuntimeErrorDoc { name: "E_FILE", meaning: "字节码文件损坏或超出边界" },
 ];
 
@@ -134,6 +135,11 @@ const SYNTAX: &[SyntaxRow] = &[
         construct: "声明/赋值",
         form: "令 名字 = 表达式",
         example: "令 数量 = 3",
+    },
+    SyntaxRow {
+        construct: "导入原生模块",
+        form: "导入 模块名",
+        example: "导入 引脚\n引脚写(13, 0)",
     },
     SyntaxRow {
         construct: "重新赋值",
@@ -214,7 +220,8 @@ const SYNTAX: &[SyntaxRow] = &[
 
 const GRAMMAR: &[&str] = &[
     "program := { statement }",
-    "statement := let | assign | if | while | repeat | foreach | funcdef | return | break | continue | expr_stmt",
+    "statement := import | let | assign | if | while | repeat | foreach | funcdef | return | break | continue | expr_stmt",
+    "import := '导入' IDENT",
     "let := '令' IDENT '=' expr",
     "assign := lvalue '=' expr | lvalue AUGOP expr",
     "lvalue := IDENT | postfix '[' expr ']'",
@@ -255,6 +262,7 @@ const SEMANTICS: &[SemanticRow] = &[
     SemanticRow { topic: "比较", rule: "`< > <= >=` 只支持 整数对整数、文本对文本（按 UTF-8 字节字典序）；`== !=` 对所有类型成立。" },
     SemanticRow { topic: "真值", rule: "假：0、空、假、未定义、空文本、空列表、空字典、空范围；其余为真（含函数与内建）。" },
     SemanticRow { topic: "下标", rule: "列表/文本支持负下标（-1 是最后一个）；字典按键查找，键不存在报 E_INDEX；文本下标按字符而不是字节。" },
+    SemanticRow { topic: "原生模块", rule: "`导入 模块` 只能写在模块顶层；导入后模块里的原生函数名才能调用，名字与参数个数在编译期校验（E112/E113/E115）；`.jmb` 仍只带名字，运行期由 native 表绑定。" },
     SemanticRow { topic: "作用域", rule: "函数内的 `令` 是局部槽；未在函数内声明而同名的读取会落到模块级全局（v0 没有闭包）。" },
     SemanticRow { topic: "函数", rule: "只有模块级函数；实参按值传递；形参与实参个数必须一致；调用层数上限 32。" },
     SemanticRow { topic: "字符串", rule: "单引号、双引号、中文引号都可定界；反斜杠转义支持 \\n \\t \\\\ \\\" \\'；文本按 UTF-8 存。" },
@@ -352,6 +360,12 @@ const PITFALLS: &[Pitfall] = &[
         why: "读取未定义名字会报 E_NAME；先 `令` 再赋值。",
     },
     Pitfall {
+        title: "原生函数要先导入",
+        bad: "引脚写(13, 0)",
+        good: "导入 引脚\n引脚写(13, 0)",
+        why: "没写 `导入 引脚` 直接调用会报 E113；名字拼错或参数个数不符报 E115，都在编译期，不会等到运行时 E004。",
+    },
+    Pitfall {
         title: "列表/文本下标别越界",
         bad: "令 x = [1, 2][5]",
         good: "令 x = [1, 2][长度([1, 2]) - 1]",
@@ -396,6 +410,12 @@ const EXAMPLES: &[Example] = &[
         title: "文本拼接与内建",
         source: "令 n = 3\n打印(\"n = \" + 文本(n), 绝对值(-n))",
         prints: "n = 3 3",
+    },
+    Example {
+        id: "board-led",
+        title: "板级点灯（导入原生模块）",
+        source: "导入 引脚\n引脚写(13, 0)\n等待毫秒(400)\n引脚写(13, 1)",
+        prints: "（板上执行，无主机输出）",
     },
 ];
 
@@ -582,6 +602,7 @@ pub fn render_json() -> Result<String, String> {
     j.push_str("    \"opcodes\": \"compiler/src/opcodes.rs\",\n");
     j.push_str("    \"keywords\": \"compiler/src/lexer.rs\",\n");
     j.push_str("    \"builtins\": \"runtime/src/jm_builtin.c\",\n");
+    j.push_str("    \"native_modules\": \"compiler/src/native_spec.rs\",\n");
     j.push_str("    \"compile_errors\": \"compiler/src/error.rs\",\n");
     j.push_str("    \"runtime_errors\": \"runtime/src/jm_internal.h\",\n");
     j.push_str("    \"note\": \"本文件由 micc --langcard 生成，不要手改；micc --check-langcard 在 CI 里比对。\"\n");
@@ -594,9 +615,6 @@ pub fn render_json() -> Result<String, String> {
     let mut unsupported: Vec<&str> = Vec::new();
     for (w, k) in kws {
         if let lexer::Kw::Unsupported(_) = k {
-            unsupported.push(w);
-        } else if matches!(k, lexer::Kw::Import) {
-            // 保留字但 v0 解析时直接报 E112，归入“未支持”。
             unsupported.push(w);
         } else {
             supported.push(w);
@@ -705,6 +723,31 @@ pub fn render_json() -> Result<String, String> {
             max,
             esc(doc),
             if i + 1 < builtins.len() { "," } else { "" }
+        ));
+    }
+    j.push_str("  ],\n");
+
+    // 原生模块：与 C 侧 native 表同源于 compiler/src/native_spec.rs
+    j.push_str("  \"native_modules\": [\n");
+    for (i, m) in native_spec::MODULES.iter().enumerate() {
+        j.push_str("    {\n");
+        j.push_str(&format!("      \"module\": \"{}\",\n", esc(m.name)));
+        j.push_str(&format!("      \"table\": \"{}\",\n", esc(m.table)));
+        j.push_str("      \"entries\": [\n");
+        for (k, e) in m.entries.iter().enumerate() {
+            j.push_str(&format!(
+                "        {{\"name\": \"{}\", \"min_args\": {}, \"max_args\": {}, \"doc\": \"{}\"}}{}\n",
+                esc(e.name),
+                e.min_args,
+                e.max_args,
+                esc(e.doc),
+                if k + 1 < m.entries.len() { "," } else { "" }
+            ));
+        }
+        j.push_str("      ]\n");
+        j.push_str(&format!(
+            "    }}{}\n",
+            if i + 1 < native_spec::MODULES.len() { "," } else { "" }
         ));
     }
     j.push_str("  ],\n");
@@ -822,7 +865,7 @@ pub fn render_markdown() -> Result<String, String> {
     m.push_str("# 砾（Micro Core v0）语言卡\n\n");
     m.push_str("> 本文件由 `micc --langcard` 生成，不要手改。\n");
     m.push_str("> 机器可读版本：[spec/langcard.json](../spec/langcard.json)。\n");
-    m.push_str("> 规范来源：`compiler/src/opcodes.rs`、`compiler/src/lexer.rs`、`runtime/src/jm_builtin.c`、`compiler/src/error.rs`、`runtime/src/jm_internal.h`。\n>\n");
+    m.push_str("> 规范来源：`compiler/src/opcodes.rs`、`compiler/src/lexer.rs`、`runtime/src/jm_builtin.c`、`compiler/src/native_spec.rs`、`compiler/src/error.rs`、`runtime/src/jm_internal.h`。\n>\n");
     m.push_str("> 改了任一来源而没重新生成，`micc --check-langcard` 会失败。\n\n");
 
     m.push_str("## 概览\n\n");
@@ -831,24 +874,24 @@ pub fn render_markdown() -> Result<String, String> {
     m.push_str(&format!("| 字节码 ABI | {} |\n", ABI_VERSION));
     m.push_str("| 编译 | `micc 源码.jsh -o 输出.jmb` |\n");
     m.push_str("| 运行 | STM32F103C8T6 固件内解释器；脚本堆固件 6 KB |\n\n");
-    m.push_str("砾是**中文关键字、缩进式、整数优先**的小语言。它跑在 20 KB RAM 的 MCU 上，所以刻意没有小数、类、闭包和模块导入。\n\n");
+    m.push_str("砾是**中文关键字、缩进式、整数优先**的小语言。它跑在 20 KB RAM 的 MCU 上，所以刻意没有小数、类、闭包和通用模块系统；板级硬件能力通过 `导入 模块` 在编译期引入。\n\n");
 
     m.push_str("## 关键字\n\n");
     m.push_str("可用：");
     let supported: Vec<&str> = kws
         .iter()
-        .filter(|(_, k)| !matches!(k, lexer::Kw::Unsupported(_) | lexer::Kw::Import))
+        .filter(|(_, k)| !matches!(k, lexer::Kw::Unsupported(_)))
         .map(|(w, _)| *w)
         .collect();
     m.push_str(&supported.join("、"));
     m.push_str("。\n\n保留但不支持：");
     let unsupported: Vec<&str> = kws
         .iter()
-        .filter(|(_, k)| matches!(k, lexer::Kw::Unsupported(_) | lexer::Kw::Import))
+        .filter(|(_, k)| matches!(k, lexer::Kw::Unsupported(_)))
         .map(|(w, _)| *w)
         .collect();
     m.push_str(&unsupported.join("、"));
-    m.push_str("。其中 `导入` 是保留字，v0 用到即报 E112；其余是 v0 明确拒绝的关键字（E103）。\n\n");
+    m.push_str("。这些是 v0 明确拒绝的关键字（E103）。\n\n");
 
     m.push_str("## 词法规则\n\n");
     m.push_str("| 项目 | 规则 |\n|---|---|\n");
@@ -906,12 +949,32 @@ pub fn render_markdown() -> Result<String, String> {
     m.push('\n');
 
     m.push_str("## 内建 API\n\n");
-    m.push_str("内建函数直接可用，不需要 `导入`（v0 也没有模块导入）。\n\n");
+    m.push_str("内建函数直接可用，不需要 `导入`；`导入` 只用于板级原生模块（见下一节）。\n\n");
     m.push_str("| 名字 | id | 参数个数 | 说明 |\n|---|---|---|---|\n");
     for (id, name, min, max, doc) in &builtins {
         m.push_str(&format!("| `{}` | {} | {}..{} | {} |\n", name, id, min, max, doc));
     }
     m.push('\n');
+
+    m.push_str("## 原生模块（板级）\n\n");
+    m.push_str("`导入 模块` 是纯编译期声明，只允许写在模块顶层。导入后，模块里的原生函数名才能调用；名字拼错、参数个数不符、没导入就调用都会在编译期报错（E112/E113/E115），不会拖到运行时 E004。\n\n");
+    for mod_spec in native_spec::MODULES {
+        m.push_str(&format!(
+            "### 模块 `{}`（原生表 `{}`）\n\n",
+            mod_spec.name, mod_spec.table
+        ));
+        m.push_str("| 函数 | 参数个数 | 说明 |\n|---|---|---|\n");
+        for e in mod_spec.entries {
+            let arity = if e.min_args == e.max_args {
+                format!("{}", e.min_args)
+            } else {
+                format!("{}..{}", e.min_args, e.max_args)
+            };
+            m.push_str(&format!("| `{}` | {} | {} |\n", e.name, arity, e.doc));
+        }
+        m.push('\n');
+    }
+    m.push_str("单一事实来源：`compiler/src/native_spec.rs`。`micc --emit-native-header` 生成 `firmware/stm32f103/f103_native_table.h`，C 侧 `JmNativeEntry` 表由该头展开；`micc --check-native` 在构建里比对，防止只改一侧。运行期仍由 `jm_native_register` 按名字绑定。\n\n");
 
     m.push_str("## 操作码\n\n");
     m.push_str("字节码由 `micc` 生成，运行时要与 `runtime/include/jm_opcodes.h` 逐条对齐。\n\n");

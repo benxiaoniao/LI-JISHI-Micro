@@ -25,16 +25,20 @@ try {
     $out = "build\stm32"
     New-Item -ItemType Directory -Force -Path $out | Out-Null
 
-    Write-Host "== 1/5 构建 micc"
+    Write-Host "== 1/6 构建 micc"
     & cargo build --release --manifest-path "compiler\Cargo.toml" | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "micc 构建失败" }
     $micc = "compiler\target\release\micc.exe"
 
-    Write-Host "== 2/5 编译示例为 .jmb"
+    Write-Host "== 2/6 校验原生表头（与 compiler/src/native_spec.rs 同源）"
+    & $micc --check-native
+    if ($LASTEXITCODE -ne 0) { throw "原生表头与规格不一致" }
+
+    Write-Host "== 3/6 编译示例为 .jmb"
     & $micc ("examples\" + $Example + ".jsh") -o "$out\app.jmb" | Out-Null
     if ($LASTEXITCODE -ne 0) { throw ("编译失败：" + $Example + ".jsh") }
 
-    Write-Host "== 3/5 生成内嵌字节数组"
+    Write-Host "== 4/6 生成内嵌字节数组"
     $bytes = [System.IO.File]::ReadAllBytes((Join-Path $root "$out\app.jmb"))
     $sb = New-Object System.Text.StringBuilder
     [void]$sb.Append("#include <stdint.h>`n")
@@ -52,7 +56,7 @@ try {
         $sb.ToString(),
         (New-Object System.Text.UTF8Encoding($false)))
 
-    Write-Host "== 4/5 交叉编译并链接"
+    Write-Host "== 5/6 交叉编译并链接"
     $src = @(
         "runtime\src\jm_heap.c", "runtime\src\jm_vm.c", "runtime\src\jm_builtin.c",
         "runtime\src\jm_loader.c", "runtime\src\jm_error.c",
@@ -80,7 +84,7 @@ try {
         -o "$out\jishim.elf"
     if ($LASTEXITCODE -ne 0) { throw "链接失败" }
 
-    Write-Host "== 5/5 生成 bin / hex 并统计体积"
+    Write-Host "== 6/6 生成 bin / hex 并统计体积"
     $objcopy = Join-Path (Split-Path $ArmGcc) "arm-none-eabi-objcopy.exe"
     & $objcopy -O binary "$out\jishim.elf" "$out\jishim.bin"
     & $objcopy -O ihex "$out\jishim.elf" "$out\jishim.hex"

@@ -1,7 +1,8 @@
 use crate::ast::*;
 use crate::error::{CompileError, Result};
+use crate::native_spec;
 use crate::opcodes::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Debug)]
 pub enum ConstVal {
@@ -143,6 +144,8 @@ struct FnState {
     temps: Vec<u8>,
     loops: Vec<LoopCtx>,
     is_module: bool,
+    /// 顶层 `导入 模块` 汇总出来的原生函数名。
+    imported: HashSet<String>,
 }
 
 impl FnState {
@@ -207,6 +210,14 @@ fn resolve(fs: &FnState, b: &mut Builder, name: &str, line: u32, col: u32) -> Re
 }
 
 fn store_name(fs: &mut FnState, b: &mut Builder, name: &str, line: u32, col: u32) -> Result<()> {
+    if native_spec::entry(name).is_some() {
+        return Err(CompileError::new(
+            "E115",
+            line,
+            col,
+            format!("原生函数名「{}」是保留名，不能声明或赋值", name),
+        ));
+    }
     match resolve(fs, b, name, line, col)? {
         Res::Local(s) => fs.emit_u8(OP_STORE_LOCAL, s),
         Res::Global(g) => fs.emit_u8(OP_STORE_GLOBAL, g),
@@ -243,6 +254,26 @@ fn collect_decls(stmts: &[Stmt], out: &mut Vec<String>) {
 }
 
 pub fn compile(stmts: &[Stmt]) -> Result<Program> {
+    // 先汇总顶层导入：`导入 模块` 是纯编译期声明，不生成字节码，
+    // 但模块里的原生名字会进入本文件的名字作用域（供静态检查）。
+    let mut imported: HashSet<String> = HashSet::new();
+    for s in stmts {
+        if let StmtKind::Import(m) = &s.kind {
+            let Some(spec) = native_spec::module(m) else {
+                return Err(CompileError::new(
+                    "E112",
+                    s.line,
+                    1,
+                    format!("不认识的导入模块「{}」", m),
+                )
+                .with_hint(format!("v0 可用：{}", native_spec::module_names())));
+            };
+            for e in spec.entries {
+                imported.insert(e.name.to_string());
+            }
+        }
+    }
+
     let mut b = Builder::new();
     let module_name = b.intern_name("<模块>", 1, 1)?;
     b.codes.push(CodeObj {
@@ -260,9 +291,16 @@ pub fn compile(stmts: &[Stmt]) -> Result<Program> {
         temps: Vec::new(),
         loops: Vec::new(),
         is_module: true,
+        imported,
     };
 
-    compile_stmts(&mut fs, &mut b, stmts)?;
+    // 顶层导入已校验；其余语句照常编译。嵌套的「导入」由 compile_stmt 拒绝。
+    for s in stmts {
+        if matches!(s.kind, StmtKind::Import(_)) {
+            continue;
+        }
+        compile_stmt(&mut fs, &mut b, s)?;
+    }
     fs.emit(OP_HALT);
 
     b.codes[0].nlocals = fs.nlocals;
@@ -282,6 +320,7 @@ fn compile_function(
     params: &[String],
     body: &[Stmt],
     parent_names: &[String],
+    imported: &HashSet<String>,
     line: u32,
     col: u32,
 ) -> Result<u8> {
@@ -306,9 +345,18 @@ fn compile_function(
         temps: Vec::new(),
         loops: Vec::new(),
         is_module: false,
+        imported: imported.clone(),
     };
 
     for (i, p) in params.iter().enumerate() {
+        if native_spec::entry(p).is_some() {
+            return Err(CompileError::new(
+                "E115",
+                line,
+                col,
+                format!("原生函数名「{}」是保留名，不能当参数", p),
+            ));
+        }
         if fs.slots.insert(p.clone(), i as u8).is_some() {
             return Err(CompileError::new("E109", line, col, "参数重名"));
         }
@@ -348,6 +396,14 @@ fn compile_stmts(fs: &mut FnState, b: &mut Builder, stmts: &[Stmt]) -> Result<()
 
 fn compile_stmt(fs: &mut FnState, b: &mut Builder, s: &Stmt) -> Result<()> {
     match &s.kind {
+        StmtKind::Import(_) => {
+            return Err(CompileError::new(
+                "E109",
+                s.line,
+                1,
+                "「导入」只能写在模块顶层",
+            ));
+        }
         StmtKind::Let(name, e) => {
             compile_expr(fs, b, e)?;
             store_name(fs, b, name, s.line, e.col)?;
@@ -467,7 +523,7 @@ fn compile_stmt(fs: &mut FnState, b: &mut Builder, s: &Stmt) -> Result<()> {
             for k in fs.slots.keys() {
                 parent.push(k.clone());
             }
-            let idx = compile_function(b, name, params, body, &parent, s.line, 1)?;
+            let idx = compile_function(b, name, params, body, &parent, &fs.imported, s.line, 1)?;
             fs.emit_u8(OP_MAKE_FUNCTION, idx);
             store_name(fs, b, name, s.line, 1)?;
         }
@@ -557,7 +613,26 @@ fn compile_expr(fs: &mut FnState, b: &mut Builder, e: &Expr) -> Result<()> {
             let c = b.const_bool(false, e.line, e.col)?;
             fs.emit_u8(OP_CONST, c);
         }
-        ExprKind::Name(name) => load_name(fs, b, name, e.line, e.col)?,
+        ExprKind::Name(name) => {
+            if let Some((m, _)) = native_spec::entry(name) {
+                if fs.imported.contains(name) {
+                    return Err(CompileError::new(
+                        "E115",
+                        e.line,
+                        e.col,
+                        format!("原生函数「{}」只能直接调用，不能当值使用", name),
+                    ));
+                }
+                return Err(CompileError::new(
+                    "E113",
+                    e.line,
+                    e.col,
+                    format!("原生函数「{}」属于模块「{}」，还没有导入", name, m.name),
+                )
+                .with_hint(format!("先写：导入 {}", m.name)));
+            }
+            load_name(fs, b, name, e.line, e.col)?;
+        }
         ExprKind::List(items) => {
             for it in items {
                 compile_expr(fs, b, it)?;
@@ -630,7 +705,52 @@ fn compile_expr(fs: &mut FnState, b: &mut Builder, e: &Expr) -> Result<()> {
             fs.free_temp(t0);
         }
         ExprKind::Call(callee, args) => {
-            compile_expr(fs, b, callee)?;
+            match &callee.kind {
+                ExprKind::Name(name) => {
+                    if let Some((m, ent)) = native_spec::entry(name) {
+                        if !fs.imported.contains(name) {
+                            return Err(CompileError::new(
+                                "E113",
+                                callee.line,
+                                callee.col,
+                                format!(
+                                    "原生函数「{}」属于模块「{}」，还没有导入",
+                                    name, m.name
+                                ),
+                            )
+                            .with_hint(format!("先写：导入 {}", m.name)));
+                        }
+                        let n = args.len();
+                        if n < ent.min_args as usize || n > ent.max_args as usize {
+                            let want = if ent.min_args == ent.max_args {
+                                format!("{} 个", ent.min_args)
+                            } else {
+                                format!("{}–{} 个", ent.min_args, ent.max_args)
+                            };
+                            return Err(CompileError::new(
+                                "E115",
+                                callee.line,
+                                callee.col,
+                                format!(
+                                    "原生函数「{}」需要 {}参数，这里给了 {} 个",
+                                    name, want, n
+                                ),
+                            ));
+                        }
+                    } else if let Some((m, ent)) = native_spec::suggest(name, &fs.imported) {
+                        return Err(CompileError::new(
+                            "E115",
+                            callee.line,
+                            callee.col,
+                            format!("模块「{}」里没有「{}」，是不是「{}」？", m.name, name, ent.name),
+                        )
+                        .with_hint("原生函数名在编译期校验，拼错不会等到运行时 E004"));
+                    }
+                    // 原生函数和普通全局函数一样按名字装载，运行期再绑定到 native 表。
+                    load_name(fs, b, name, callee.line, callee.col)?;
+                }
+                _ => compile_expr(fs, b, callee)?,
+            }
             for a in args {
                 compile_expr(fs, b, a)?;
             }

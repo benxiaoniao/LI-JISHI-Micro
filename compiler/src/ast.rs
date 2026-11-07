@@ -59,6 +59,7 @@ pub struct Stmt {
 
 #[derive(Clone, Debug)]
 pub enum StmtKind {
+    Import(String),
     Let(String, Expr),
     Assign(String, Expr),
     AssignIndex(Expr, Box<Expr>, Box<Expr>),

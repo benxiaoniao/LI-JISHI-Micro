@@ -102,12 +102,9 @@ static int n_delay(JmStateRef st, const JmValue *args, uint8_t nargs,
     return JM_NATIVE_OK;
 }
 
+/* 表项由 micc --emit-native-header 生成，见 f103_native_table.h */
 static const JmNativeEntry F103_TABLE[] = {
-    {"引脚写",   n_pin_write, 2, 2, 0, 0},
-    {"引脚读",   n_pin_read,  1, 1, 0, 0},
-    {"引脚翻转", n_pin_toggle, 1, 1, 0, 0},
-    {"串口写",   n_uart_write, 1, 1, 0, 0},
-    {"等待毫秒", n_delay,     1, 1, 0, 0},
+    F103_NATIVE_TABLE_INIT
 };
 
 int f103_native_register(void) {

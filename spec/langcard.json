@@ -9,6 +9,7 @@
     "opcodes": "compiler/src/opcodes.rs",
     "keywords": "compiler/src/lexer.rs",
     "builtins": "runtime/src/jm_builtin.c",
+    "native_modules": "compiler/src/native_spec.rs",
     "compile_errors": "compiler/src/error.rs",
     "runtime_errors": "runtime/src/jm_internal.h",
     "note": "本文件由 micc --langcard 生成，不要手改；micc --check-langcard 在 CI 里比对。"
@@ -23,6 +24,7 @@
     {"word": "否则如果", "supported": true},
     {"word": "在", "supported": true},
     {"word": "如果", "supported": true},
+    {"word": "导入", "supported": true},
     {"word": "当", "supported": true},
     {"word": "循环", "supported": true},
     {"word": "或", "supported": true},
@@ -36,7 +38,6 @@
   ],
   "unsupported_keywords": [
     "匹配",
-    "导入",
     "尝试",
     "情形",
     "抛出",
@@ -60,6 +61,7 @@
   ],
   "syntax": [
     {"construct": "声明/赋值", "form": "令 名字 = 表达式", "example": "令 数量 = 3"},
+    {"construct": "导入原生模块", "form": "导入 模块名", "example": "导入 引脚\n引脚写(13, 0)"},
     {"construct": "重新赋值", "form": "名字 = 表达式", "example": "数量 = 数量 + 1"},
     {"construct": "下标赋值", "form": "容器[下标] = 表达式", "example": "统计[\"a\"] = 1"},
     {"construct": "复合赋值", "form": "左值 += 表达式（-= *= /= //= %= **= 同理）", "example": "总数 += 2"},
@@ -78,7 +80,8 @@
   ],
   "grammar": [
     "program := { statement }",
-    "statement := let | assign | if | while | repeat | foreach | funcdef | return | break | continue | expr_stmt",
+    "statement := import | let | assign | if | while | repeat | foreach | funcdef | return | break | continue | expr_stmt",
+    "import := '导入' IDENT",
     "let := '令' IDENT '=' expr",
     "assign := lvalue '=' expr | lvalue AUGOP expr",
     "lvalue := IDENT | postfix '[' expr ']'",
@@ -119,6 +122,7 @@
     {"topic": "比较", "rule": "`< > <= >=` 只支持 整数对整数、文本对文本（按 UTF-8 字节字典序）；`== !=` 对所有类型成立。"},
     {"topic": "真值", "rule": "假：0、空、假、未定义、空文本、空列表、空字典、空范围；其余为真（含函数与内建）。"},
     {"topic": "下标", "rule": "列表/文本支持负下标（-1 是最后一个）；字典按键查找，键不存在报 E_INDEX；文本下标按字符而不是字节。"},
+    {"topic": "原生模块", "rule": "`导入 模块` 只能写在模块顶层；导入后模块里的原生函数名才能调用，名字与参数个数在编译期校验（E112/E113/E115）；`.jmb` 仍只带名字，运行期由 native 表绑定。"},
     {"topic": "作用域", "rule": "函数内的 `令` 是局部槽；未在函数内声明而同名的读取会落到模块级全局（v0 没有闭包）。"},
     {"topic": "函数", "rule": "只有模块级函数；实参按值传递；形参与实参个数必须一致；调用层数上限 32。"},
     {"topic": "字符串", "rule": "单引号、双引号、中文引号都可定界；反斜杠转义支持 \\n \\t \\\\ \\\" \\'；文本按 UTF-8 存。"},
@@ -149,6 +153,19 @@
     {"name": "最大", "id": 7, "min_args": 1, "max_args": 1, "doc": "列表或范围内的最大整数。"},
     {"name": "最小", "id": 8, "min_args": 1, "max_args": 1, "doc": "列表或范围内的最小整数。"},
     {"name": "绝对值", "id": 9, "min_args": 1, "max_args": 1, "doc": "整数的绝对值；超出 29 位范围报整数溢出。"}
+  ],
+  "native_modules": [
+    {
+      "module": "引脚",
+      "table": "f103_board",
+      "entries": [
+        {"name": "引脚写", "min_args": 2, "max_args": 2, "doc": "向指定引脚写电平；v0 只支持引脚 13（PC13），电平 0/1。PC13 低电平点亮。"},
+        {"name": "引脚读", "min_args": 1, "max_args": 1, "doc": "读指定引脚的输入寄存器值（0/1）；v0 只支持引脚 13（PC13）。"},
+        {"name": "引脚翻转", "min_args": 1, "max_args": 1, "doc": "读当前电平再取反；v0 只支持引脚 13（PC13）。"},
+        {"name": "串口写", "min_args": 1, "max_args": 1, "doc": "直接写 USART1（115200 8N1），不换行、不加前缀。"},
+        {"name": "等待毫秒", "min_args": 1, "max_args": 1, "doc": "忙等 0–60000 毫秒；SysTick 中断仍在跑，调度器不参与。"}
+      ]
+    }
   ],
   "opcodes": [
     {"value": 0, "name": "HALT", "operand": "无"},
@@ -192,8 +209,10 @@
     {"code": "E109", "meaning": "语法错误：缺少符号/换行/缩进错乱/字符串未闭合/中断继续位置不对"},
     {"code": "E110", "meaning": "整数超出 29 位范围（-268435456 .. 268435455）"},
     {"code": "E111", "meaning": "单个函数或 .jmb 超过 64 KB"},
-    {"code": "E112", "meaning": "v0 还没有模块导入"},
-    {"code": "E114", "meaning": "实参超过 255 个"}
+    {"code": "E112", "meaning": "导入的模块不存在或不可用（v0 只有 引脚）"},
+    {"code": "E113", "meaning": "调用了原生函数但没有先导入它所属的模块"},
+    {"code": "E114", "meaning": "实参超过 255 个"},
+    {"code": "E115", "meaning": "原生函数用法错误：名字拼错、参数个数不符，或当值/左值使用"}
   ],
   "runtime_errors": [
     {"code": 1, "name": "E_STACK", "meaning": "值栈溢出（调用层数或表达式嵌套太深）"},
@@ -220,7 +239,7 @@
     {"code": 22, "name": "E_OPCODE", "meaning": "未知指令或指令流越界"},
     {"code": 23, "name": "E_DIV_NONINT", "meaning": "真除法结果不是整数（v0 没有小数）"},
     {"code": 24, "name": "E_POW", "meaning": "幂指数不能是负数"},
-    {"code": 25, "name": "E_IMPORT", "meaning": "导入功能尚未实现"},
+    {"code": 25, "name": "E_IMPORT", "meaning": "导入指令保留（编译期导入不生成该指令）"},
     {"code": 26, "name": "E_FILE", "meaning": "字节码文件损坏或超出边界"}
   ],
   "idioms": [
@@ -237,6 +256,7 @@
     {"title": "函数不能读外层局部变量", "bad": "函数 外层():\n    令 x = 1\n    函数 内层():\n        返回 x", "good": "令 x = 1\n函数 内层():\n    返回 x", "why": "v0 没有闭包（E101）；需要共享的数据放模块级 `令`。"},
     {"title": "没有类和属性访问", "bad": "令 s = 对象.名字", "good": "令 s = 字典[\"名字\"]", "why": "`.` 属性访问与 `类/新建` 都被明确拒绝（E108/E103）；用字典加下标。"},
     {"title": "不要给未声明的名字赋值", "bad": "计数 = 计数 + 1", "good": "令 计数 = 0\n计数 = 计数 + 1", "why": "读取未定义名字会报 E_NAME；先 `令` 再赋值。"},
+    {"title": "原生函数要先导入", "bad": "引脚写(13, 0)", "good": "导入 引脚\n引脚写(13, 0)", "why": "没写 `导入 引脚` 直接调用会报 E113；名字拼错或参数个数不符报 E115，都在编译期，不会等到运行时 E004。"},
     {"title": "列表/文本下标别越界", "bad": "令 x = [1, 2][5]", "good": "令 x = [1, 2][长度([1, 2]) - 1]", "why": "越界是运行错误 E_INDEX，不是返回空；负下标从 -1 开始。"}
   ],
   "examples": [
@@ -244,6 +264,7 @@
     {"id": "fib", "title": "递归斐波那契", "source": "函数 斐波(n):\n    如果 n <= 1:\n        返回 n\n    返回 斐波(n - 1) + 斐波(n - 2)\n\n打印(斐波(10))", "prints": "55"},
     {"id": "sum-range", "title": "范围遍历求和", "source": "令 总和 = 0\n遍历 i 在 范围(1, 6):\n    总和 += i\n打印(总和)", "prints": "15"},
     {"id": "dict-count", "title": "字典计数", "source": "令 次数 = {\"a\": 1}\n次数[\"b\"] = 2\n打印(次数[\"b\"])", "prints": "2"},
-    {"id": "text", "title": "文本拼接与内建", "source": "令 n = 3\n打印(\"n = \" + 文本(n), 绝对值(-n))", "prints": "n = 3 3"}
+    {"id": "text", "title": "文本拼接与内建", "source": "令 n = 3\n打印(\"n = \" + 文本(n), 绝对值(-n))", "prints": "n = 3 3"},
+    {"id": "board-led", "title": "板级点灯（导入原生模块）", "source": "导入 引脚\n引脚写(13, 0)\n等待毫秒(400)\n引脚写(13, 1)", "prints": "（板上执行，无主机输出）"}
   ]
 }

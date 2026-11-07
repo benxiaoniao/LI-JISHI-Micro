@@ -251,13 +251,15 @@ impl Parser {
                     line,
                 })
             }
-            Tok::Kw(Kw::Import) => Err(CompileError::new(
-                "E112",
-                line,
-                t.col,
-                "Micro Core v0 还没有模块导入",
-            )
-            .with_hint("内建函数（打印/长度/范围…）直接可用")),
+            Tok::Kw(Kw::Import) => {
+                self.pos += 1;
+                let (module, _, _) = self.expect_ident()?;
+                self.expect_newline()?;
+                Ok(Stmt {
+                    kind: StmtKind::Import(module),
+                    line,
+                })
+            }
             Tok::Kw(Kw::Unsupported(name)) => Err(CompileError::new(
                 "E103",
                 line,

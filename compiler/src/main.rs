@@ -3,6 +3,7 @@ mod codegen;
 mod error;
 mod langcard;
 mod lexer;
+mod native_spec;
 mod opcodes;
 mod parser;
 mod writer;
@@ -13,6 +14,8 @@ use std::process::exit;
 fn usage() {
     eprintln!("用法：micc <输入.jsh> [-o 输出.jmb] [--dump]");
     eprintln!("      micc --emit-header        # 导出 jm_opcodes.h");
+    eprintln!("      micc --emit-native-header # 导出板级原生表头 f103_native_table.h");
+    eprintln!("      micc --check-native       # CI 校验原生表头没漂移（不一致则退出码 1）");
     eprintln!("      micc --langcard           # 生成 docs/语言卡.md 与 spec/langcard.json");
     eprintln!("      micc --check-langcard     # CI 校验语言卡没漂移（不一致则退出码 1）");
 }
@@ -25,6 +28,23 @@ fn main() {
     }
     if args[0] == "--emit-header" {
         print!("{}", opcodes::emit_c_header());
+        return;
+    }
+    if args[0] == "--emit-native-header" {
+        match native_spec::render_c_header() {
+            Ok(s) => print!("{}", s),
+            Err(e) => {
+                eprintln!("{}", e);
+                exit(1);
+            }
+        }
+        return;
+    }
+    if args[0] == "--check-native" {
+        if let Err(e) = native_spec::check() {
+            eprintln!("{}", e);
+            exit(1);
+        }
         return;
     }
     if args[0] == "--langcard" {
