@@ -5,7 +5,7 @@ use crate::opcodes::*;
 const HEADER_LEN: usize = 12;
 const CONST_ENTRY: usize = 8;
 const NAME_ENTRY: usize = 2;
-/// JMB v2：代码表每项 10 字节（新增 `ncap`）。（版本 2 起不再兼容 v1。）
+/// JMB v2：代码表每项 10 字节（新增 `ncap`）。v3 表结构与 v2 相同，仅版本号递增。
 const CODE_ENTRY: usize = 10;
 /// 捕获表每项 2 字节：`(父帧槽, 子帧槽)`。
 const CAP_ENTRY: usize = 2;
@@ -76,7 +76,7 @@ pub fn write(prog: &Program) -> Result<Vec<u8>> {
     let mut out = Vec::with_capacity(total);
     // 头
     out.extend_from_slice(b"JMB1");
-    out.push(2); // version：JMB v2，代码表带捕获表
+    out.push(3); // version：JMB v3（异常处理；表结构与 v2 相同）
     out.push(0); // flags
     out.push(nconsts as u8);
     out.push(nnames as u8);

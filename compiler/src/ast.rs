@@ -81,4 +81,10 @@ pub enum StmtKind {
         body: Vec<Stmt>,
     },
     Return(Option<Expr>),
+    Throw(Expr),
+    Try {
+        body: Vec<Stmt>,
+        catch_name: Option<String>,
+        catch_body: Vec<Stmt>,
+    },
 }

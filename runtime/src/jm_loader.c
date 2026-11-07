@@ -18,8 +18,8 @@ int jm_loader_init(JmState *st, const void *data, size_t len) {
     if (p[0] != 'J' || p[1] != 'M' || p[2] != 'B' || p[3] != '1') {
         return jm_fail(st, E_FILE, "不是 .jmb 文件（魔数不对）");
     }
-    if (p[4] != 2) {
-        return jm_fail(st, E_FILE, "不支持的字节码版本（需要 JMB v2）");
+    if (p[4] != 3) {
+        return jm_fail(st, E_FILE, "不支持的字节码版本（需要 JMB v3）");
     }
     st->nconsts = p[6];
     st->nnames = p[7];

@@ -16,6 +16,25 @@ int jm_fail_aux(JmState *st, int code, const char *detail, int aux) {
     return -1;
 }
 
+/* 把抛出值渲染进 JmState 的固定显示缓冲（超长截断）。 */
+typedef struct {
+    char *buf;
+    uint32_t cap;
+    uint32_t len;
+} ThrowSink;
+
+static int throw_sink(void *ctx, const char *s, uint32_t n) {
+    ThrowSink *b = (ThrowSink *)ctx;
+    uint32_t room = b->cap - 1u - b->len;
+    if (n > room) {
+        n = room;
+    }
+    for (uint32_t i = 0; i < n; i++) {
+        b->buf[b->len++] = s[i];
+    }
+    return 0;
+}
+
 static uint16_t rd16(const uint8_t *p) {
     return (uint16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8));
 }
@@ -1186,6 +1205,10 @@ int jm_execute(JmState *st) {
         case OP_RETURN: {
             JmValue ret;
             POP_V(ret);
+            /* 正常路径编译器已发 TRY_END；这里兜底丢掉本帧遗留的尝试记录。 */
+            while (st->tp > 0 && st->tries[st->tp - 1].frame_idx == (uint8_t)st->fp) {
+                st->tp--;
+            }
             if (st->fp == 0) {
                 jm_release(ret);
                 goto done;
@@ -1345,6 +1368,54 @@ int jm_execute(JmState *st) {
             PUSH_V(jm_heap_value(cl));
             break;
         }
+        case OP_TRY: {
+            uint16_t tgt = rd16(code + ip);
+            ip += 2;
+            if (st->tp >= JM_MAX_TRY_DEPTH) {
+                VM_FAIL(E_TRY_DEPTH, "尝试嵌套超过 8 层");
+            }
+            JmTry *r = &st->tries[st->tp++];
+            r->frame_idx = (uint8_t)st->fp;
+            r->sp = (uint16_t)st->sp;
+            r->handler_ip = tgt;
+            break;
+        }
+        case OP_TRY_END:
+            if (st->tp <= 0 || st->tries[st->tp - 1].frame_idx != (uint8_t)st->fp) {
+                VM_FAIL(E_TRY_STATE, "尝试栈与帧不匹配（编译器 bug）");
+            }
+            st->tp--;
+            break;
+        case OP_THROW: {
+            JmValue v;
+            POP_V(v);
+            if (st->tp <= 0) {
+                ThrowSink tb = {st->uncaught, (uint32_t)sizeof(st->uncaught), 0u};
+                st->uncaught[0] = 0;
+                jm_repr(st, v, 0, throw_sink, &tb, 0);
+                st->uncaught[tb.len] = 0;
+                jm_release(v);
+                VM_FAIL(E_UNCAUGHT, st->uncaught);
+            }
+            JmTry rec = st->tries[--st->tp];
+            /* 栈展开：丢掉被展开帧（含当前帧）在 `尝试` 之后的全部栈项
+             * （操作数临时值、被调用值、局部槽/捕获槽都各占一项），
+             * 然后恢复到处理器所在帧。 */
+            st->fp = (int)rec.frame_idx;
+            while (st->sp > (int)rec.sp) {
+                st->sp--;
+                jm_release(st->stack[st->sp]);
+            }
+            PUSH_V(v);
+            f = &st->frames[st->fp];
+            cur_code = f->code_idx;
+            ce = code_entry(st, cur_code);
+            code = st->base + rd16(ce + 0);
+            clen = rd16(ce + 2);
+            cur_nlocals = ce[6];
+            ip = rec.handler_ip;
+            break;
+        }
         case OP_IMPORT:
             VM_FAIL(E_IMPORT, "模块导入尚未支持");
         default:
@@ -1353,6 +1424,7 @@ int jm_execute(JmState *st) {
     }
 
 done:
+    st->tp = 0;
     while (st->sp > 0) {
         st->sp--;
         jm_release(st->stack[st->sp]);

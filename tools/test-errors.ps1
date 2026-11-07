@@ -15,7 +15,10 @@ try {
         @{ file = "闭包赋值.jsh";   code = "E117"; stage = "编译" },
         @{ file = "闭包自捕获.jsh"; code = "E117"; stage = "编译" },
         @{ file = "指数.jsh";       code = "E102"; stage = "编译" },
-        @{ file = "类.jsh";         code = "E103"; stage = "编译" }
+        @{ file = "类.jsh";         code = "E103"; stage = "编译" },
+        @{ file = "未捕获异常.jsh"; code = "E027"; stage = "运行" },
+        @{ file = "运行故障不可捕获.jsh"; code = "E007"; stage = "运行" },
+        @{ file = "尝试嵌套过深.jsh"; code = "E028"; stage = "运行" }
     )
     $fail = 0
     foreach ($c in $cases) {

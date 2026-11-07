@@ -25,9 +25,12 @@
     {"word": "在", "supported": true},
     {"word": "如果", "supported": true},
     {"word": "导入", "supported": true},
+    {"word": "尝试", "supported": true},
     {"word": "当", "supported": true},
     {"word": "循环", "supported": true},
     {"word": "或", "supported": true},
+    {"word": "抛出", "supported": true},
+    {"word": "捕获", "supported": true},
     {"word": "次", "supported": true},
     {"word": "真", "supported": true},
     {"word": "空", "supported": true},
@@ -38,10 +41,7 @@
   ],
   "unsupported_keywords": [
     "匹配",
-    "尝试",
     "情形",
-    "抛出",
-    "捕获",
     "断言",
     "新建",
     "最终",
@@ -74,6 +74,8 @@
     {"construct": "函数", "form": "函数 名字(参数, ...):", "example": "函数 平方(x):\n    返回 x * x"},
     {"construct": "类型标注（仅忽略）", "form": "函数 名字(参数: 类型) -> 类型:", "example": "函数 加一(x: 整数) -> 整数:\n    返回 x + 1"},
     {"construct": "返回", "form": "返回 [表达式]", "example": "返回 0"},
+    {"construct": "抛出", "form": "抛出 表达式", "example": "抛出 \"坏输入\""},
+    {"construct": "尝试/捕获", "form": "尝试: / 捕获 名字: / 捕获:", "example": "尝试:\n    抛出 \"坏输入\"\n捕获 原因:\n    打印(原因)"},
     {"construct": "调用", "form": "被调用者(实参, ...)", "example": "打印(长度(列表))"},
     {"construct": "下标", "form": "容器[下标]", "example": "列表[0]"},
     {"construct": "列表", "form": "[元素, ...]", "example": "[1, 2, 3]"},
@@ -81,7 +83,7 @@
   ],
   "grammar": [
     "program := { statement }",
-    "statement := import | let | assign | if | while | repeat | foreach | funcdef | return | break | continue | expr_stmt",
+    "statement := import | let | assign | if | while | repeat | foreach | funcdef | return | break | continue | throw | try | expr_stmt",
     "import := '导入' IDENT",
     "let := '令' IDENT '=' expr",
     "assign := lvalue '=' expr | lvalue AUGOP expr",
@@ -93,6 +95,8 @@
     "funcdef := '函数' IDENT '(' [ param { ',' param } ] ')' [ '->' IDENT ] block",
     "param := IDENT [ ':' IDENT ]",
     "return := '返回' [ expr ]",
+    "throw := '抛出' expr",
+    "try := '尝试' block '捕获' [ IDENT ] block",
     "block := ':' NEWLINE INDENT { statement } DEDENT",
     "expr := or",
     "or := and { '或' and }",
@@ -130,6 +134,9 @@
     {"topic": "字符串", "rule": "单引号、双引号、中文引号都可定界；反斜杠转义支持 \\n \\t \\\\ \\\" \\'；文本按 UTF-8 存。"},
     {"topic": "字典键", "rule": "键必须是整数/文本/空/真/假这类不可变值；列表、字典、函数不能当键。"},
     {"topic": "迭代", "rule": "可遍历：列表、文本（按字符）、字典（按键）、范围。"},
+    {"topic": "异常", "rule": "`抛出 表达式` 抛任意值；`尝试: ... 捕获 名字: ...`（或匿名 `捕获:`）在同一函数内捕获。只有显式 `抛出` 可捕获：除零（E007）、堆耗尽（E017）等 VM 故障与原生错误（E030/E031/E033）一律终止，不能被 `捕获` 拦下。没有 `最后`，一个 `尝试` 只能跟一个 `捕获`。"},
+    {"topic": "异常传播", "rule": "抛出后按调用栈向外找最近的 `捕获`；展开时释放被跳过帧的局部槽（含闭包捕获槽）与操作数临时值，抛出值引用计数平衡。到最外层仍未捕获则 `jm_run` 返回 -1，错误为 `错误[E027] 未捕获的异常：<值>`。`返回`/`中断`/`继续` 离开 `尝试` 时都会先结束该层记录。"},
+    {"topic": "捕获变量", "rule": "`捕获 名字` 绑定的名字是当前作用域的普通可写变量（函数内为局部槽，模块顶层为全局）；`捕获:` 不绑定名字，丢弃抛出值。"},
     {"topic": "内存", "rule": "脚本对象都放在固定堆里（固件默认 6 KB）；闭包按引用计数释放，但闭包与列表/字典互相引用成环时 rc 不归零，这块堆不会回收（没有 GC），反复创建最终报 E_OOM；其余堆满也报 E_OOM，不会崩溃。"}
   ],
   "limits": [
@@ -142,6 +149,8 @@
     {"item": "闭包捕获/函数", "value": "255 个（E116）"},
     {"item": "列表元素/字典项", "value": "各 255 个（字面量编译期）"},
     {"item": "调用层数", "value": "32 层（JM_MAX_FRAMES）"},
+    {"item": "尝试嵌套", "value": "8 层（JM_MAX_TRY_DEPTH，超过报 E028）"},
+    {"item": "未捕获异常显示", "value": "抛出值最多渲染 64 字节，超出截断"},
     {"item": "值栈", "value": "512 槽（JM_STACK_SLOTS）"},
     {"item": "脚本堆", "value": "固件 6 KB / 宿主默认 12 KB"},
     {"item": "字节码", "value": "单个函数 <64 KB，整包 <64 KB"}
@@ -217,11 +226,15 @@
     {"value": 24, "name": "GET_ITER", "operand": "无"},
     {"value": 25, "name": "FOR_ITER", "operand": "2 字节"},
     {"value": 26, "name": "MAKE_FUNCTION", "operand": "1 字节"},
-    {"value": 27, "name": "IMPORT", "operand": "1 字节"}
+    {"value": 27, "name": "IMPORT", "operand": "1 字节"},
+    {"value": 28, "name": "MAKE_CLOSURE", "operand": "1 字节"},
+    {"value": 29, "name": "TRY", "operand": "2 字节"},
+    {"value": 30, "name": "TRY_END", "operand": "无"},
+    {"value": 31, "name": "THROW", "operand": "无"}
   ],
   "compile_errors": [
     {"code": "E102", "meaning": "数字字面量格式错误：不支持指数形式，小数点后必须有数字"},
-    {"code": "E103", "meaning": "使用了 v0 不支持的关键字（类/继承/尝试/匹配等）"},
+    {"code": "E103", "meaning": "使用了 v0 不支持的关键字（类/继承/最终/匹配等）"},
     {"code": "E104", "meaning": "局部变量超过 255 个"},
     {"code": "E105", "meaning": "名字/常量/列表元素/字典项超过 255 个"},
     {"code": "E106", "meaning": "函数超过 255 个"},
@@ -263,7 +276,10 @@
     {"code": 23, "name": "E_DIV_NONINT", "meaning": "整数真除法结果不是整数；改用 //，或让任一操作数成为小数（如 3300.0）"},
     {"code": 24, "name": "E_POW", "meaning": "幂指数不能是负数"},
     {"code": 25, "name": "E_IMPORT", "meaning": "导入指令保留（编译期导入不生成该指令）"},
-    {"code": 26, "name": "E_FILE", "meaning": "字节码文件损坏或超出边界"}
+    {"code": 26, "name": "E_FILE", "meaning": "字节码文件损坏或超出边界"},
+    {"code": 27, "name": "E_UNCAUGHT", "meaning": "未捕获的异常：`抛出` 的值一路传到了最外层（`错误[E027] 未捕获的异常：<值>`）"},
+    {"code": 28, "name": "E_TRY_DEPTH", "meaning": "`尝试` 嵌套超过 8 层（运行时固定栈）"},
+    {"code": 29, "name": "E_TRY_STATE", "meaning": "`尝试` 栈与当前帧不匹配（字节码不平衡，通常由编译器 bug 引起）"}
   ],
   "idioms": [
     {"title": "用范围做计数循环", "snippet": "遍历 i 在 范围(0, 10):\n    打印(i)"},
@@ -278,6 +294,8 @@
     {"title": "纯整数场景：结果要整除，否则用 //", "bad": "打印(4094 * 3300 / 4095)", "good": "打印(4094 * 3300 // 4095)\n打印((4094 * 3300 + 2047) // 4095)", "why": "整数/整数的 `/` 仍是真除法，结果必须整除，否则运行期报 E023（E_DIV_NONINT）：ADC 读 4094 时 `4094 * 3300 / 4095 = 3299.19…` 会在板上中止。确实只要整数毫伏时用 `//` 得 3299；四舍五入加半个除数，`(4094 * 3300 + 2047) // 4095` 得 3299。需要小数就回到上一条的 `4095.0` 写法。"},
     {"title": "缩进必须是 4 个半角空格", "bad": "如果 真:\n\t打印(1)", "good": "如果 真:\n    打印(1)", "why": "Tab 与全角空格在缩进位置报 E109；全角标点只在代码里自动转半角。"},
     {"title": "闭包按值捕获，捕获变量只读", "bad": "函数 外层():\n    令 x = 1\n    函数 内层():\n        x = 2\n        返回 x", "good": "函数 外层():\n    令 x = 1\n    函数 内层():\n        返回 x + 1", "why": "内层函数读到的 `x` 是定义那一刻的快照，之后外层把 `x` 改成 2 也不影响闭包（仍是 1）。给捕获变量赋值报 E117；要改状态就放模块级 `令`，或在函数里用 `令` 新建同名局部变量。"},
+    {"title": "只有显式抛出能被捕获", "bad": "尝试:\n    打印(1 / 0)\n捕获 原因:\n    打印(\"捕获了\")", "good": "如果 除数 == 0:\n    抛出 \"除数为零\"\n返回 被除数 / 除数", "why": "除零（E007）、堆耗尽（E017）这类 VM 故障和原生错误（E030/E031/E033）是终止性的，`捕获` 拦不住，程序会直接以 `运行失败:` 结束。要可恢复的错误就先用条件判断，再显式 `抛出` 并 `捕获`。"},
+    {"title": "尝试必须紧跟同层捕获", "bad": "尝试:\n    抛出 1\n打印(\"继续\")", "good": "尝试:\n    抛出 1\n捕获 原因:\n    打印(原因)", "why": "v0 没有 `最后`，也不允许 `尝试` 后没有 `捕获`：缺少同层 `捕获` 报编译错误 E109；单独出现的 `捕获` 同样报 E109。"},
     {"title": "闭包成环会一直占堆（没有 GC）", "bad": "令 列表 = []\n令 回调 = 造回调(列表)\n列表追加(列表, 回调)", "good": "只把闭包传给需要它的函数，不让它再被写回自己捕获的容器", "why": "闭包与它捕获的列表/字典互相引用时，引用计数无法归零，这块堆不会回收；反复创建这类环会逐步吃满堆，最终运行期报 E017（E_OOM）。当前没有标记清扫 GC（计划在 JM14）。"},
     {"title": "没有类和属性访问", "bad": "令 s = 对象.名字", "good": "令 s = 字典[\"名字\"]", "why": "`.` 属性访问与 `类/新建` 都被明确拒绝（E108/E103）；用字典加下标。"},
     {"title": "不要给未声明的名字赋值", "bad": "计数 = 计数 + 1", "good": "令 计数 = 0\n计数 = 计数 + 1", "why": "读取未定义名字会报 E_NAME；先 `令` 再赋值。"},
@@ -292,6 +310,7 @@
     {"id": "text", "title": "文本拼接与内建", "source": "令 n = 3\n打印(\"n = \" + 文本(n), 绝对值(-n))", "prints": "n = 3 3"},
     {"id": "decimal", "title": "小数与定点除法", "source": "打印(1.5 + 2.25)\n打印(10.0 / 4)\n打印(4094 / 4095.0 * 3300)", "prints": "3.75\n2.5\n3299.1943"},
     {"id": "closure", "title": "闭包（按值捕获，只读）", "source": "函数 计数器(起点):\n    令 n = 起点\n    函数 取():\n        返回 n\n    返回 取\n\n令 f = 计数器(10)\n打印(f())", "prints": "10"},
+    {"id": "exception", "title": "抛出与捕获", "source": "函数 取数(n):\n    如果 n < 0:\n        抛出 \"负数\"\n    返回 n\n\n尝试:\n    打印(取数(-1))\n捕获 原因:\n    打印(\"捕获\", 原因)", "prints": "捕获 负数"},
     {"id": "board-led", "title": "板级点灯（导入原生模块）", "source": "导入 引脚\n引脚写(13, 0)\n等待毫秒(400)\n引脚写(13, 1)", "prints": "（板上执行，无主机输出）"}
   ]
 }

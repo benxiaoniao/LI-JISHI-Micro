@@ -152,6 +152,12 @@ struct LoopCtx {
     breaks: Vec<usize>,
 }
 
+/// 正在编译的 `尝试` 块：记录进入时的循环层数，
+/// 用于在 `返回` / `中断` / `继续` 离开时补发 `TRY_END`。
+struct TryCtx {
+    loop_depth: usize,
+}
+
 struct FnState {
     code: Vec<u8>,
     slots: HashMap<String, u8>,
@@ -166,6 +172,8 @@ struct FnState {
     nlocals: u8,
     temps: Vec<u8>,
     loops: Vec<LoopCtx>,
+    /// 当前语句位置上仍生效的 `尝试` 块（由内向外）。
+    try_stack: Vec<TryCtx>,
     is_module: bool,
     /// 顶层 `导入 模块` 汇总出来的原生函数名。
     imported: HashSet<String>,
@@ -313,6 +321,17 @@ fn collect_decls(stmts: &[Stmt], out: &mut Vec<String>) {
                 }
             }
             StmtKind::While(_, body) | StmtKind::Repeat(_, body) => collect_decls(body, out),
+            StmtKind::Try {
+                body,
+                catch_name,
+                catch_body,
+            } => {
+                if let Some(n) = catch_name {
+                    out.push(n.clone());
+                }
+                collect_decls(body, out);
+                collect_decls(catch_body, out);
+            }
             _ => {}
         }
     }
@@ -382,6 +401,19 @@ fn collect_free_stmts(stmts: &[Stmt], bound: &HashSet<String>, out: &mut Vec<Str
             StmtKind::Expr(e) => collect_free_expr(e, bound, out),
             StmtKind::Return(Some(e)) => collect_free_expr(e, bound, out),
             StmtKind::Return(None) => {}
+            StmtKind::Throw(e) => collect_free_expr(e, bound, out),
+            StmtKind::Try {
+                body,
+                catch_name,
+                catch_body,
+            } => {
+                collect_free_stmts(body, bound, out);
+                let mut cbound = bound.clone();
+                if let Some(n) = catch_name {
+                    cbound.insert(n.clone());
+                }
+                collect_free_stmts(catch_body, &cbound, out);
+            }
             StmtKind::If {
                 branches,
                 else_body,
@@ -454,6 +486,7 @@ pub fn compile(stmts: &[Stmt]) -> Result<Program> {
         nlocals: 0,
         temps: Vec::new(),
         loops: Vec::new(),
+        try_stack: Vec::new(),
         is_module: true,
         imported,
     };
@@ -512,6 +545,7 @@ fn compile_function(
         nlocals: params.len() as u8,
         temps: Vec::new(),
         loops: Vec::new(),
+        try_stack: Vec::new(),
         is_module: false,
         imported: imported.clone(),
     };
@@ -673,6 +707,16 @@ fn compile_stmt(fs: &mut FnState, b: &mut Builder, s: &Stmt) -> Result<()> {
                 return Err(CompileError::new("E109", s.line, 1, "「中断」只能写在循环里"));
             };
             let is_foreach = ctx.is_foreach;
+            // 只退出位于本循环体内的 `尝试` 块；包住整个循环的不能弹。
+            let loop_depth = fs.loops.len();
+            let exits = fs
+                .try_stack
+                .iter()
+                .filter(|c| c.loop_depth >= loop_depth)
+                .count();
+            for _ in 0..exits {
+                fs.emit(OP_TRY_END);
+            }
             if is_foreach {
                 fs.emit(OP_POP); // 丢掉迭代器
             }
@@ -684,8 +728,45 @@ fn compile_stmt(fs: &mut FnState, b: &mut Builder, s: &Stmt) -> Result<()> {
                 return Err(CompileError::new("E109", s.line, 1, "「继续」只能写在循环里"));
             };
             let target = ctx.continue_target;
+            let loop_depth = fs.loops.len();
+            let exits = fs
+                .try_stack
+                .iter()
+                .filter(|c| c.loop_depth >= loop_depth)
+                .count();
+            for _ in 0..exits {
+                fs.emit(OP_TRY_END);
+            }
             let j = fs.jump(OP_JUMP);
             fs.patch(j, target);
+        }
+        StmtKind::Throw(e) => {
+            compile_expr(fs, b, e)?;
+            fs.emit(OP_THROW);
+        }
+        StmtKind::Try {
+            body,
+            catch_name,
+            catch_body,
+        } => {
+            let tryjmp = fs.jump(OP_TRY);
+            fs.try_stack.push(TryCtx {
+                loop_depth: fs.loops.len(),
+            });
+            compile_stmts(fs, b, body)?;
+            fs.try_stack.pop();
+            fs.emit(OP_TRY_END);
+            // 正常路径跳过捕获块
+            let skip = fs.jump(OP_JUMP);
+            let handler = fs.here();
+            fs.patch(tryjmp, handler);
+            match catch_name {
+                Some(n) => store_name(fs, b, n, s.line, 1)?,
+                None => fs.emit(OP_POP),
+            }
+            compile_stmts(fs, b, catch_body)?;
+            let end = fs.here();
+            fs.patch(skip, end);
         }
         StmtKind::FuncDef { name, params, body } => {
             // 父帧里可见的名字：本帧局部槽 + 本帧已有的捕获槽。
@@ -720,6 +801,9 @@ fn compile_stmt(fs: &mut FnState, b: &mut Builder, s: &Stmt) -> Result<()> {
             store_name(fs, b, name, s.line, 1)?;
         }
         StmtKind::Return(e) => {
+            for _ in 0..fs.try_stack.len() {
+                fs.emit(OP_TRY_END);
+            }
             match e {
                 Some(e) => compile_expr(fs, b, e)?,
                 None => {

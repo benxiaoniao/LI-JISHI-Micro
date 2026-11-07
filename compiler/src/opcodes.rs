@@ -31,6 +31,9 @@ pub const OP_MAKE_FUNCTION: u8 = 26;
 pub const OP_IMPORT: u8 = 27;
 /// 用当前帧的若干槽创建闭包对象；立即数是代码对象下标，捕获表在代码表里。
 pub const OP_MAKE_CLOSURE: u8 = 28;
+pub const OP_TRY: u8 = 29;
+pub const OP_TRY_END: u8 = 30;
+pub const OP_THROW: u8 = 31;
 
 /// 运算子码
 pub const BIN_ADD: u8 = 0;
@@ -69,9 +72,9 @@ pub enum Operand {
 pub fn operand(op: u8) -> Operand {
     match op {
         OP_HALT | OP_POP | OP_DUP | OP_SWAP | OP_NEG | OP_NOT | OP_RETURN | OP_GET_ITEM
-        | OP_SET_ITEM | OP_GET_ITER => Operand::None,
+        | OP_SET_ITEM | OP_GET_ITER | OP_TRY_END | OP_THROW => Operand::None,
         OP_JUMP | OP_JUMP_IF_FALSE | OP_JUMP_IF_TRUE | OP_JUMP_IF_FALSE_OR_POP
-        | OP_JUMP_IF_TRUE_OR_POP | OP_FOR_ITER => Operand::U16,
+        | OP_JUMP_IF_TRUE_OR_POP | OP_FOR_ITER | OP_TRY => Operand::U16,
         _ => Operand::U8,
     }
 }
@@ -107,6 +110,9 @@ pub fn op_name(op: u8) -> &'static str {
         OP_MAKE_FUNCTION => "MAKE_FUNCTION",
         OP_IMPORT => "IMPORT",
         OP_MAKE_CLOSURE => "MAKE_CLOSURE",
+        OP_TRY => "TRY",
+        OP_TRY_END => "TRY_END",
+        OP_THROW => "THROW",
         _ => "?",
     }
 }
@@ -141,7 +147,7 @@ pub fn emit_c_header() -> String {
     let mut s = String::new();
     s.push_str("/* 由 micc --emit-header 生成，请勿手改。 */\n");
     s.push_str("#ifndef JM_OPCODES_H\n#define JM_OPCODES_H\n\n");
-    let ops: [(u8, &str); 29] = [
+    let ops: [(u8, &str); 32] = [
         (OP_HALT, "OP_HALT"),
         (OP_CONST, "OP_CONST"),
         (OP_LOAD_LOCAL, "OP_LOAD_LOCAL"),
@@ -171,6 +177,9 @@ pub fn emit_c_header() -> String {
         (OP_MAKE_FUNCTION, "OP_MAKE_FUNCTION"),
         (OP_IMPORT, "OP_IMPORT"),
         (OP_MAKE_CLOSURE, "OP_MAKE_CLOSURE"),
+        (OP_TRY, "OP_TRY"),
+        (OP_TRY_END, "OP_TRY_END"),
+        (OP_THROW, "OP_THROW"),
     ];
     for (v, n) in ops {
         s.push_str(&format!("#define {n} {v}\n"));

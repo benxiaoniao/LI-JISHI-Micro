@@ -235,6 +235,45 @@ impl Parser {
                     line,
                 })
             }
+            Tok::Kw(Kw::Throw) => {
+                self.pos += 1;
+                let e = self.parse_expr()?;
+                self.expect_newline()?;
+                Ok(Stmt {
+                    kind: StmtKind::Throw(e),
+                    line,
+                })
+            }
+            Tok::Kw(Kw::Try) => {
+                self.pos += 1;
+                let body = self.parse_block()?;
+                if !matches!(self.peek().tok, Tok::Kw(Kw::Catch)) {
+                    return Err(self.err(
+                        "E109",
+                        "「尝试」块后面必须紧跟同层的「捕获」块",
+                    ));
+                }
+                self.pos += 1;
+                let catch_name = if let Tok::Ident(name) = self.peek().tok.clone() {
+                    self.pos += 1;
+                    Some(name)
+                } else {
+                    None
+                };
+                let catch_body = self.parse_block()?;
+                Ok(Stmt {
+                    kind: StmtKind::Try {
+                        body,
+                        catch_name,
+                        catch_body,
+                    },
+                    line,
+                })
+            }
+            Tok::Kw(Kw::Catch) => Err(self.err(
+                "E109",
+                "「捕获」必须紧跟在「尝试」块之后",
+            )),
             Tok::Kw(Kw::Break) => {
                 self.pos += 1;
                 self.expect_newline()?;

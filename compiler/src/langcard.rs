@@ -128,6 +128,9 @@ pub const RUNTIME_ERROR_DOCS: &[RuntimeErrorDoc] = &[
     RuntimeErrorDoc { name: "E_POW", meaning: "幂指数不能是负数" },
     RuntimeErrorDoc { name: "E_IMPORT", meaning: "导入指令保留（编译期导入不生成该指令）" },
     RuntimeErrorDoc { name: "E_FILE", meaning: "字节码文件损坏或超出边界" },
+    RuntimeErrorDoc { name: "E_UNCAUGHT", meaning: "未捕获的异常：`抛出` 的值一路传到了最外层（`错误[E027] 未捕获的异常：<值>`）" },
+    RuntimeErrorDoc { name: "E_TRY_DEPTH", meaning: "`尝试` 嵌套超过 8 层（运行时固定栈）" },
+    RuntimeErrorDoc { name: "E_TRY_STATE", meaning: "`尝试` 栈与当前帧不匹配（字节码不平衡，通常由编译器 bug 引起）" },
 ];
 
 struct SyntaxRow {
@@ -203,6 +206,16 @@ const SYNTAX: &[SyntaxRow] = &[
         example: "返回 0",
     },
     SyntaxRow {
+        construct: "抛出",
+        form: "抛出 表达式",
+        example: "抛出 \"坏输入\"",
+    },
+    SyntaxRow {
+        construct: "尝试/捕获",
+        form: "尝试: / 捕获 名字: / 捕获:",
+        example: "尝试:\n    抛出 \"坏输入\"\n捕获 原因:\n    打印(原因)",
+    },
+    SyntaxRow {
         construct: "调用",
         form: "被调用者(实参, ...)",
         example: "打印(长度(列表))",
@@ -226,7 +239,7 @@ const SYNTAX: &[SyntaxRow] = &[
 
 const GRAMMAR: &[&str] = &[
     "program := { statement }",
-    "statement := import | let | assign | if | while | repeat | foreach | funcdef | return | break | continue | expr_stmt",
+    "statement := import | let | assign | if | while | repeat | foreach | funcdef | return | break | continue | throw | try | expr_stmt",
     "import := '导入' IDENT",
     "let := '令' IDENT '=' expr",
     "assign := lvalue '=' expr | lvalue AUGOP expr",
@@ -238,6 +251,8 @@ const GRAMMAR: &[&str] = &[
     "funcdef := '函数' IDENT '(' [ param { ',' param } ] ')' [ '->' IDENT ] block",
     "param := IDENT [ ':' IDENT ]",
     "return := '返回' [ expr ]",
+    "throw := '抛出' expr",
+    "try := '尝试' block '捕获' [ IDENT ] block",
     "block := ':' NEWLINE INDENT { statement } DEDENT",
     "expr := or",
     "or := and { '或' and }",
@@ -275,6 +290,9 @@ const SEMANTICS: &[SemanticRow] = &[
     SemanticRow { topic: "字符串", rule: "单引号、双引号、中文引号都可定界；反斜杠转义支持 \\n \\t \\\\ \\\" \\'；文本按 UTF-8 存。" },
     SemanticRow { topic: "字典键", rule: "键必须是整数/文本/空/真/假这类不可变值；列表、字典、函数不能当键。" },
     SemanticRow { topic: "迭代", rule: "可遍历：列表、文本（按字符）、字典（按键）、范围。" },
+    SemanticRow { topic: "异常", rule: "`抛出 表达式` 抛任意值；`尝试: ... 捕获 名字: ...`（或匿名 `捕获:`）在同一函数内捕获。只有显式 `抛出` 可捕获：除零（E007）、堆耗尽（E017）等 VM 故障与原生错误（E030/E031/E033）一律终止，不能被 `捕获` 拦下。没有 `最后`，一个 `尝试` 只能跟一个 `捕获`。" },
+    SemanticRow { topic: "异常传播", rule: "抛出后按调用栈向外找最近的 `捕获`；展开时释放被跳过帧的局部槽（含闭包捕获槽）与操作数临时值，抛出值引用计数平衡。到最外层仍未捕获则 `jm_run` 返回 -1，错误为 `错误[E027] 未捕获的异常：<值>`。`返回`/`中断`/`继续` 离开 `尝试` 时都会先结束该层记录。" },
+    SemanticRow { topic: "捕获变量", rule: "`捕获 名字` 绑定的名字是当前作用域的普通可写变量（函数内为局部槽，模块顶层为全局）；`捕获:` 不绑定名字，丢弃抛出值。" },
     SemanticRow { topic: "内存", rule: "脚本对象都放在固定堆里（固件默认 6 KB）；闭包按引用计数释放，但闭包与列表/字典互相引用成环时 rc 不归零，这块堆不会回收（没有 GC），反复创建最终报 E_OOM；其余堆满也报 E_OOM，不会崩溃。" },
 ];
 
@@ -293,6 +311,8 @@ const LIMITS: &[LimitRow] = &[
     LimitRow { item: "闭包捕获/函数", value: "255 个（E116）" },
     LimitRow { item: "列表元素/字典项", value: "各 255 个（字面量编译期）" },
     LimitRow { item: "调用层数", value: "32 层（JM_MAX_FRAMES）" },
+    LimitRow { item: "尝试嵌套", value: "8 层（JM_MAX_TRY_DEPTH，超过报 E028）" },
+    LimitRow { item: "未捕获异常显示", value: "抛出值最多渲染 64 字节，超出截断" },
     LimitRow { item: "值栈", value: "512 槽（JM_STACK_SLOTS）" },
     LimitRow { item: "脚本堆", value: "固件 6 KB / 宿主默认 12 KB" },
     LimitRow { item: "字节码", value: "单个函数 <64 KB，整包 <64 KB" },
@@ -361,6 +381,18 @@ const PITFALLS: &[Pitfall] = &[
         bad: "函数 外层():\n    令 x = 1\n    函数 内层():\n        x = 2\n        返回 x",
         good: "函数 外层():\n    令 x = 1\n    函数 内层():\n        返回 x + 1",
         why: "内层函数读到的 `x` 是定义那一刻的快照，之后外层把 `x` 改成 2 也不影响闭包（仍是 1）。给捕获变量赋值报 E117；要改状态就放模块级 `令`，或在函数里用 `令` 新建同名局部变量。",
+    },
+    Pitfall {
+        title: "只有显式抛出能被捕获",
+        bad: "尝试:\n    打印(1 / 0)\n捕获 原因:\n    打印(\"捕获了\")",
+        good: "如果 除数 == 0:\n    抛出 \"除数为零\"\n返回 被除数 / 除数",
+        why: "除零（E007）、堆耗尽（E017）这类 VM 故障和原生错误（E030/E031/E033）是终止性的，`捕获` 拦不住，程序会直接以 `运行失败:` 结束。要可恢复的错误就先用条件判断，再显式 `抛出` 并 `捕获`。",
+    },
+    Pitfall {
+        title: "尝试必须紧跟同层捕获",
+        bad: "尝试:\n    抛出 1\n打印(\"继续\")",
+        good: "尝试:\n    抛出 1\n捕获 原因:\n    打印(原因)",
+        why: "v0 没有 `最后`，也不允许 `尝试` 后没有 `捕获`：缺少同层 `捕获` 报编译错误 E109；单独出现的 `捕获` 同样报 E109。",
     },
     Pitfall {
         title: "闭包成环会一直占堆（没有 GC）",
@@ -443,6 +475,12 @@ const EXAMPLES: &[Example] = &[
         title: "闭包（按值捕获，只读）",
         source: "函数 计数器(起点):\n    令 n = 起点\n    函数 取():\n        返回 n\n    返回 取\n\n令 f = 计数器(10)\n打印(f())",
         prints: "10",
+    },
+    Example {
+        id: "exception",
+        title: "抛出与捕获",
+        source: "函数 取数(n):\n    如果 n < 0:\n        抛出 \"负数\"\n    返回 n\n\n尝试:\n    打印(取数(-1))\n捕获 原因:\n    打印(\"捕获\", 原因)",
+        prints: "捕获 负数",
     },
     Example {
         id: "board-led",
@@ -788,7 +826,7 @@ pub fn render_json() -> Result<String, String> {
 
     // 操作码
     j.push_str("  \"opcodes\": [\n");
-    let all_ops: Vec<u8> = (0..=opcodes::OP_IMPORT).collect();
+    let all_ops: Vec<u8> = (0..=opcodes::OP_THROW).collect();
     for (i, op) in all_ops.iter().enumerate() {
         j.push_str(&format!(
             "    {{\"value\": {}, \"name\": \"{}\", \"operand\": \"{}\"}}{}\n",
@@ -908,7 +946,7 @@ pub fn render_markdown() -> Result<String, String> {
     m.push_str(&format!("| 字节码 ABI | {} |\n", ABI_VERSION));
     m.push_str("| 编译 | `micc 源码.jsh -o 输出.jmb` |\n");
     m.push_str("| 运行 | STM32F103C8T6 固件内解释器；脚本堆固件 6 KB |\n\n");
-    m.push_str("砾是**中文关键字、缩进式、整数优先**的小语言。它跑在 20 KB RAM 的 MCU 上，整数是 29 位、小数是 Q12 定点；没有类、异常和通用模块系统，闭包按值捕获且捕获变量只读；板级硬件能力通过 `导入 模块` 在编译期引入。\n\n");
+    m.push_str("砾是**中文关键字、缩进式、整数优先**的小语言。它跑在 20 KB RAM 的 MCU 上，整数是 29 位、小数是 Q12 定点；没有类、`最后` 和通用模块系统，异常用显式 `抛出` / `尝试` / `捕获`；闭包按值捕获且捕获变量只读；板级硬件能力通过 `导入 模块` 在编译期引入。\n\n");
 
     m.push_str("## 关键字\n\n");
     m.push_str("可用：");
@@ -1014,7 +1052,7 @@ pub fn render_markdown() -> Result<String, String> {
     m.push_str("## 操作码\n\n");
     m.push_str("字节码由 `micc` 生成，运行时要与 `runtime/include/jm_opcodes.h` 逐条对齐。\n\n");
     m.push_str("| 值 | 名字 | 操作数 |\n|---|---|---|\n");
-    for op in 0..=opcodes::OP_IMPORT {
+    for op in 0..=opcodes::OP_THROW {
         m.push_str(&format!(
             "| {} | `{}` | {} |\n",
             op,
@@ -1032,7 +1070,7 @@ pub fn render_markdown() -> Result<String, String> {
     m.push('\n');
 
     m.push_str("## 运行期错误码\n\n");
-    m.push_str("固件通过串口打印 `运行错误[码] 说明`，码与 `jm_internal.h` 一致。\n\n");
+    m.push_str("固件通过串口打印 `错误[码] 说明`（未捕获异常带抛出值的显示文本），码与 `jm_internal.h` 一致。\n\n");
     m.push_str("| 码 | 名称 | 含义 |\n|---|---|---|\n");
     for (name, value) in &runtime_errs {
         let meaning = RUNTIME_ERROR_DOCS

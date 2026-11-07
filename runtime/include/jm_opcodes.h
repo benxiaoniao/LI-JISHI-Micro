@@ -31,6 +31,9 @@
 #define OP_MAKE_FUNCTION 26
 #define OP_IMPORT 27
 #define OP_MAKE_CLOSURE 28
+#define OP_TRY 29
+#define OP_TRY_END 30
+#define OP_THROW 31
 
 #define BIN_ADD 0
 #define BIN_SUB 1

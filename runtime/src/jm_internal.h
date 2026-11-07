@@ -172,6 +172,9 @@ static inline int32_t jm_dec_raw(JmValue v) {
 #define E_POW 24
 #define E_IMPORT 25
 #define E_FILE 26
+#define E_UNCAUGHT 27
+#define E_TRY_DEPTH 28
+#define E_TRY_STATE 29
 
 typedef struct {
     int code;
@@ -186,6 +189,14 @@ typedef struct {
     uint16_t ip;
     uint16_t base;
 } JmFrame;
+
+/// 一层 `尝试` 记录：进入时的帧下标、该帧的操作数栈深度、异常处理器入口。
+#define JM_MAX_TRY_DEPTH 8
+typedef struct {
+    uint8_t frame_idx;
+    uint16_t sp;
+    uint16_t handler_ip;
+} JmTry;
 
 typedef struct {
     const uint8_t *base;
@@ -206,6 +217,11 @@ typedef struct {
 
     JmFrame frames[JM_MAX_FRAMES];
     int fp;
+
+    JmTry tries[JM_MAX_TRY_DEPTH];
+    int tp;
+    /// 未捕获异常的显示缓冲（`jm_last_error` 会引用它）。
+    char uncaught[64];
 
     JmValue const_cache[JM_MAX_GLOBALS];
 
