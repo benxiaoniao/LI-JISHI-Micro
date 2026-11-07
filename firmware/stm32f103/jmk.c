@@ -1,4 +1,5 @@
 #include <stdint.h>
+#include <string.h>
 #include "jmk.h"
 
 /*
@@ -25,6 +26,12 @@
 #define ST_RUNNING 2u
 #define ST_BLOCKED 3u
 #define ST_DEAD    4u
+/* 阻塞在 IPC 上的状态：与 ST_BLOCKED 分开，避免 tick 把无限等待当成到期唤醒 */
+#define ST_WAIT_SEM   5u
+#define ST_WAIT_QSEND 6u
+#define ST_WAIT_QRECV 7u
+
+#define JMK_TICK_FOREVER 0xFFFFFFFFu
 
 JmkTcb *volatile jmk_current;
 
@@ -36,6 +43,14 @@ static JmkTcb *ready_tail[JMK_PRIORITIES];
 static uint32_t ready_mask;
 static volatile uint32_t jmk_tick_count;
 static uint8_t jmk_started;
+
+/*
+ * IPC 记账：每个任务槽记录“在等哪个对象”和“等待结果”。
+ * 只用 30 B（6 × 指针 + 6 × 结果字节），不往 TCB 里加字段，保持 36 B 布局不变。
+ * 等待链借用 TCB 的 next 指针（阻塞任务不在就绪队列里，不会冲突）。
+ */
+static void *jmk_wait_obj[JMK_MAX_TASKS];
+static int8_t jmk_wait_result[JMK_MAX_TASKS];
 
 extern void jmk_first_switch(void) __attribute__((noreturn));
 void jmk_task_exit(void) __attribute__((noreturn));
@@ -290,6 +305,144 @@ static JmkTcb *take_highest(void)
     return ready_pop(p);
 }
 
+/* ============================================================
+ * 任务间通信：等待链与记账
+ *
+ * 唤醒顺序：高优先级先醒；同优先级按到达顺序（FIFO）——与就绪队列规则一致。
+ * 所有链操作都必须由调用方包在临界区里。
+ * ============================================================ */
+
+/* TCB 指针 → 槽位号；不是用户任务（含空闲任务）返回 0xFF。 */
+static uint8_t tcb_slot(const JmkTcb *t)
+{
+    uintptr_t p = (uintptr_t)t;
+    uintptr_t b = (uintptr_t)&jmk_tasks[0];
+    uintptr_t e = (uintptr_t)&jmk_tasks[JMK_MAX_TASKS];
+
+    if (!t || p < b || p >= e) {
+        return 0xFFu;
+    }
+    return (uint8_t)((p - b) / sizeof(JmkTcb));
+}
+
+static void wait_push(JmkTcb **head, JmkTcb *t)
+{
+    JmkTcb *prev = 0;
+    JmkTcb *cur = *head;
+
+    while (cur && cur->prio >= t->prio) {   /* 高的在前；同级插到队尾 */
+        prev = cur;
+        cur = cur->next;
+    }
+    t->next = cur;
+    if (prev) {
+        prev->next = t;
+    } else {
+        *head = t;
+    }
+}
+
+static void wait_remove(JmkTcb **head, JmkTcb *t)
+{
+    JmkTcb *prev = 0;
+    JmkTcb *cur = *head;
+
+    while (cur) {
+        if (cur == t) {
+            if (prev) {
+                prev->next = cur->next;
+            } else {
+                *head = cur->next;
+            }
+            cur->next = 0;
+            return;
+        }
+        prev = cur;
+        cur = cur->next;
+    }
+}
+
+static JmkTcb *wait_pop(JmkTcb **head)
+{
+    JmkTcb *t = *head;
+    if (t) {
+        *head = t->next;
+        t->next = 0;
+    }
+    return t;
+}
+
+/*
+ * 唤醒一个等待者：从等待状态转成就绪，并记录结果。
+ * ok != 0 表示“等到了”（信号量/队列条件已由给出方满足），否则是超时。
+ * 前提：t 已从等待链摘下（next 已清空）。
+ */
+static void ipc_wake(JmkTcb *t, int ok)
+{
+    uint8_t idx = tcb_slot(t);
+
+    t->state = ST_READY;
+    t->wake_tick = 0u;
+    if (idx != 0xFFu) {
+        jmk_wait_obj[idx] = 0;
+        jmk_wait_result[idx] = (int8_t)(ok ? 0 : -1);
+    }
+    ready_push(t);
+}
+
+/* 把阻塞在 IPC 上的任务从其所属等待链摘下（超时、删除任务时用）。 */
+static void ipc_unlink(JmkTcb *t)
+{
+    uint8_t idx = tcb_slot(t);
+    void *obj;
+    JmkTcb **head;
+
+    if (idx == 0xFFu) {
+        return;
+    }
+    obj = jmk_wait_obj[idx];
+    if (!obj) {
+        return;
+    }
+    switch (t->state) {
+    case ST_WAIT_SEM:
+        head = &((JmkSem *)obj)->wait_head;
+        break;
+    case ST_WAIT_QSEND:
+        head = &((JmkQueue *)obj)->wait_send;
+        break;
+    case ST_WAIT_QRECV:
+        head = &((JmkQueue *)obj)->wait_recv;
+        break;
+    default:
+        return;
+    }
+    wait_remove(head, t);
+    jmk_wait_obj[idx] = 0;
+}
+
+/*
+ * 把当前任务挂到等待链并让出 CPU。
+ * 只在临界区内调用；这里只挂 PendSV，不直接调用调度器——切换在中断退出后发生。
+ * deadline 为绝对时刻，JMK_TICK_FOREVER 表示无限等待。
+ */
+static int ipc_block(JmkTcb **head, uint8_t st, void *obj, uint32_t deadline)
+{
+    JmkTcb *cur = jmk_current;
+    uint8_t idx = tcb_slot(cur);
+
+    if (idx == 0xFFu) {
+        return 0;               /* 调度器未启动：由调用方按状态错误处理 */
+    }
+    wait_push(head, cur);
+    cur->state = st;
+    cur->wake_tick = deadline;
+    jmk_wait_obj[idx] = obj;
+    jmk_wait_result[idx] = 1;   /* 1 = 结果未定 */
+    SCB_ICSR = PENDSVSET;       /* 只挂起切换请求，调度在中断退出后发生 */
+    return 1;
+}
+
 /* ---- 栈构造 ---- */
 static void task_build(JmkTcb *t, uint32_t *base, uint32_t words,
                        JmkTaskFn fn, void *arg, uint8_t prio,
@@ -338,11 +491,18 @@ static void task_build(JmkTcb *t, uint32_t *base, uint32_t words,
 /* 释放任务栈并把 TCB 槽位归零。必须在临界区内或任务已不可能被调度时调用。 */
 static void task_release(JmkTcb *t)
 {
+    uint8_t idx;
+
 #if !JMK_USE_STATIC_STACKS
     if (t->stack_base) {
         pool_free(t->stack_base);
     }
 #endif
+    idx = tcb_slot(t);
+    if (idx != 0xFFu) {
+        jmk_wait_obj[idx] = 0;      /* 防止悬空记录 */
+        jmk_wait_result[idx] = 0;
+    }
     t->stack_base = 0;
     t->stack_words = 0u;
     t->sp = 0;
@@ -497,8 +657,12 @@ void jmk_tick(void)
     JmkTcb *cur = jmk_current;
     uint8_t i;
     int need = 0;
+    uint32_t pm;
 
     jmk_tick_count++;
+    /* SysTick 虽是低优先级，但外设中断仍可能抢占它；
+     * 这里改就绪队列和等待链，必须和任务上下文/其它 ISR 的 post 互斥。 */
+    pm = crit_enter();
 
     for (i = 0; i < JMK_MAX_TASKS; i++) {
         JmkTcb *t = &jmk_tasks[i];
@@ -509,18 +673,30 @@ void jmk_tick(void)
             if (cur && t->prio > cur->prio) {
                 need = 1;   /* 唤醒的任务优先级更高：抢占 */
             }
+        } else if ((t->state == ST_WAIT_SEM || t->state == ST_WAIT_QSEND ||
+                    t->state == ST_WAIT_QRECV) &&
+                   t->wake_tick != JMK_TICK_FOREVER &&
+                   (int32_t)(jmk_tick_count - t->wake_tick) >= 0) {
+            ipc_unlink(t);          /* 先从等待链摘下，避免留下悬空节点 */
+            ipc_wake(t, 0);         /* 结果记 -1：等待超时 */
+            if (cur && t->prio > cur->prio) {
+                need = 1;
+            }
         }
     }
 
     if (!cur) {
+        crit_exit(pm);
         return;
     }
-    if (cur->state == ST_BLOCKED) {
-        need = 1;       /* 当前任务自己到期被唤醒，也该切走 */
+    if (cur->state == ST_BLOCKED || cur->state == ST_WAIT_SEM ||
+        cur->state == ST_WAIT_QSEND || cur->state == ST_WAIT_QRECV) {
+        need = 1;       /* 当前任务已在阻塞态（还没切走），也该切走 */
     }
     if (need) {
         SCB_ICSR = PENDSVSET;
     }
+    crit_exit(pm);
 }
 
 void jmk_delay(uint32_t ms)
@@ -590,6 +766,7 @@ int jmk_task_delete(JmkTcb *t)
 
     pm = crit_enter();
     if (t->state != ST_DEAD) {
+        ipc_unlink(t);          /* 阻塞在信号量/队列上时先摘链，否则留下悬空指针 */
         ready_remove(t);
         t->state = ST_DEAD;
     }
@@ -600,6 +777,330 @@ int jmk_task_delete(JmkTcb *t)
     }
     crit_exit(pm);
     return 0;
+}
+
+/* ============================================================
+ * 信号量
+ *
+ * 计数语义：count 在 0..max 之间。
+ *   等待：count > 0 直接减一；否则入等待链（可按 timeout 超时）。
+ *   给出：有等待者就唤醒队首（不增加计数，相当于“直接交接”）；
+ *         没有等待者就 count+1；已到上限返回 JMK_E_FULL。
+ * 不做优先级继承：信号量没有持有者概念，继承需要互斥量语义，留到后续里程碑。
+ * ============================================================ */
+
+int jmk_sem_init(JmkSem *s, int32_t initial, int32_t max)
+{
+    if (!s || max <= 0) {
+        return JMK_E_PARAM;
+    }
+    if (initial < 0) {
+        initial = 0;
+    }
+    if (initial > max) {
+        initial = max;
+    }
+    s->count = initial;
+    s->max = max;
+    s->wait_head = 0;
+    return JMK_OK;
+}
+
+int jmk_sem_wait(JmkSem *s, uint32_t timeout_ms)
+{
+    uint32_t pm;
+    uint32_t deadline;
+    uint8_t idx;
+    int ret = JMK_OK;
+
+    if (!s) {
+        return JMK_E_PARAM;
+    }
+    idx = tcb_slot(jmk_current);
+    if (idx == 0xFFu) {
+        return JMK_E_STATE;         /* 只有任务能等；中断里请用 *_from_isr */
+    }
+
+    deadline = (timeout_ms == JMK_WAIT_FOREVER)
+                   ? JMK_TICK_FOREVER
+                   : (jmk_tick_count + timeout_ms);
+
+    for (;;) {
+        int blocked = 0;
+
+        pm = crit_enter();
+        if (s->count > 0) {
+            s->count--;
+            ret = JMK_OK;
+        } else if (timeout_ms == JMK_NO_WAIT) {
+            ret = JMK_E_TIMEOUT;
+        } else if (deadline != JMK_TICK_FOREVER &&
+                   (int32_t)(jmk_tick_count - deadline) >= 0) {
+            ret = JMK_E_TIMEOUT;
+        } else {
+            blocked = ipc_block(&s->wait_head, ST_WAIT_SEM, s, deadline);
+            ret = blocked ? JMK_OK : JMK_E_STATE;
+        }
+        crit_exit(pm);
+        if (!blocked) {
+            break;
+        }
+        if (jmk_wait_result[idx] < 0) {
+            ret = JMK_E_TIMEOUT;    /* tick 判超时并已摘链 */
+            break;
+        }
+        /* 被给出方唤醒：post 采用“直接交接”，唤醒时 count 不增加，
+         * 这次等待已经满足，必须就此返回。若回到顶部重查计数，
+         * 会因为 count 仍为 0 而再次挂起，把这次唤醒丢掉。 */
+        break;
+    }
+    return ret;
+}
+
+int jmk_sem_post(JmkSem *s)
+{
+    uint32_t pm;
+    JmkTcb *w;
+    JmkTcb *cur;
+    int ret = JMK_OK;
+
+    if (!s) {
+        return JMK_E_PARAM;
+    }
+    pm = crit_enter();
+    w = wait_pop(&s->wait_head);
+    if (w) {
+        ipc_wake(w, 1);
+    } else if (s->count < s->max) {
+        s->count++;
+    } else {
+        ret = JMK_E_FULL;           /* 二值信号量重复给出即溢出 */
+    }
+    cur = jmk_current;
+    if (w && (!cur || w->prio > cur->prio)) {
+        SCB_ICSR = PENDSVSET;       /* 只请求切换，不在临界区里调度 */
+    }
+    crit_exit(pm);
+    return ret;
+}
+
+int jmk_sem_post_from_isr(JmkSem *s, uint8_t *woken)
+{
+    uint32_t pm;
+    JmkTcb *w;
+    JmkTcb *cur;
+    int ret = JMK_OK;
+
+    if (!s) {
+        return JMK_E_PARAM;
+    }
+    if (woken) {
+        *woken = 0u;
+    }
+    pm = crit_enter();
+    w = wait_pop(&s->wait_head);
+    if (w) {
+        ipc_wake(w, 1);
+        cur = jmk_current;
+        if (!cur || w->prio > cur->prio) {
+            if (woken) {
+                *woken = 1u;
+            }
+            SCB_ICSR = PENDSVSET;   /* PendSV 优先级最低，等本中断退出后才切 */
+        }
+    } else if (s->count < s->max) {
+        s->count++;
+    } else {
+        ret = JMK_E_FULL;
+    }
+    crit_exit(pm);
+    return ret;
+}
+
+/* ============================================================
+ * 消息队列
+ *
+ * 槽位内存完全由调用方提供（buf + item_size × capacity），内核只保存 32 B 控制块。
+ * 理由：RAM 只有 20 KB，内核不能替调用方假定消息大小和深度；队列深度属于业务，
+ *       放在调用方的静态数组或指定内存里最省，也便于复用同一块缓冲。
+ * 发送/接收都用“检查→阻塞→再检查”的循环，接受虚假唤醒，避免把唤醒与数据交接绑死。
+ * ============================================================ */
+
+int jmk_queue_init(JmkQueue *q, void *buf, uint32_t item_size, uint32_t capacity)
+{
+    if (!q || !buf || item_size == 0u || (item_size & 3u) || capacity == 0u) {
+        return JMK_E_PARAM;
+    }
+    q->buf = (uint8_t *)buf;
+    q->item_size = item_size;
+    q->capacity = capacity;
+    q->head = 0u;
+    q->tail = 0u;
+    q->count = 0u;
+    q->wait_recv = 0;
+    q->wait_send = 0;
+    return JMK_OK;
+}
+
+static void queue_write(JmkQueue *q, const void *item)
+{
+    memcpy(q->buf + q->tail * q->item_size, item, q->item_size);
+    q->tail = (q->tail + 1u) % q->capacity;
+    q->count++;
+}
+
+static void queue_read(JmkQueue *q, void *item)
+{
+    memcpy(item, q->buf + q->head * q->item_size, q->item_size);
+    q->head = (q->head + 1u) % q->capacity;
+    q->count--;
+}
+
+int jmk_queue_send(JmkQueue *q, const void *item, uint32_t timeout_ms)
+{
+    uint32_t pm;
+    uint32_t deadline;
+    uint8_t idx;
+    int ret = JMK_OK;
+
+    if (!q || !item) {
+        return JMK_E_PARAM;
+    }
+    idx = tcb_slot(jmk_current);
+    if (idx == 0xFFu) {
+        return JMK_E_STATE;
+    }
+    deadline = (timeout_ms == JMK_WAIT_FOREVER)
+                   ? JMK_TICK_FOREVER
+                   : (jmk_tick_count + timeout_ms);
+
+    for (;;) {
+        int blocked = 0;
+
+        pm = crit_enter();
+        if (q->count < q->capacity) {
+            JmkTcb *w;
+            queue_write(q, item);
+            w = wait_pop(&q->wait_recv);        /* 有接收者在等：唤醒队首 */
+            if (w) {
+                ipc_wake(w, 1);
+                if (jmk_current && w->prio > jmk_current->prio) {
+                    SCB_ICSR = PENDSVSET;
+                }
+            }
+            ret = JMK_OK;
+        } else if (timeout_ms == JMK_NO_WAIT) {
+            ret = JMK_E_TIMEOUT;
+        } else if (deadline != JMK_TICK_FOREVER &&
+                   (int32_t)(jmk_tick_count - deadline) >= 0) {
+            ret = JMK_E_TIMEOUT;
+        } else {
+            blocked = ipc_block(&q->wait_send, ST_WAIT_QSEND, q, deadline);
+            ret = blocked ? JMK_OK : JMK_E_STATE;
+        }
+        crit_exit(pm);
+        if (!blocked) {
+            break;
+        }
+        if (jmk_wait_result[idx] < 0) {
+            ret = JMK_E_TIMEOUT;
+            break;
+        }
+    }
+    return ret;
+}
+
+int jmk_queue_recv(JmkQueue *q, void *item, uint32_t timeout_ms)
+{
+    uint32_t pm;
+    uint32_t deadline;
+    uint8_t idx;
+    int ret = JMK_OK;
+
+    if (!q || !item) {
+        return JMK_E_PARAM;
+    }
+    idx = tcb_slot(jmk_current);
+    if (idx == 0xFFu) {
+        return JMK_E_STATE;
+    }
+    deadline = (timeout_ms == JMK_WAIT_FOREVER)
+                   ? JMK_TICK_FOREVER
+                   : (jmk_tick_count + timeout_ms);
+
+    for (;;) {
+        int blocked = 0;
+
+        pm = crit_enter();
+        if (q->count > 0u) {
+            JmkTcb *w;
+            queue_read(q, item);
+            w = wait_pop(&q->wait_send);        /* 腾出空位：唤醒等发送的任务 */
+            if (w) {
+                ipc_wake(w, 1);
+                if (jmk_current && w->prio > jmk_current->prio) {
+                    SCB_ICSR = PENDSVSET;
+                }
+            }
+            ret = JMK_OK;
+        } else if (timeout_ms == JMK_NO_WAIT) {
+            ret = JMK_E_TIMEOUT;
+        } else if (deadline != JMK_TICK_FOREVER &&
+                   (int32_t)(jmk_tick_count - deadline) >= 0) {
+            ret = JMK_E_TIMEOUT;
+        } else {
+            blocked = ipc_block(&q->wait_recv, ST_WAIT_QRECV, q, deadline);
+            ret = blocked ? JMK_OK : JMK_E_STATE;
+        }
+        crit_exit(pm);
+        if (!blocked) {
+            break;
+        }
+        if (jmk_wait_result[idx] < 0) {
+            ret = JMK_E_TIMEOUT;
+            break;
+        }
+    }
+    return ret;
+}
+
+int jmk_queue_send_from_isr(JmkQueue *q, const void *item, uint8_t *woken)
+{
+    uint32_t pm;
+    JmkTcb *w;
+    JmkTcb *cur;
+    int ret = JMK_OK;
+
+    if (!q || !item) {
+        return JMK_E_PARAM;
+    }
+    if (woken) {
+        *woken = 0u;
+    }
+    pm = crit_enter();
+    if (q->count < q->capacity) {
+        queue_write(q, item);
+        w = wait_pop(&q->wait_recv);
+        if (w) {
+            ipc_wake(w, 1);
+            cur = jmk_current;
+            if (!cur || w->prio > cur->prio) {
+                if (woken) {
+                    *woken = 1u;
+                }
+                SCB_ICSR = PENDSVSET;
+            }
+        }
+    } else {
+        ret = JMK_E_FULL;           /* 中断里不能阻塞：满了直接失败 */
+    }
+    crit_exit(pm);
+    return ret;
+}
+
+uint32_t jmk_queue_count(const JmkQueue *q)
+{
+    return q ? q->count : 0u;
 }
 
 uint32_t jmk_stack_pool_bytes(void)

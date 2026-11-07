@@ -2,15 +2,88 @@
 #include "stm32f103_port.h"
 #include "jmk.h"
 
-/* 栈动态分配演示：默认开启，可 -DJMK_STACK_CHURN_DEMO=0 关闭 */
+/*
+ * 示例开关（两个示例各建 2 个任务，6 个槽位放不下同时开）：
+ *   JMK_IPC_DEMO         任务间通信示例（led 生产 / log 消费），默认开启
+ *   JMK_STACK_CHURN_DEMO 栈池建删演示（已上板验证 6 轮），默认关闭
+ * 切换：-DJMK_IPC_DEMO=0 -DJMK_STACK_CHURN_DEMO=1
+ */
+#ifndef JMK_IPC_DEMO
+#define JMK_IPC_DEMO 1
+#endif
+
 #ifndef JMK_STACK_CHURN_DEMO
-#define JMK_STACK_CHURN_DEMO 1
+#define JMK_STACK_CHURN_DEMO 0
 #endif
 
 /* 由构建脚本从 .jmb 生成 */
 extern const unsigned char jm_app_jmb[];
 extern const uint32_t jm_app_jmb_len;
 
+#if JMK_IPC_DEMO
+/* ---- 任务间通信示例：led 生产，log 消费 ----
+ * 数据路径：led 每 200 ms 产生一个序号 → 入队（调用方提供 8 × 4 B 缓冲）
+ * 事件路径：入队成功后给出计数信号量（上限 8），log 靠它知道“有数据可取”
+ * 各司其职：队列搬数据，信号量只做事件计数；队列满就丢弃并打印，绝不阻塞生产者。
+ */
+#define IPC_SLOTS 8u
+
+static JmkQueue g_log_q;                  /* 32 B 控制块 */
+static uint32_t g_log_buf[IPC_SLOTS];     /* 32 B 槽位：调用方提供，内核不占 */
+static JmkSem g_evt_sem;                  /* 12 B，计数上限 = 槽数 */
+static JmkSem g_probe_sem;                /* 12 B，永不给出，只用来验证超时路径 */
+
+/* 生产者：闪灯 + 发一条消息 */
+static void task_led(void *arg)
+{
+    uint32_t seq = 0;
+    (void)arg;
+    for (;;) {
+        port_led_toggle();
+        seq++;
+        if (jmk_queue_send(&g_log_q, &seq, JMK_NO_WAIT) == JMK_OK) {
+            (void)jmk_sem_post(&g_evt_sem);
+        } else {
+            port_log("[同步] 队列满，丢弃 seq=");
+            port_log_u32(seq);
+            port_log("\r\n");
+        }
+        jmk_delay(200u);
+    }
+}
+
+/* 消费者：先等到事件，再取数据 */
+static void task_log(void *arg)
+{
+    uint32_t got = 0;
+    (void)arg;
+
+    /* 超时自检：g_probe_sem 永远不会被给出，应返回 -1 */
+    if (jmk_sem_wait(&g_probe_sem, 100u) == JMK_E_TIMEOUT) {
+        port_log("[同步] 超时自检通过：100 ms 无事件返回 -1\r\n");
+    } else {
+        port_log("[同步] 超时自检异常\r\n");
+    }
+
+    for (;;) {
+        if (jmk_sem_wait(&g_evt_sem, JMK_WAIT_FOREVER) == JMK_OK) {
+            uint32_t seq;
+            if (jmk_queue_recv(&g_log_q, &seq, JMK_NO_WAIT) == JMK_OK) {
+                got++;
+                port_log("[同步] 收到 seq=");
+                port_log_u32(seq);
+                port_log(" 累计=");
+                port_log_u32(got);
+                port_log(" 栈峰值=");
+                port_log_u32(jmk_stack_used(jmk_current));
+                port_log(" 队列余量=");
+                port_log_u32(jmk_queue_count(&g_log_q));
+                port_log("\r\n");
+            }
+        }
+    }
+}
+#else
 /* 任务一：闪 PC13，250 ms 一次 */
 static void task_led(void *arg)
 {
@@ -68,6 +141,7 @@ static void task_log(void *arg)
         jmk_delay(1000u);
     }
 }
+#endif /* JMK_IPC_DEMO */
 
 #if JMK_STACK_CHURN_DEMO
 /* ---- 栈动态分配示例：反复创建/删除任务，验证栈不泄漏 ---- */
@@ -176,7 +250,21 @@ int main(void)
         port_log("\r\n");
     }
 
-#if JMK_STACK_CHURN_DEMO
+#if JMK_IPC_DEMO
+    port_log("[同步] 队列缓冲: ");
+    port_log_u32(IPC_SLOTS);
+    port_log(" 槽 × ");
+    port_log_u32(sizeof(g_log_buf[0]));
+    port_log(" B = ");
+    port_log_u32(sizeof(g_log_buf));
+    port_log(" B（调用方提供，内核只占 32 B 控制块）\r\n");
+    if (jmk_queue_init(&g_log_q, g_log_buf, sizeof(g_log_buf[0]), IPC_SLOTS) != JMK_OK ||
+        jmk_sem_init(&g_evt_sem, 0, (int32_t)IPC_SLOTS) != JMK_OK ||
+        jmk_sem_init(&g_probe_sem, 0, 1) != JMK_OK) {
+        port_log("[同步] 初始化失败\r\n");
+    }
+    port_log("\r\n[内核] 启动调度器：led(生产,优先2) / log(消费,优先1)\r\n");
+#elif JMK_STACK_CHURN_DEMO
     port_log("\r\n[内核] 启动调度器：churn(优先3) / led(优先2) / log(优先1)\r\n");
 #else
     port_log("\r\n[内核] 启动调度器：led(优先2) / log(优先1)\r\n");
