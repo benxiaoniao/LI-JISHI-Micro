@@ -211,6 +211,41 @@ pub const MODULES: &[NativeModuleSpec] = &[
             },
         ],
     },
+    NativeModuleSpec {
+        name: "外部中断",
+        table: "f103_exti",
+        c_prefix: "JM_IRQ",
+        entries: &[
+            NativeEntrySpec {
+                name: "中断绑定",
+                min_args: 2,
+                max_args: 3,
+                c_fn: "n_irq_bind",
+                doc: "中断绑定(引脚, 队列句柄[, 边沿])；引脚 0–4（PA0–PA4 = EXTI0–4），边沿 0=上升（默认）/1=下降/2=双沿。中断里只把引脚号投进队列，不执行砾代码。",
+            },
+            NativeEntrySpec {
+                name: "中断触发",
+                min_args: 1,
+                max_args: 1,
+                c_fn: "n_irq_trigger",
+                doc: "中断触发(引脚)，软件触发该 EXTI 线一次（板上写 SWIER，主机直接模拟投递）；已绑定返回 真，未绑定返回 假。",
+            },
+            NativeEntrySpec {
+                name: "中断计数",
+                min_args: 1,
+                max_args: 1,
+                c_fn: "n_irq_count",
+                doc: "返回该引脚自绑定以来进入中断服务函数的次数。",
+            },
+            NativeEntrySpec {
+                name: "中断解除",
+                min_args: 1,
+                max_args: 1,
+                c_fn: "n_irq_unbind",
+                doc: "取消该引脚的绑定并关闭这条 EXTI 线，之后 中断触发 返回 假。",
+            },
+        ],
+    },
 ];
 
 pub const NATIVE_HEADER_PATH: &str = "runtime/include/jm_native_table.h";

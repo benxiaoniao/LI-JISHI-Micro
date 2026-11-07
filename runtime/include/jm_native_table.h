@@ -90,3 +90,19 @@
 
 #endif /* JM_SEM_TABLE_H */
 
+/* 原生表 f103_exti：4 项 */
+#ifndef JM_IRQ_TABLE_H
+#define JM_IRQ_TABLE_H
+
+#define JM_IRQ_TABLE_NAME "f103_exti"
+#define JM_IRQ_ENTRY_COUNT 4u
+
+/* 在 JmNativeEntry 数组初始化处展开；名字、参数个数、C 函数名都来自同一份规格。 */
+#define JM_IRQ_TABLE_INIT \
+    {"中断绑定", n_irq_bind, 2u, 3u, 0u, 0u}, \
+    {"中断触发", n_irq_trigger, 1u, 1u, 0u, 0u}, \
+    {"中断计数", n_irq_count, 1u, 1u, 0u, 0u}, \
+    {"中断解除", n_irq_unbind, 1u, 1u, 0u, 0u}
+
+#endif /* JM_IRQ_TABLE_H */
+

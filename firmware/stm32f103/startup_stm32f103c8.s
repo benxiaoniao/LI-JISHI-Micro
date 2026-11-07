@@ -35,6 +35,19 @@ g_pfnVectors:
     .word 0                       /* 0x34 保留 */
     .word PendSV_Handler          /* 0x38 PendSV */
     .word SysTick_Handler         /* 0x3C SysTick */
+    /* 外部中断 IRQ0–4（WWDG/PVD/TAMPER/RTC/FLASH/RCC）未使用，仍指向默认死循环 */
+    .word Default_Handler         /* 0x40 IRQ0  WWDG */
+    .word Default_Handler         /* 0x44 IRQ1  PVD */
+    .word Default_Handler         /* 0x48 IRQ2  TAMPER */
+    .word Default_Handler         /* 0x4C IRQ3  RTC */
+    .word Default_Handler         /* 0x50 IRQ4  FLASH */
+    .word Default_Handler         /* 0x54 IRQ5  RCC */
+    /* EXTI0–4 共用一个入口，按 EXTI_PR 分派 */
+    .word EXTI_IRQHandler         /* 0x58 IRQ6  EXTI0（PA0） */
+    .word EXTI_IRQHandler         /* 0x5C IRQ7  EXTI1（PA1） */
+    .word EXTI_IRQHandler         /* 0x60 IRQ8  EXTI2（PA2） */
+    .word EXTI_IRQHandler         /* 0x64 IRQ9  EXTI3（PA3） */
+    .word EXTI_IRQHandler         /* 0x68 IRQ10 EXTI4（PA4） */
     .size g_pfnVectors, .-g_pfnVectors
 
     .text

@@ -26,7 +26,7 @@ PC 上：  .jsh 源码 ──micc──▶  .jmb 微字节码
 | 语言能力 | `令`/赋值/复合赋值、`如果/否则如果/否则`、`当`、`循环 N 次`、`遍历`、`中断/继续`、`函数/返回/递归`、闭包（值捕获、只读）、`抛出/尝试/捕获`、类（`类`/`新建`/`本`/字段与方法，无继承）；列表、字典、文本（UTF-8 码点）、小数（Q12 定点） |
 | 内建 | `打印 文本 整数 小数 长度 范围 类型 总和 最大 最小 绝对值` |
 | JMK 内核 | 抢占式固定优先级调度（PendSV 切换）、SysTick 1 kHz、6 个用户任务 + 空闲任务、4 档优先级、动态栈池（默认 3200 B）或静态 6×512 B、信号量、消息队列、毫秒延时/让出 |
-| 板级原生表 | `引脚`（5 项）、`ADC`（2 项）、`定时器`（3 项）、`任务`（2 项）；由 `compiler/src/native_spec.rs` 单一事实来源生成 `runtime/include/jm_native_table.h`，板级与主机端口共用 |
+| 板级原生表 | `引脚`（5 项）、`ADC`（2 项）、`定时器`（3 项）、`任务`（2 项）、`队列`（4 项）、`信号量`（3 项）、`外部中断`（4 项）；由 `compiler/src/native_spec.rs` 单一事实来源生成 `runtime/include/jm_native_table.h`，板级与主机端口共用 |
 | 语言卡 | [docs/语言卡.md](docs/语言卡.md) + [spec/langcard.json](spec/langcard.json)，由操作码/原生表/内建/错误码渲染；`--check-langcard` 防漂移 |
 | 规范校验 | `--check-native`、`--check-langcard` 进构建链路，头文件或语言卡落后于规范即失败 |
 | 可复现工具链 | `tools/toolchains/toolchain.lock.json` + `tools/fetch-toolchain.ps1`，按锁文件哈希安装 |
@@ -239,7 +239,7 @@ docs/                      路径图、字节码规格、原生函数表、调�
 | [tools/capture-serial.ps1](tools/capture-serial.ps1) | 串口录制到 `build\uart\`（`-Port` / `-Seconds` / `-Out`） |
 | [tools/test.ps1](tools/test.ps1) | 输出回归（逐字节对比 `tests\expected`） |
 | [tools/test-errors.ps1](tools/test-errors.ps1) | 错误码回归（E004 / E007 / E009 / E013 / E023 / E027 / E028 / E035 / E036 / E037 / E102 / E103 / E117 / E118 / E120 / E121 / E122 / E123） |
-| [tools/test-native-import.ps1](tools/test-native-import.ps1) | 原生导入回归（引脚 / ADC / 定时器 / 队列 / 信号量各三类错误 + 任务 + 正确用例，21/21） |
+| [tools/test-native-import.ps1](tools/test-native-import.ps1) | 原生导入回归（引脚 / ADC / 定时器 / 队列 / 信号量 / 外部中断各三类错误 + 任务 + 正确用例，25/25） |
 | [tools/test-packages.ps1](tools/test-packages.ps1) | 包用例回归（单包/双包/菱形/离线/预算等） |
 | [tools/test-debug.ps1](tools/test-debug.ps1) | 调试表回归（双向查询/跨函数/跨包/剥离/损坏/旧文件） |
 | [tools/size-report.ps1](tools/size-report.ps1) | 固件 Flash/RAM 体积报告与基线对比（`-Label` 命名，`-UpdateBaseline` 更新基线） |

@@ -46,4 +46,12 @@ void port_timer_init(void);
 int  port_timer_delay_ms(uint32_t ms);
 int  port_timer_count(uint32_t *ms);
 
+/* EXTI：PA0–PA4 对应 EXTI0–4，边沿 0=上升 1=下降 2=双沿。
+ * 引脚会被改成下拉输入；中断里只做计数与 hook 回调，hook 不许碰 VM。 */
+void port_exti_bind(uint32_t pin, uint32_t edge);
+void port_exti_unbind(uint32_t pin);
+void port_exti_sw_trigger(uint32_t pin);
+uint32_t port_exti_count(uint32_t pin);
+void port_exti_set_hook(void (*hook)(uint32_t line));
+
 #endif

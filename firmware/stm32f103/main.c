@@ -323,6 +323,8 @@ int main(void)
         port_log(JM_QUEUE_TABLE_NAME);
         port_log(", ");
         port_log(JM_SEM_TABLE_NAME);
+        port_log(", ");
+        port_log(JM_IRQ_TABLE_NAME);
         port_log("\r\n");
     }
     port_log("\r\n");

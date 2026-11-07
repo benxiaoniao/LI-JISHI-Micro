@@ -27,6 +27,7 @@
 #define RCC_APB2ENR_IOPCEN  (1u << 4)
 #define RCC_APB2ENR_ADC1EN  (1u << 9)
 #define RCC_APB2ENR_USART1EN (1u << 14)
+#define RCC_APB2ENR_AFIOEN  (1u << 0)
 
 #define RCC_APB1ENR_TIM2EN  (1u << 0)
 
@@ -42,6 +43,8 @@
 /* GPIOA / GPIOC */
 #define GPIOA_CRL       REG32(0x40010800u)
 #define GPIOA_CRH       REG32(0x40010804u)
+#define GPIOA_IDR       REG32(0x40010808u)
+#define GPIOA_ODR       REG32(0x4001080Cu)
 #define GPIOC_CRH       REG32(0x40011004u)
 #define GPIOC_IDR       REG32(0x40011008u)
 #define GPIOC_BSRR      REG32(0x40011010u)
@@ -89,6 +92,23 @@
 #define TIM2_PSC        REG32(0x40000028u)
 #define TIM2_ARR        REG32(0x4000002Cu)
 
+/* EXTI（PA0–PA4 → EXTI0–4，IRQ 6–10） */
+#define AFIO_EXTICR1    REG32(0x40010008u)
+#define EXTI_IMR        REG32(0x40010400u)
+#define EXTI_EMR        REG32(0x40010404u)
+#define EXTI_RTSR       REG32(0x40010408u)
+#define EXTI_FTSR       REG32(0x4001040Cu)
+#define EXTI_SWIER      REG32(0x40010410u)
+#define EXTI_PR         REG32(0x40010414u)
+
+#define NVIC_ISER0      REG32(0xE000E100u)
+#define NVIC_ICER0      REG32(0xE000E100u + 0x80u)
+#define NVIC_IPR_BYTE(irq) (*(volatile uint8_t *)(0xE000E400u + (irq)))
+
+#define EXTI_LINES      5u
+#define EXTI_IRQ_FIRST  6u      /* EXTI0 的 IRQ 号；EXTI1–4 依次 +1 */
+#define EXTI_IRQ_PRIO   0x40u   /* 低于 SysTick（默认 0），不比内核 tick 更急 */
+
 #define UART_BAUD       115200u
 
 /* ---------------- 状态 ---------------- */
@@ -97,6 +117,11 @@ static uint32_t g_sysclk = 8000000u;
 static volatile uint32_t g_ms = 0;
 static volatile uint8_t g_adc_ready = 0u;
 static volatile uint8_t g_timer_ready = 0u;
+
+/* EXTI：中断里只写计数并回调 hook，不进入 VM */
+static volatile uint32_t g_exti_count[EXTI_LINES];
+static void (*g_exti_hook)(uint32_t line) = 0;
+static uint8_t g_exti_bound[EXTI_LINES];
 
 /* ---------------- 时钟 ---------------- */
 
@@ -387,6 +412,114 @@ int port_timer_count(uint32_t *ms)
     }
     *ms = TIM2_CNT & 0xFFFFu;
     return 0;
+}
+
+/* ---------------- EXTI（PA0–PA4 → EXTI0–4） ---------------- */
+
+void port_exti_set_hook(void (*hook)(uint32_t line))
+{
+    g_exti_hook = hook;
+}
+
+void port_exti_bind(uint32_t pin, uint32_t edge)
+{
+    uint32_t shift;
+    uint32_t bit;
+    uint32_t irq;
+
+    if (pin >= EXTI_LINES) {
+        return;
+    }
+    bit = 1u << pin;
+    irq = EXTI_IRQ_FIRST + pin;
+
+    /* AFIO 负责把 EXTI 线接到端口；EXTICR 复位值即 PA，这里显式写 0 更直观 */
+    RCC_APB2ENR |= RCC_APB2ENR_AFIOEN | RCC_APB2ENR_IOPAEN;
+
+    /* PAx = 输入 + 下拉（CNF=10, MODE=00 → 0x8），悬空时不会被噪声误触发 */
+    shift = (pin & 7u) * 4u;
+    GPIOA_CRL = (GPIOA_CRL & ~(0xFu << shift)) | (0x8u << shift);
+    GPIOA_ODR &= ~bit;
+    if (pin < 4u) {
+        AFIO_EXTICR1 &= ~(0xFu << (shift));
+    }
+
+    if (edge == 0u || edge == 2u) {
+        EXTI_RTSR |= bit;
+    } else {
+        EXTI_RTSR &= ~bit;
+    }
+    if (edge == 1u || edge == 2u) {
+        EXTI_FTSR |= bit;
+    } else {
+        EXTI_FTSR &= ~bit;
+    }
+
+    EXTI_PR = bit;          /* 清掉绑定前可能残留的挂起位 */
+    EXTI_SWIER &= ~bit;
+    EXTI_IMR |= bit;
+    EXTI_EMR &= ~bit;
+
+    NVIC_IPR_BYTE(irq) = EXTI_IRQ_PRIO;
+    NVIC_ISER0 = (1u << irq);
+
+    g_exti_count[pin] = 0u;
+    g_exti_bound[pin] = 1u;
+}
+
+void port_exti_unbind(uint32_t pin)
+{
+    uint32_t bit;
+    uint32_t irq;
+
+    if (pin >= EXTI_LINES) {
+        return;
+    }
+    bit = 1u << pin;
+    irq = EXTI_IRQ_FIRST + pin;
+
+    EXTI_IMR &= ~bit;
+    EXTI_RTSR &= ~bit;
+    EXTI_FTSR &= ~bit;
+    EXTI_SWIER &= ~bit;
+    EXTI_PR = bit;
+    NVIC_ICER0 = (1u << irq);
+    g_exti_bound[pin] = 0u;
+}
+
+void port_exti_sw_trigger(uint32_t pin)
+{
+    if (pin >= EXTI_LINES || g_exti_bound[pin] == 0u) {
+        return;
+    }
+    EXTI_SWIER |= (1u << pin);   /* 置挂起位，下一指令边界进中断 */
+}
+
+uint32_t port_exti_count(uint32_t pin)
+{
+    if (pin >= EXTI_LINES) {
+        return 0u;
+    }
+    return g_exti_count[pin];
+}
+
+/* EXTI0–4 共用入口：向量表 5 条线都指到这里，按挂起位逐条处理。
+ * 这里只允许「计数 + 回调」，回调由板级层实现，只做 jmk_queue_send_from_isr；
+ * 任何情况下都不进 VM、不跑砾字节码。 */
+void EXTI_IRQHandler(void)
+{
+    uint32_t pr = EXTI_PR;
+    uint32_t i;
+
+    for (i = 0u; i < EXTI_LINES; i++) {
+        if ((pr & (1u << i)) != 0u) {
+            EXTI_PR = (1u << i);    /* 写 1 清挂起，同时清掉 SWIER 对应位 */
+            g_exti_count[i]++;
+            if (g_exti_hook) {
+                g_exti_hook(i);
+            }
+        }
+    }
 }
 
 /* ---------------- 运行时端口（jm_port.h） ---------------- */

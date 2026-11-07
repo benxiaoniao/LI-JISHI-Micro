@@ -308,8 +308,114 @@ static const JmNativeEntry HOST_QUEUE_TABLE[] = {
     JM_QUEUE_TABLE_INIT
 };
 
+/* ---- 主机端「中断」：与板级同名同语义 ----
+ * PC 上没有 EXTI，中断触发() 直接模拟“中断把引脚号投进队列”这一步；
+ * 板上的真实路径是 EXTI_IRQHandler → jmk_queue_send_from_isr → 同一队列。
+ * 两边可见结果一致：投递顺序、计数、解除后不再触发。
+ */
+#define HOST_IRQ_LINES 5u
+
+static HostQueue *g_host_irq_queue[HOST_IRQ_LINES];
+static int32_t g_host_irq_count[HOST_IRQ_LINES];
+
+static int n_irq_bind(JmStateRef st, const JmValue *args, uint8_t nargs,
+                      JmValue *out) {
+    int32_t pin = 0;
+    int32_t handle = 0;
+    int32_t edge = 0;
+    HostQueue *q;
+    if (nargs < 2) {
+        return jm_native_fail(st, JM_NE_PARAM, "中断绑定需要：引脚, 队列句柄[, 边沿]");
+    }
+    if (jm_value_to_int(args[0], &pin) != 0 || jm_value_to_int(args[1], &handle) != 0) {
+        return jm_native_fail(st, JM_NE_TYPE, "中断绑定：引脚与队列句柄必须是整数");
+    }
+    if (nargs > 2 && jm_value_to_int(args[2], &edge) != 0) {
+        return jm_native_fail(st, JM_NE_TYPE, "中断绑定：边沿必须是整数");
+    }
+    if (pin < 0 || pin >= (int32_t)HOST_IRQ_LINES) {
+        return jm_native_fail(st, JM_NE_PARAM, "引脚范围 0–4（PA0–PA4）");
+    }
+    if (edge < 0 || edge > 2) {
+        return jm_native_fail(st, JM_NE_PARAM, "边沿：0=上升 1=下降 2=双沿");
+    }
+    q = host_queue_of(handle);
+    if (!q) {
+        return jm_native_fail(st, JM_NE_PARAM, "队列句柄无效");
+    }
+    g_host_irq_queue[pin] = q;
+    g_host_irq_count[pin] = 0;
+    *out = jm_value_bool(1);
+    return JM_NATIVE_OK;
+}
+
+static int n_irq_trigger(JmStateRef st, const JmValue *args, uint8_t nargs,
+                         JmValue *out) {
+    int32_t pin = 0;
+    HostQueue *q;
+    if (nargs != 1) {
+        return jm_native_fail(st, JM_NE_PARAM, "中断触发需要一个参数：引脚");
+    }
+    if (jm_value_to_int(args[0], &pin) != 0) {
+        return jm_native_fail(st, JM_NE_TYPE, "中断触发：引脚必须是整数");
+    }
+    if (pin < 0 || pin >= (int32_t)HOST_IRQ_LINES) {
+        return jm_native_fail(st, JM_NE_PARAM, "引脚范围 0–4（PA0–PA4）");
+    }
+    q = g_host_irq_queue[pin];
+    if (!q) {
+        *out = jm_value_bool(0);
+        return JM_NATIVE_OK;
+    }
+    g_host_irq_count[pin]++;
+    if (q->count < q->cap) {
+        q->buf[q->tail] = pin;
+        q->tail = (q->tail + 1u) % q->cap;
+        q->count++;
+    }
+    *out = jm_value_bool(1);
+    return JM_NATIVE_OK;
+}
+
+static int n_irq_count(JmStateRef st, const JmValue *args, uint8_t nargs,
+                       JmValue *out) {
+    int32_t pin = 0;
+    if (nargs != 1) {
+        return jm_native_fail(st, JM_NE_PARAM, "中断计数需要一个参数：引脚");
+    }
+    if (jm_value_to_int(args[0], &pin) != 0) {
+        return jm_native_fail(st, JM_NE_TYPE, "中断计数：引脚必须是整数");
+    }
+    if (pin < 0 || pin >= (int32_t)HOST_IRQ_LINES) {
+        return jm_native_fail(st, JM_NE_PARAM, "引脚范围 0–4（PA0–PA4）");
+    }
+    *out = jm_value_int(g_host_irq_count[pin]);
+    return JM_NATIVE_OK;
+}
+
+static int n_irq_unbind(JmStateRef st, const JmValue *args, uint8_t nargs,
+                        JmValue *out) {
+    int32_t pin = 0;
+    if (nargs != 1) {
+        return jm_native_fail(st, JM_NE_PARAM, "中断解除需要一个参数：引脚");
+    }
+    if (jm_value_to_int(args[0], &pin) != 0) {
+        return jm_native_fail(st, JM_NE_TYPE, "中断解除：引脚必须是整数");
+    }
+    if (pin < 0 || pin >= (int32_t)HOST_IRQ_LINES) {
+        return jm_native_fail(st, JM_NE_PARAM, "引脚范围 0–4（PA0–PA4）");
+    }
+    g_host_irq_queue[pin] = 0;
+    *out = jm_value_bool(1);
+    return JM_NATIVE_OK;
+}
+
 static const JmNativeEntry HOST_SEM_TABLE[] = {
     JM_SEM_TABLE_INIT
+};
+
+static const JmNativeEntry HOST_IRQ_TABLE[] = {
+    JM_IRQ_TABLE_INIT
 };
 
 int jm_host_native_register(void) {
@@ -320,6 +426,9 @@ int jm_host_native_register(void) {
         return -1;
     }
     if (jm_native_register(HOST_SEM_TABLE, (uint8_t)JM_SEM_ENTRY_COUNT) != 0) {
+        return -1;
+    }
+    if (jm_native_register(HOST_IRQ_TABLE, (uint8_t)JM_IRQ_ENTRY_COUNT) != 0) {
         return -1;
     }
     return 0;

@@ -440,6 +440,109 @@ static int n_sem_post(JmStateRef st, const JmValue *args, uint8_t nargs,
     return ipc_fail(st, rc);
 }
 
+/* ---- 语言层中断（JM7）：中断只投递，不跑字节码 ----
+ * 数据路径：EXTI_IRQHandler（port 层）→ irq_post_from_isr → jmk_queue_send_from_isr
+ *          → 任务里的 队列接收 → .jsh 逻辑。
+ * 中断上下文里既不进 VM，也不调用任何 native 函数；ABI v1 的「ISR 不得直调 native」
+ * 因此仍然成立。
+ */
+#define JM_IRQ_LINES 5u
+
+static JmkQueue *g_irq_queue[JM_IRQ_LINES];
+
+/* 由 port 层的中断服务函数调用：只做计数与入队，不做别的事。 */
+static void irq_post_from_isr(uint32_t line)
+{
+    uint32_t payload;
+
+    if (line >= JM_IRQ_LINES || g_irq_queue[line] == 0) {
+        return;
+    }
+    payload = line;
+    (void)jmk_queue_send_from_isr(g_irq_queue[line], &payload, 0);
+}
+
+static int n_irq_bind(JmStateRef st, const JmValue *args, uint8_t nargs,
+                      JmValue *out) {
+    int32_t pin = 0;
+    int32_t handle = 0;
+    int32_t edge = 0;
+    JmkQueue *q;
+
+    if (nargs < 2) {
+        return jm_native_fail(st, JM_NE_PARAM, "中断绑定需要：引脚, 队列句柄[, 边沿]");
+    }
+    if (jm_value_to_int(args[0], &pin) != 0 || jm_value_to_int(args[1], &handle) != 0) {
+        return jm_native_fail(st, JM_NE_TYPE, "中断绑定：引脚与队列句柄必须是整数");
+    }
+    if (nargs > 2 && jm_value_to_int(args[2], &edge) != 0) {
+        return jm_native_fail(st, JM_NE_TYPE, "中断绑定：边沿必须是整数");
+    }
+    if (pin < 0 || pin >= (int32_t)JM_IRQ_LINES) {
+        return jm_native_fail(st, JM_NE_PARAM, "引脚范围 0–4（PA0–PA4）");
+    }
+    if (edge < 0 || edge > 2) {
+        return jm_native_fail(st, JM_NE_PARAM, "边沿：0=上升 1=下降 2=双沿");
+    }
+    q = queue_of(handle);
+    if (!q) {
+        return jm_native_fail(st, JM_NE_PARAM, "队列句柄无效");
+    }
+    g_irq_queue[pin] = q;
+    port_exti_bind((uint32_t)pin, (uint32_t)edge);
+    *out = jm_value_bool(1);
+    return JM_NATIVE_OK;
+}
+
+static int n_irq_trigger(JmStateRef st, const JmValue *args, uint8_t nargs,
+                         JmValue *out) {
+    int32_t pin = 0;
+
+    if (arg_int(st, args, nargs, &pin, "中断触发需要一个参数：引脚") != 0) {
+        return -1;
+    }
+    if (pin < 0 || pin >= (int32_t)JM_IRQ_LINES) {
+        return jm_native_fail(st, JM_NE_PARAM, "引脚范围 0–4（PA0–PA4）");
+    }
+    if (g_irq_queue[pin] == 0) {
+        *out = jm_value_bool(0);
+        return JM_NATIVE_OK;
+    }
+    port_exti_sw_trigger((uint32_t)pin);
+    *out = jm_value_bool(1);
+    return JM_NATIVE_OK;
+}
+
+static int n_irq_count(JmStateRef st, const JmValue *args, uint8_t nargs,
+                       JmValue *out) {
+    int32_t pin = 0;
+
+    if (arg_int(st, args, nargs, &pin, "中断计数需要一个参数：引脚") != 0) {
+        return -1;
+    }
+    if (pin < 0 || pin >= (int32_t)JM_IRQ_LINES) {
+        return jm_native_fail(st, JM_NE_PARAM, "引脚范围 0–4（PA0–PA4）");
+    }
+    *out = jm_value_int((int32_t)port_exti_count((uint32_t)pin));
+    return JM_NATIVE_OK;
+}
+
+static int n_irq_unbind(JmStateRef st, const JmValue *args, uint8_t nargs,
+                        JmValue *out) {
+    int32_t pin = 0;
+
+    if (arg_int(st, args, nargs, &pin, "中断解除需要一个参数：引脚") != 0) {
+        return -1;
+    }
+    if (pin < 0 || pin >= (int32_t)JM_IRQ_LINES) {
+        return jm_native_fail(st, JM_NE_PARAM, "引脚范围 0–4（PA0–PA4）");
+    }
+    g_irq_queue[pin] = 0;
+    port_exti_unbind((uint32_t)pin);
+    *out = jm_value_bool(1);
+    return JM_NATIVE_OK;
+}
+
 /* 表项由 micc --emit-native-header 生成，见 runtime/include/jm_native_table.h */
 static const JmNativeEntry F103_TABLE[] = {
     F103_NATIVE_TABLE_INIT
@@ -465,7 +568,13 @@ static const JmNativeEntry SEM_TABLE[] = {
     JM_SEM_TABLE_INIT
 };
 
+static const JmNativeEntry IRQ_TABLE[] = {
+    JM_IRQ_TABLE_INIT
+};
+
 int f103_native_register(void) {
+    /* 中断里只允许走这条回调；它只做 jmk_queue_send_from_isr，不进 VM。 */
+    port_exti_set_hook(irq_post_from_isr);
     if (jm_native_register(F103_TABLE, (uint8_t)F103_NATIVE_ENTRY_COUNT) != 0) {
         return -1;
     }
@@ -482,6 +591,9 @@ int f103_native_register(void) {
         return -1;
     }
     if (jm_native_register(SEM_TABLE, (uint8_t)JM_SEM_ENTRY_COUNT) != 0) {
+        return -1;
+    }
+    if (jm_native_register(IRQ_TABLE, (uint8_t)JM_IRQ_ENTRY_COUNT) != 0) {
         return -1;
     }
     return 0;

@@ -47,6 +47,15 @@ else {
     Write-Host "  [PASS] 编译通过（导入 队列 + 信号量）"
 }
 
+& $micc (Join-Path $root "examples\外部中断.jsh") -o (Join-Path $root "build\native-irq-ok.jmb") | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "  [FAIL] 外部中断示例被拒绝"
+    $script:fail++
+}
+else {
+    Write-Host "  [PASS] 编译通过（导入 外部中断）"
+}
+
 function Expect-CompileError {
     param([string]$File, [string]$Code, [string]$Title)
     Write-Host ("== " + $Title)
@@ -89,9 +98,13 @@ Expect-CompileError "tests\errors\信号量名拼错.jsh" "E115" "信号量：�
 Expect-CompileError "tests\errors\信号量参数个数.jsh" "E115" "信号量：参数个数不符应报 E115"
 Expect-CompileError "tests\errors\信号量未导入.jsh" "E113" "信号量：未导入就调用应报 E113"
 
+Expect-CompileError "tests\errors\中断名拼错.jsh" "E115" "外部中断：名字拼错应报 E115"
+Expect-CompileError "tests\errors\中断参数个数.jsh" "E115" "外部中断：参数个数不符应报 E115"
+Expect-CompileError "tests\errors\中断未导入.jsh" "E113" "外部中断：未导入就调用应报 E113"
+
 if ($script:fail -ne 0) {
     Write-Host ("原生导入回归失败：" + $script:fail + " 项")
     exit 1
 }
-Write-Host "原生导入回归：21/21 通过（引脚 / ADC / 定时器 / 队列 / 信号量各 3 个错误用例，任务 2 个错误用例；4 个正确示例）"
+Write-Host "原生导入回归：25/25 通过（引脚 / ADC / 定时器 / 队列 / 信号量 / 外部中断各 3 个错误用例，任务 2 个错误用例；5 个正确示例）"
 exit 0
