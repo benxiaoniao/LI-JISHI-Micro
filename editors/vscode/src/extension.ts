@@ -4,6 +4,16 @@ import type { ChildProcess } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import {
+  decideDefinition,
+  displayPath,
+  findModuleLine,
+  nearestManifest,
+  parsePackFiles,
+  parseRunOutput,
+  parseSymbols,
+} from './core';
+import type { PackInfo, Site, SymbolInfo } from './core';
 
 const LANGUAGE_ID = 'li';
 const OUTPUT_NAME = '砾';
@@ -12,9 +22,17 @@ const ERROR_LINE = /^(\d+):(\d+)\s*错误\[([A-Z]+\d+)\]\s*(.*)$/;
 
 let output: vscode.OutputChannel;
 let diagnostics: vscode.DiagnosticCollection;
+let runDiagnostics: vscode.DiagnosticCollection;
 let statusItem: vscode.StatusBarItem;
+let breakpointDecoration: vscode.TextEditorDecorationType;
 let runningChild: ChildProcess | undefined;
 let cardCache: { file: string; mtimeMs: number; card: Langcard } | undefined;
+
+/** 每个文档最多一个断点：文档 URI → 1 起行号。 */
+const breakpoints = new Map<string, number>();
+const runUris = new Map<string, vscode.Uri>();
+const symbolCache = new Map<string, { mtimeMs: number; symbols: SymbolInfo[] }>();
+const packCache = new Map<string, { mtimeMs: number; packs: PackInfo[] }>();
 
 const debounceTimers = new Map<string, NodeJS.Timeout>();
 const checkSeq = new Map<string, number>();
@@ -108,6 +126,169 @@ function removeQuietly(file: string): void {
     fs.unlinkSync(file);
   } catch {
     // 临时文件清理失败不影响编辑
+  }
+}
+
+function resolveJmrun(root: string): string | undefined {
+  const candidates = [
+    config<string>('jmrunPath', 'build/jmrun.exe'),
+    'build/jmrun.exe',
+    'build/jmrun',
+  ];
+  for (const candidate of candidates) {
+    const full = path.isAbsolute(candidate) ? candidate : path.join(root, candidate);
+    if (fs.existsSync(full)) {
+      return full;
+    }
+  }
+  return undefined;
+}
+
+interface TextResult {
+  code: number;
+  out: string;
+  err: string;
+  spawnError?: string;
+}
+
+/** 跑一个短命命令并收全 stdout/stderr（UTF-8）。 */
+function runText(exe: string, args: string[], cwd: string, timeout = 30000): Promise<TextResult> {
+  return new Promise(resolve => {
+    execFile(
+      exe,
+      args,
+      { cwd, timeout, windowsHide: true, encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 },
+      (error, stdout, stderr) => {
+        if (error && typeof (error as NodeJS.ErrnoException).code === 'string') {
+          resolve({ code: -1, out: '', err: '', spawnError: String(error.message) });
+          return;
+        }
+        const code = error && typeof error.code === 'number' ? error.code : error ? 1 : 0;
+        resolve({ code, out: stdout || '', err: stderr || '' });
+      }
+    );
+  });
+}
+
+/** 取文件的定义表；按 mtime 缓存，保存后自动失效。 */
+async function loadSymbols(micc: string, file: string): Promise<SymbolInfo[]> {
+  let mtimeMs = 0;
+  try {
+    mtimeMs = fs.statSync(file).mtimeMs;
+  } catch {
+    return [];
+  }
+  const cached = symbolCache.get(file);
+  if (cached && cached.mtimeMs === mtimeMs) {
+    return cached.symbols;
+  }
+  const result = await runText(micc, ['--symbols', file], path.dirname(file), 15000);
+  const symbols = result.code === 0 ? parseSymbols(result.out) : [];
+  symbolCache.set(file, { mtimeMs, symbols });
+  return symbols;
+}
+
+/** 取包与依赖的入口文件；按 `砾包.toml` 的 mtime 缓存。 */
+async function loadPacks(micc: string, manifestDir: string): Promise<PackInfo[]> {
+  let mtimeMs = 0;
+  try {
+    mtimeMs = fs.statSync(path.join(manifestDir, '砾包.toml')).mtimeMs;
+  } catch {
+    return [];
+  }
+  const cached = packCache.get(manifestDir);
+  if (cached && cached.mtimeMs === mtimeMs) {
+    return cached.packs;
+  }
+  const result = await runText(micc, ['--pack-files', manifestDir], manifestDir, 15000);
+  const packs = result.code === 0 ? parsePackFiles(result.out) : [];
+  packCache.set(manifestDir, { mtimeMs, packs });
+  return packs;
+}
+
+/** 光标处标识符的定义位置；找不到返回 undefined。 */
+async function definitionAt(
+  document: vscode.TextDocument,
+  position: vscode.Position
+): Promise<vscode.Location | undefined> {
+  const wordRange = document.getWordRangeAtPosition(position, /[\p{L}\p{N}_]+/u);
+  const root = workspaceRoot(document.uri);
+  if (!wordRange || !root) {
+    return undefined;
+  }
+  const micc = resolveMicc(root);
+  if (!micc) {
+    return undefined;
+  }
+  const word = document.getText(wordRange);
+  const local = await loadSymbols(micc, document.uri.fsPath);
+
+  // `接收者.名字`：取出点号左边的标识符
+  const lineText = document.lineAt(position.line).text;
+  const start = wordRange.start.character;
+  let receiver: string | undefined;
+  if (start > 0 && lineText[start - 1] === '.') {
+    const before = lineText.slice(0, start - 1);
+    const match = /([\p{L}\p{N}_]+)\s*$/u.exec(before);
+    if (match) {
+      receiver = match[1];
+    }
+  }
+
+  const manifest = nearestManifest(document.uri.fsPath, root);
+  const packs = manifest ? await loadPacks(micc, manifest) : [];
+
+  // 只为候选包预取一次依赖入口的定义表，其余判断交给纯函数
+  const remote = new Map<string, SymbolInfo[]>();
+  const candidate = receiver ?? word;
+  const pkg = packs.find(p => p.name === candidate);
+  if (pkg) {
+    remote.set(pkg.entry, await loadSymbols(micc, pkg.entry));
+  }
+
+  let moduleLine: number | undefined;
+  let langcardFile: string | undefined;
+  if (new RegExp(`导入\\s+${escapeRegExp(word)}(\\s|$)`).test(document.getText())) {
+    langcardFile = resolveInRoot(root, config<string>('langcardPath', 'spec/langcard.json'));
+    try {
+      moduleLine = findModuleLine(fs.readFileSync(langcardFile, 'utf8'), word);
+    } catch {
+      moduleLine = undefined;
+    }
+  }
+
+  const decision = decideDefinition({
+    word,
+    receiver,
+    file: document.uri.fsPath,
+    local,
+    packs,
+    remote,
+    langcardFile,
+    moduleLine,
+  });
+  if (!decision) {
+    return undefined;
+  }
+  return new vscode.Location(
+    vscode.Uri.file(decision.file),
+    new vscode.Position(Math.max(0, decision.line - 1), Math.max(0, decision.col - 1))
+  );
+}
+
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+class LiDefinitions implements vscode.DefinitionProvider {
+  provideDefinition(
+    document: vscode.TextDocument,
+    position: vscode.Position
+  ): vscode.ProviderResult<vscode.Definition> {
+    if (document.languageId !== LANGUAGE_ID) {
+      return undefined;
+    }
+    return definitionAt(document, position);
   }
 }
 
@@ -234,6 +415,146 @@ function scheduleCheck(document: vscode.TextDocument, delay: number): void {
       void checkDocument(document);
     }, delay)
   );
+}
+
+function refreshBreakpointDecorations(editor: vscode.TextEditor): void {
+  if (!breakpointDecoration || editor.document.languageId !== LANGUAGE_ID) {
+    return;
+  }
+  const line = breakpoints.get(editor.document.uri.toString());
+  const ranges = line ? [new vscode.Range(line - 1, 0, line - 1, 0)] : [];
+  editor.setDecorations(breakpointDecoration, ranges);
+}
+
+function toggleBreakpoint(): void {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor || editor.document.languageId !== LANGUAGE_ID) {
+    vscode.window.showInformationMessage('砾：断点只支持 .jsh 文件。');
+    return;
+  }
+  const key = editor.document.uri.toString();
+  const line = editor.selection.active.line + 1;
+  if (breakpoints.get(key) === line) {
+    breakpoints.delete(key);
+    vscode.window.setStatusBarMessage(`砾：已清除第 ${line} 行断点`, 2000);
+  } else {
+    breakpoints.set(key, line);
+    vscode.window.setStatusBarMessage(`砾：断点设在第 ${line} 行（再次 F9 取消）`, 3000);
+  }
+  refreshBreakpointDecorations(editor);
+}
+
+function siteUri(root: string, file: string): vscode.Uri {
+  return vscode.Uri.file(path.isAbsolute(file) ? file : path.join(root, file));
+}
+
+/** 把 jmrun 的 `于 文件:行` 变成问题面板里的可点击诊断。 */
+function publishRunDiagnostics(document: vscode.TextDocument, root: string, text: string): Site | undefined {
+  const parsed = parseRunOutput(text);
+  for (const uri of runUris.values()) {
+    runDiagnostics.delete(uri);
+  }
+  runUris.clear();
+
+  if (parsed.hit) {
+    const uri = siteUri(root, parsed.hit.file);
+    const line = Math.max(0, parsed.hit.line - 1);
+    vscode.window.showInformationMessage(`砾：断点命中 ${parsed.hit.file}:${parsed.hit.line}`);
+    void vscode.window.showTextDocument(uri, {
+      selection: new vscode.Range(line, 0, line, 0),
+      preserveFocus: false,
+      preview: true,
+    });
+  }
+
+  const error = parsed.error;
+  if (!error) {
+    return parsed.hit;
+  }
+  let target = document.uri;
+  let line = 0;
+  let note = '';
+  if (error.site) {
+    target = siteUri(root, error.site.file);
+    line = Math.max(0, error.site.line - 1);
+  } else {
+    note = '（无调试段，只能给到错误码）';
+  }
+  const diag = new vscode.Diagnostic(
+    new vscode.Range(line, 0, line, 1),
+    `${error.code ?? '运行期错误'}：${error.message}${note}`,
+    vscode.DiagnosticSeverity.Error
+  );
+  diag.source = 'jmrun';
+  if (error.code) {
+    diag.code = error.code;
+  }
+  runDiagnostics.set(target, [diag]);
+  runUris.set(target.toString(), target);
+  return error.site;
+}
+
+/** F5：把当前文件编译成临时 .jmb，再交给 jmrun 跑；有断点就带上。 */
+async function runCurrent(): Promise<void> {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor || editor.document.languageId !== LANGUAGE_ID) {
+    vscode.window.showInformationMessage('砾：请先把光标放在 .jsh 文件里再运行。');
+    return;
+  }
+  const document = editor.document;
+  const root = workspaceRoot(document.uri);
+  const micc = root ? resolveMicc(root) : undefined;
+  const jmrun = root ? resolveJmrun(root) : undefined;
+  if (!root || !micc || !jmrun) {
+    vscode.window.showErrorMessage(
+      '砾：运行需要工作区里的 micc 与 jmrun（先运行 tools\\build.ps1，或用 li.miccPath / li.jmrunPath 指定）。'
+    );
+    return;
+  }
+
+  // 调试表记录的是保存时的文件，先落盘避免行号指向临时副本
+  await document.save();
+
+  output.clear();
+  output.show(true);
+
+  const target = path.join(os.tmpdir(), `li-run-${process.pid}-${Date.now()}.jmb`);
+  const compiled = await runMicc(micc, document.uri.fsPath, target, root);
+  if (compiled.spawnError || compiled.code !== 0) {
+    output.appendLine(compiled.spawnError ? `无法启动 micc：${compiled.spawnError}` : compiled.stderr);
+    removeQuietly(target);
+    await checkDocument(document, false);
+    vscode.window.showErrorMessage('砾：编译失败，详见输出与问题面板。');
+    return;
+  }
+
+  const breakLine = breakpoints.get(document.uri.toString());
+  const args = [target];
+  if (breakLine) {
+    args.push('--break', `${displayPath(root, document.uri.fsPath)}:${breakLine}`);
+  }
+  output.appendLine(`== 运行 ${path.basename(document.uri.fsPath)}${breakLine ? `（断点第 ${breakLine} 行）` : ''}`);
+  output.appendLine(`> jmrun ${args.map(a => (a.includes(' ') ? `"${a}"` : a)).join(' ')}`);
+
+  const result = await runText(jmrun, args, root);
+  removeQuietly(target);
+  if (result.spawnError) {
+    output.appendLine(`无法启动 jmrun：${result.spawnError}`);
+    vscode.window.showErrorMessage(`砾：无法启动 jmrun（${result.spawnError}）。`);
+    return;
+  }
+  if (result.out) {
+    output.append(result.out);
+  }
+  if (result.err) {
+    output.append(result.err);
+  }
+  output.appendLine(`== 退出码 ${result.code}`);
+
+  const site = publishRunDiagnostics(document, root, result.out + result.err);
+  if (site && !parseRunOutput(result.out + result.err).hit) {
+    output.appendLine(`源码位置：${site.file}:${site.line}`);
+  }
 }
 
 function stopRunning(): void {
@@ -457,12 +778,24 @@ class LangcardCompletions implements vscode.CompletionItemProvider {
 export function activate(context: vscode.ExtensionContext): void {
   output = vscode.window.createOutputChannel(OUTPUT_NAME);
   diagnostics = vscode.languages.createDiagnosticCollection('li');
+  runDiagnostics = vscode.languages.createDiagnosticCollection('li-run');
+  breakpointDecoration = vscode.window.createTextEditorDecorationType({
+    isWholeLine: true,
+    backgroundColor: 'rgba(220, 40, 40, 0.12)',
+    borderColor: new vscode.ThemeColor('editorError.foreground'),
+    borderStyle: 'solid',
+    borderWidth: '0 0 0 3px',
+    overviewRulerColor: new vscode.ThemeColor('editorOverviewRuler.errorForeground'),
+    overviewRulerLane: vscode.OverviewRulerLane.Left,
+  });
   statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 90);
   statusItem.command = 'li.cancel';
 
   context.subscriptions.push(
     output,
     diagnostics,
+    runDiagnostics,
+    breakpointDecoration,
     statusItem,
 
     vscode.commands.registerCommand('li.check', () => {
@@ -475,6 +808,10 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
 
     vscode.commands.registerCommand('li.build', () => runScript('tools/build.ps1', [], '构建')),
+
+    vscode.commands.registerCommand('li.run', () => runCurrent()),
+
+    vscode.commands.registerCommand('li.toggleBreakpoint', () => toggleBreakpoint()),
 
     vscode.commands.registerCommand('li.buildFirmware', () => {
       const root = workspaceRoot(vscode.window.activeTextEditor?.document.uri);
@@ -517,6 +854,14 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
 
     vscode.languages.registerCompletionItemProvider(LANGUAGE_ID, new LangcardCompletions()),
+
+    vscode.languages.registerDefinitionProvider(LANGUAGE_ID, new LiDefinitions()),
+
+    vscode.window.onDidChangeActiveTextEditor(editor => {
+      if (editor) {
+        refreshBreakpointDecorations(editor);
+      }
+    }),
 
     vscode.workspace.onDidOpenTextDocument(document => {
       if (document.languageId === LANGUAGE_ID) {

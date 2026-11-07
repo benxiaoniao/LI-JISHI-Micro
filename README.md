@@ -30,6 +30,7 @@ PC 上：  .jsh 源码 ──micc──▶  .jmb 微字节码
 | 语言卡 | [docs/语言卡.md](docs/语言卡.md) + [spec/langcard.json](spec/langcard.json)，由操作码/原生表/内建/错误码渲染；`--check-langcard` 防漂移 |
 | 规范校验 | `--check-native`、`--check-langcard` 进构建链路，头文件或语言卡落后于规范即失败 |
 | 可复现工具链 | `tools/toolchains/toolchain.lock.json` + `tools/fetch-toolchain.ps1`，按锁文件哈希安装 |
+| 编辑器扩展 | `editors/vscode`（可选）：高亮、编译诊断、语言卡补全、跳转到定义、`F5` 运行、`F9` 单断点；只调 `micc` / `jmrun`，不占固件空间 |
 
 上板验证记录在 [docs/verification/](docs/verification/)：ADC 零点（PA0 接 GND）、
 ADC 满量程（PA0 接 3V3）、以及第四轮读到 4094 触发 E023 的故障与修复对照。
@@ -119,7 +120,7 @@ compiler\target\release\micc.exe examples\类.jsh --strip-debug -o build\类-发
 - 加载器与固件**默认不解析**该段；旧文件、剥离文件、损坏段一律按「无调试信息」处理，不影响运行。
 - 编译器成功输出会同时给出 `剥离调试段后 M 字节，调试段 K 字节`。
 - 多包（`nfiles > 1`）时行记录自带 1 B 文件标签（`flags.bit1`），依赖包顶层 `令` 的行号指向依赖包自己的文件；单文件不置位，零额外开销。
-- 主机 `jmrun` 已最小接入：运行期错误在错误码与偏移之后追加 `于 文件:行`（无调试段时退回原输出）；`jmrun --break <文件>:<行>` 在目标行首个指令前停下并打印当前行，仅用于验证行映射，不是完整调试器。
+- 主机 `jmrun` 已最小接入：运行期错误在错误码与偏移之后追加 `于 文件:行`（无调试段时退回原输出）；`jmrun --break <文件>:<行>` 在目标行首个指令前停下并打印当前行，仅用于验证行映射，不是完整调试器。Windows 上 `argv` 是系统 ANSI（中文系统为 GBK），`jmrun` 打印前统一转 UTF-8，中文路径与断点提示不再乱码。
 - 格式与取舍见 [docs/JMB调试表设计.md](docs/JMB调试表设计.md)，字节码层约定见
   [docs/微字节码规格.md](docs/微字节码规格.md) 的「2.7 尾部可选调试段」。
 
@@ -136,6 +137,19 @@ build\jmrun.exe build\packages-示例.jmb
 compiler\target\release\micc.exe install --目录 examples\packages\应用   # 生成锁与缓存
 compiler\target\release\micc.exe pack --目录 examples\packages\应用 --离线
 ```
+
+### 2.6 编辑器扩展（H3）
+
+[editors/vscode](editors/vscode/README.md) 是独立的 VS Code 外壳，只调用现有 CLI，不复制编译逻辑：
+
+- 语法高亮、`micc` 编译诊断、语言卡补全（原有能力）。
+- 跳转到定义：`micc --symbols <文件>` 列出本文件定义，`micc --pack-files <包目录>` 复用 `pack_resolve` 给出包与依赖入口；`令/函数/类/方法/字段/导入的模块` 在 `.jsh` 内可跳，跨文件、跨包按同一套规则解析。
+- 运行期错误标红：解析 `jmrun` 输出的 `于 文件:行`，在该行画诊断并可点击定位；没有调试段时优雅退回错误码诊断，不报错。
+- `F5`：以当前文件为入口跑 `micc` + `jmrun`，输出进「砾」频道，错误同时进问题面板。
+- `F9`：对当前行设置/取消单断点（每个文档一个），`F5` 时附加 `--break 文件:行`，命中后打开并定位到该行。仅作行映射的最小验证，不做变量查看、多断点、继续/单步。
+- 格式化尚未实现，扩展不提供格式化入口。
+
+编辑器侧验证不依赖板子：`node test/verify.js` 覆盖符号/包/输出解析与断点判定，`test/run-it.ps1` 用 VS Code 扩展宿主跑真实命令。
 
 ---
 
@@ -207,6 +221,10 @@ examples/                  砾源码示例（board/ 下是上板示例）
 tests/expected/            主机回归基准输出
 tests/errors/              编译期 / 运行期错误用例
 tools/                     构建、测试、烧录、串口、工具链定位
+editors/vscode/            VS Code 扩展（可选，宿主机工具链，不进固件）
+  src/core.ts                符号/包/运行输出解析与跳转判定（纯函数，可命令行测试）
+  test/verify.js             编辑器逻辑回归
+  test/run-it.ps1            扩展宿主集成测试
 spec/langcard.json         语言卡机器可读版本（生成物）
 docs/                      路径图、字节码规格、原生函数表、调度模型、语言卡、工具链、验证日志
 ```

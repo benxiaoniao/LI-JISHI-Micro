@@ -11,6 +11,7 @@ mod pack_manifest;
 mod pack_merge;
 mod pack_resolve;
 mod parser;
+mod symbols;
 mod writer;
 
 use std::path::PathBuf;
@@ -23,6 +24,8 @@ fn usage() {
     eprintln!("      micc --line-of <x.jmb> <代码下标> <偏移>   # 指令位置 → 源文件:行");
     eprintln!("      micc --lines-of <x.jmb> <文件|*> <行号>    # 源码行 → 指令范围");
     eprintln!("      micc --debug-dump <x.jmb>                  # 打印调试表");
+    eprintln!("      micc --symbols <x.jsh>                     # 列出定义：种类 名字 行 列");
+    eprintln!("      micc --pack-files <包目录>                 # 包与依赖的入口文件（给编辑器跳转）");
     eprintln!("      micc --emit-header        # 导出 jm_opcodes.h");
     eprintln!("      micc --emit-native-header # 导出板级原生表头 f103_native_table.h");
     eprintln!("      micc --check-native       # CI 校验原生表头没漂移（不一致则退出码 1）");
@@ -206,6 +209,42 @@ fn main() {
     }
     if args[0] == "--debug-dump" {
         exit(cmd_debug_dump(&args[1..]));
+    }
+    if args[0] == "--symbols" {
+        if args.len() != 2 {
+            usage();
+            exit(2);
+        }
+        match symbols::file_symbols(std::path::Path::new(&args[1])) {
+            Ok(list) => {
+                for s in list {
+                    println!("{}\t{}\t{}\t{}", s.kind, s.name, s.line, s.col);
+                }
+            }
+            Err(e) => {
+                eprintln!("{}", e);
+                exit(1);
+            }
+        }
+        return;
+    }
+    if args[0] == "--pack-files" {
+        if args.len() != 2 {
+            usage();
+            exit(2);
+        }
+        match symbols::pack_files(std::path::Path::new(&args[1])) {
+            Ok(list) => {
+                for (name, version, entry) in list {
+                    println!("{}\t{}\t{}", name, version, entry);
+                }
+            }
+            Err(e) => {
+                eprintln!("{}", e);
+                exit(1);
+            }
+        }
+        return;
     }
     if args[0] == "pack" {
         exit(pack::cmd_pack(&args[1..]));

@@ -3,6 +3,34 @@
 #include <string.h>
 #include "jishim.h"
 
+#ifdef _WIN32
+#include <windows.h>
+/* argv 是系统 ANSI（中文 Windows 为 GBK）；输出前转成 UTF-8，避免中文路径乱码。 */
+static const char *u8arg(const char *s) {
+    static char buf[4][1024];
+    static int slot = 0;
+    char *out = buf[slot];
+    int wlen;
+    wchar_t *w;
+    int n;
+    slot = (slot + 1) & 3;
+    wlen = MultiByteToWideChar(CP_ACP, 0, s, -1, NULL, 0);
+    if (wlen <= 0) {
+        return s;
+    }
+    w = (wchar_t *)malloc(sizeof(wchar_t) * (size_t)wlen);
+    if (!w) {
+        return s;
+    }
+    MultiByteToWideChar(CP_ACP, 0, s, -1, w, wlen);
+    n = WideCharToMultiByte(CP_UTF8, 0, w, -1, out, (int)sizeof buf[0], NULL, NULL);
+    free(w);
+    return n > 0 ? out : s;
+}
+#else
+#define u8arg(s) (s)
+#endif
+
 #ifdef JM_HOST_DEBUG
 /* 只在主机端口做调试接入：运行时本身不解析调试段，解析全部交给 micc。 */
 static const char *g_jmb = NULL;
@@ -134,7 +162,7 @@ int main(int argc, char **argv) {
     if (brk) {
 #ifdef JM_HOST_DEBUG
         if (resolve_break(brk) != 0) {
-            fprintf(stderr, "断点无法落地（文件:行无效，或没有调试信息）\n");
+            fprintf(stderr, "断点无法落地：%s（文件:行无效，或没有调试信息）\n", u8arg(brk));
             return 2;
         }
 #else
@@ -145,7 +173,7 @@ int main(int argc, char **argv) {
 
     FILE *f = fopen(path, "rb");
     if (!f) {
-        fprintf(stderr, "打不开 %s\n", path);
+        fprintf(stderr, "打不开 %s\n", u8arg(path));
         return 2;
     }
     long n = 0;

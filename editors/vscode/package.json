@@ -1,7 +1,7 @@
 {
   "name": "li-vscode",
   "displayName": "砾（LI）",
-  "description": "砾语言（.jsh）的编辑器支持：语法高亮、编译诊断、构建/烧录命令与语言卡补全。",
+  "description": "砾语言（.jsh）的编辑器支持：语法高亮、编译诊断、运行/断点、跳转到定义与语言卡补全。",
   "version": "0.1.0",
   "publisher": "jishim",
   "license": "MIT-0",
@@ -59,6 +59,16 @@
         "icon": "$(zap)"
       },
       {
+        "command": "li.run",
+        "title": "砾：运行当前文件（F5）",
+        "icon": "$(play)"
+      },
+      {
+        "command": "li.toggleBreakpoint",
+        "title": "砾：行断点开/关（F9，单断点）",
+        "icon": "$(circle-filled)"
+      },
+      {
         "command": "li.flash",
         "title": "砾：烧录固件（需确认）",
         "icon": "$(cloud-upload)"
@@ -70,6 +80,18 @@
       }
     ],
     "menus": {
+      "editor/context": [
+        {
+          "command": "li.run",
+          "group": "navigation@1",
+          "when": "editorLangId == li"
+        },
+        {
+          "command": "li.toggleBreakpoint",
+          "group": "navigation@2",
+          "when": "editorLangId == li"
+        }
+      ],
       "editor/title": [
         {
           "command": "li.build",
@@ -84,6 +106,16 @@
       ]
     },
     "keybindings": [
+      {
+        "command": "li.run",
+        "key": "f5",
+        "when": "editorLangId == li"
+      },
+      {
+        "command": "li.toggleBreakpoint",
+        "key": "f9",
+        "when": "editorLangId == li"
+      },
       {
         "command": "li.build",
         "key": "ctrl+shift+b",
@@ -107,6 +139,11 @@
           "type": "string",
           "default": "powershell.exe",
           "markdownDescription": "执行 `tools/*.ps1` 使用的 PowerShell 可执行文件。"
+        },
+        "li.jmrunPath": {
+          "type": "string",
+          "default": "build/jmrun.exe",
+          "markdownDescription": "`jmrun` 可执行文件路径。相对路径按工作区根目录解析；找不到时回退到 `build/jmrun`（非 Windows）。"
         },
         "li.firmwareExample": {
           "type": "string",

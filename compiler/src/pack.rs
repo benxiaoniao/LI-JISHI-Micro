@@ -278,7 +278,8 @@ pub(crate) fn display_path(path: &std::path::Path) -> String {
         .as_ref()
         .and_then(|c| abs.strip_prefix(c).ok())
         .unwrap_or(&abs);
-    rel.to_string_lossy().replace('\\', "/")
+    let text = rel.to_string_lossy().replace('\\', "/");
+    text.strip_prefix("//?/").unwrap_or(&text).to_string()
 }
 
 fn entry_display(pkg: &Resolved) -> String {
