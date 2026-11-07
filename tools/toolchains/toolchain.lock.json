@@ -1,0 +1,46 @@
+{
+  "schema": "jishi.toolchain.lock/1",
+  "updated": "2026-11-07",
+  "note": "锁定工具链版本。files 里的 sha256 由本机实测得出，用于确认“装的是同一份二进制”；发布方未提供压缩包校验文件时 archive.sha256 为 null。",
+  "toolchains": {
+    "arm-none-eabi": {
+      "version": "13.3.1",
+      "binutils_version": "2.42.0",
+      "display": "xPack GNU Arm Embedded GCC 13.3.1-1.1 (20240614)",
+      "exe": "arm-none-eabi-gcc.exe",
+      "size_exe": "arm-none-eabi-size.exe",
+      "archive": {
+        "url": "https://github.com/xpack-dev-tools/arm-none-eabi-gcc-xpack/releases/download/v13.3.1-1.1/xpack-arm-none-eabi-gcc-13.3.1-1.1-win32-x64.zip",
+        "bytes": 278461975,
+        "sha256": null,
+        "note": "发布方未提供 .sha256，下载后按 files 里的二进制哈希校验"
+      },
+      "files": [
+        {
+          "path": "bin/arm-none-eabi-gcc.exe",
+          "sha256": "26C908CE6D90F964BB51A84E93F39E51B4207FB88582CC266EB7B42403300C95"
+        },
+        {
+          "path": "bin/arm-none-eabi-size.exe",
+          "sha256": "D08E10FDCB90E1DD44CBAC19B109B4E05D2D1AA4699E81F5CC67A7992BBBAA13"
+        }
+      ]
+    },
+    "host-gcc": {
+      "version": "16.1.0",
+      "display": "MinGW-W64 16.1.0 (ucrt, posix-seh, Brecht Sanders r4)",
+      "exe": "gcc.exe",
+      "archive": {
+        "url": null,
+        "sha256": null,
+        "note": "本机为 winlibs 风格 MinGW-W64 16.1.0；用 MSYS2 pacman 或 winlibs 安装同版本，再把整个 bin 目录放进 tools/toolchains/host-gcc/bin"
+      },
+      "files": [
+        {
+          "path": "bin/gcc.exe",
+          "sha256": "E8534323DC63B8D18B83573769256D842EA98499E15A8E648AF454D086E529BC"
+        }
+      ]
+    }
+  }
+}

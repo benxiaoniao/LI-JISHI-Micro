@@ -17,6 +17,10 @@
 /dist/
 .screenshots/
 
+# 本地工具链（体积大，不入库；由 tools/fetch-toolchain.ps1 安装）
+/tools/toolchains/arm-none-eabi/
+/tools/toolchains/host-gcc/
+
 # 编辑器
 .vscode/
 .idea/
