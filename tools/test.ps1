@@ -19,14 +19,14 @@ try {
             $fail++
             return
         }
-        $actual = (& $jmrun $jmb 2>&1 | Out-String).TrimEnd()
+        $actual = ((& $jmrun $jmb 2>&1 | Out-String).TrimEnd() -replace "`r`n", "`n")
         $gold = "tests\expected\" + $name + ".txt"
         if (-not (Test-Path $gold)) {
             Write-Host ("[缺少基准] " + $name + " —— 把实际输出存进 " + $gold)
             $fail++
             return
         }
-        $want = (Get-Content $gold -Raw -Encoding UTF8).TrimEnd()
+        $want = ((Get-Content $gold -Raw -Encoding UTF8).TrimEnd() -replace "`r`n", "`n")
         if ($actual -eq $want) {
             Write-Host ("[通过] " + $name)
         } else {

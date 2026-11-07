@@ -1211,7 +1211,7 @@ pub fn check() -> Result<(), String> {
     let want_json = render_json()?;
     let want_md = render_markdown()?;
 
-    let got_json = read_or_fail(&json_path, "语言卡 JSON")?;
+    let got_json = read_or_fail(&json_path, "语言卡 JSON")?.replace("\r\n", "\n");
     if got_json != want_json {
         return Err(format!(
             "{} 与规范来源不一致：{}\n请运行 micc --langcard 重新生成",
@@ -1219,7 +1219,7 @@ pub fn check() -> Result<(), String> {
             first_diff(&want_json, &got_json)
         ));
     }
-    let got_md = read_or_fail(&md_path, "语言卡 Markdown")?;
+    let got_md = read_or_fail(&md_path, "语言卡 Markdown")?.replace("\r\n", "\n");
     if got_md != want_md {
         return Err(format!(
             "{} 与规范来源不一致：{}\n请运行 micc --langcard 重新生成",

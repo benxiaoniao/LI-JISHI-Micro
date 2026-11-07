@@ -1,0 +1,92 @@
+# 砾（LI）持续集成
+#
+# 覆盖范围（缺硬件，以下只能在开发机做）：
+#   - ST-LINK 烧录与真机启动（tools/flash-firmware.ps1）
+#   - 串口采集与实机时序（tools/capture-serial.ps1）
+#   - ADC / PWM / 定时器的电气行为、20 KB SRAM 的真实运行余量
+# CI 只验证：主机编译与全部回归、规范防漂移、交叉编译产物、静态体积对比。
+#
+# 环境说明：
+#   - windows-latest，PowerShell 7（pwsh），避免 Windows PowerShell 5.1
+#     读取无 BOM 的 UTF-8 脚本时把中文参数/路径读坏。
+#   - 主机 gcc 由 MSYS2 提供，版本与开发机锁定的 winlibs 未必一致；
+#     tools/toolchains.ps1 被 dot-source 时只记录 [问题] 不退出，构建与回归才是门禁。
+#   - arm-none-eabi 走 tools/fetch-toolchain.ps1，按 toolchain.lock.json 的
+#     sha256 校验，装到 %LOCALAPPDATA%\jishi\toolchains\arm-none-eabi（纯 ASCII 路径）。
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: 主机构建 / 回归 / 固件 / 体积
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: 检出
+        uses: actions/checkout@v4
+
+      - name: 安装 Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: 安装主机 gcc（MSYS2 MinGW-w64）
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: false
+          install: mingw-w64-x86_64-gcc
+          path-type: inherit
+
+      - name: 缓存 arm-none-eabi 工具链
+        uses: actions/cache@v4
+        with:
+          path: C:\Users\runneradmin\AppData\Local\jishi\toolchains\arm-none-eabi
+          key: arm-none-eabi-${{ hashFiles('tools/toolchains/toolchain.lock.json') }}
+
+      - name: 安装 arm-none-eabi 工具链
+        shell: pwsh
+        run: |
+          $dir = Join-Path $env:LOCALAPPDATA "jishi\toolchains\arm-none-eabi"
+          if (-not (Test-Path $dir)) {
+            ./tools/fetch-toolchain.ps1
+          } else {
+            Write-Host "工具链来自缓存：$dir"
+          }
+
+      - name: 主机构建 + 全部回归 + 规范校验
+        shell: pwsh
+        run: |
+          [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+          ./tools/build.ps1
+          ./compiler/target/release/micc.exe --check-langcard
+          ./compiler/target/release/micc.exe --check-native
+
+      - name: 固件交叉编译（类示例，整包最大）
+        shell: pwsh
+        run: ./tools/build-firmware.ps1 -Example 类
+
+      - name: 体积报告（对比入库基线）
+        shell: pwsh
+        run: ./tools/size-report.ps1 -Label "类示例"
+
+      - name: 上传固件与体积快照
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-size
+          path: |
+            build/stm32/jishim.elf
+            build/stm32/jishim.bin
+            build/stm32/jishim.hex
+            build/stm32/jishim.map
+            build/stm32/size-report.json
+          if-no-files-found: warn
