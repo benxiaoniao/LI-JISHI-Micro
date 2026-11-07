@@ -1,4 +1,5 @@
 #include "jm_internal.h"
+#include "jm_native.h"
 
 static const char *msg_for(int code) {
     switch (code) {
@@ -28,6 +29,11 @@ static const char *msg_for(int code) {
     case E_POW: return "幂指数非法";
     case E_IMPORT: return "模块导入尚未支持";
     case E_FILE: return "字节码文件有误";
+    case JM_NE_PARAM: return "原生函数参数非法";
+    case JM_NE_TYPE: return "原生函数参数类型不符";
+    case JM_NE_HW: return "硬件操作失败";
+    case JM_NE_STATE: return "原生函数状态错误";
+    case JM_NE_NOMEM: return "原生函数内存不足";
     default: return "未知错误";
     }
 }

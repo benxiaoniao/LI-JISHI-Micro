@@ -9,7 +9,10 @@
 #include "jm_opcodes.h"
 #include "jm_port.h"
 
+#ifndef JM_VALUE_TYPE_DEFINED
 typedef uint32_t JmValue;
+#define JM_VALUE_TYPE_DEFINED 1
+#endif
 
 /* ---------------- 值：4 字节，低 3 位标签 ---------------- */
 #define JM_TAG_INT 0u
@@ -218,6 +221,12 @@ int jm_builtin_call(JmState *st, uint8_t id, JmValue *args, uint8_t nargs,
                     JmValue *out);
 void jm_builtin_install(JmState *st);
 int jm_type_name(JmValue v, const char **name);
+
+/* ---------------- 原生函数表（Native ABI v1，公开头见 jm_native.h） ---------------- */
+#define JM_NATIVE_ID_BASE 64u   /* 内建 id 0..63；原生函数从 64 起，最多 64 个 */
+int jm_native_bind_name(JmState *st, uint8_t name_idx, const char *name);
+int jm_native_call(JmState *st, uint8_t id, JmValue *args, uint8_t nargs,
+                   JmValue *out);
 
 /* 输出值的显示形式；quoted=1 时文本带引号（容器内规则） */
 typedef int (*JmSink)(void *ctx, const char *s, uint32_t n);
