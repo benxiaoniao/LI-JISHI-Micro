@@ -22,6 +22,8 @@ pub struct Unit {
     pub globals: HashSet<String>,
     pub classes: HashSet<String>,
     pub exports: Option<HashSet<String>>,
+    /// 入口源文件（调试表的显示名）。
+    pub file: String,
 }
 
 impl Unit {
@@ -30,6 +32,7 @@ impl Unit {
         is_root: bool,
         stmts: Vec<Stmt>,
         exports: Option<Vec<String>>,
+        file: String,
     ) -> Unit {
         let mut globals = HashSet::new();
         let mut classes = HashSet::new();
@@ -41,6 +44,7 @@ impl Unit {
             globals,
             classes,
             exports: exports.map(|v| v.into_iter().collect()),
+            file,
         }
     }
 
@@ -445,8 +449,15 @@ fn local_decls(stmts: &[Stmt]) -> Vec<String> {
     out
 }
 
+/// 合并结果：语句表 + 调试源文件表 + 顶层语句到 `file_id` 的区间。
+pub struct Merged {
+    pub stmts: Vec<Stmt>,
+    pub files: Vec<String>,
+    pub spans: Vec<(usize, usize, u8)>,
+}
+
 /// 对全部单元做改名，返回按「依赖在前、根包在后」拼好的语句表。
-pub fn merge(units: &mut Vec<Unit>) -> Result<Vec<Stmt>> {
+pub fn merge(units: &mut Vec<Unit>) -> Result<Merged> {
     let views: HashMap<String, DepView> = units
         .iter()
         .filter(|u| !u.is_root)
@@ -466,10 +477,20 @@ pub fn merge(units: &mut Vec<Unit>) -> Result<Vec<Stmt>> {
     }
 
     let mut out = Vec::new();
+    let mut files = Vec::new();
+    let mut spans = Vec::new();
     for u in units.iter() {
+        let start = out.len();
         out.extend(u.stmts.iter().cloned());
+        let file_id = files.len() as u8;
+        files.push(u.file.clone());
+        spans.push((start, out.len(), file_id));
     }
-    Ok(out)
+    Ok(Merged {
+        stmts: out,
+        files,
+        spans,
+    })
 }
 
 /// 静态堆下界估计（字节）：列表/字典字面量 + 新建实例。

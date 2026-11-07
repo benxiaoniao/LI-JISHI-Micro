@@ -21,7 +21,7 @@ PC 上：  .jsh 源码 ──micc──▶  .jmb 微字节码
 | 组成 | 内容 |
 |------|------|
 | 编译器 `micc` | Rust 实现，`.jsh → .jmb`；词法（中文标识符 / 全角归一化 / 4 空格缩进）、语法、作用域、代码生成、反汇编（`--dump`） |
-| 字节码 | `.jmb`（JMB v4），变长指令 1/2/3 字节，4 字节值 + 29 位整数；小数是 Q12 定点堆对象；闭包是带捕获表的堆对象；异常用 `TRY/TRY_END/THROW`；类表（字段/方法名与 `初始化` 代码）随包存放 |
+| 字节码 | `.jmb`（JMB v4），变长指令 1/2/3 字节，4 字节值 + 29 位整数；小数是 Q12 定点堆对象；闭包是带捕获表的堆对象；异常用 `TRY/TRY_END/THROW`；类表（字段/方法名与 `初始化` 代码）随包存放；文件尾可选语句级调试段（可剥离） |
 | 运行时 `libjishim` | C99、零依赖：`jm_loader`（读包）/ `jm_heap`（静态堆 + 引用计数）/ `jm_vm`（栈机）/ `jm_builtin`（内建）/ `jm_native`（原生绑定）/ `jm_error`（错误码） |
 | 语言能力 | `令`/赋值/复合赋值、`如果/否则如果/否则`、`当`、`循环 N 次`、`遍历`、`中断/继续`、`函数/返回/递归`、闭包（值捕获、只读）、`抛出/尝试/捕获`、类（`类`/`新建`/`本`/字段与方法，无继承）；列表、字典、文本（UTF-8 码点）、小数（Q12 定点） |
 | 内建 | `打印 文本 整数 小数 长度 范围 类型 总和 最大 最小 绝对值` |
@@ -57,10 +57,11 @@ powershell -ExecutionPolicy Bypass -File tools\build.ps1
 ```
 
 脚本依次做：构建 `micc` → 校验原生表头 → 生成 `runtime/include/jm_opcodes.h` →
-构建 `build\jmrun.exe` → 编译 `examples\*.jsh` → 跑四套回归
+构建 `build\jmrun.exe` → 编译 `examples\*.jsh` → 跑五套回归
 （[test.ps1](tools/test.ps1) 输出用例、[test-errors.ps1](tools/test-errors.ps1) 错误码用例、
 [test-native-import.ps1](tools/test-native-import.ps1) 原生导入用例、
-[test-packages.ps1](tools/test-packages.ps1) 包用例）。
+[test-packages.ps1](tools/test-packages.ps1) 包用例、
+[test-debug.ps1](tools/test-debug.ps1) 调试表用例）。
 只想构建不跑回归时加 `-SkipTests`。
 
 单独编译/运行/反汇编：
@@ -97,7 +98,30 @@ compiler\target\release\micc.exe --emit-native-header
 规范来源：操作码在 [compiler/src/opcodes.rs](compiler/src/opcodes.rs)，板级原生函数在
 [compiler/src/native_spec.rs](compiler/src/native_spec.rs)，内建与错误码在运行时 C 侧。
 
-### 2.4 源码包（H4 最小切分）
+### 2.4 调试信息（JM10）
+
+默认编译在 `.jmb` 末尾追加语句级调试段（`flags` 的 bit0 = 1），记录「代码对象偏移 → 源文件:行」：
+
+```powershell
+# 指令位置 → 文件:行
+compiler\target\release\micc.exe --line-of build\类.jmb 5 42
+# 源码行 → 该行对应的指令范围（可跨代码对象）
+compiler\target\release\micc.exe --lines-of build\类.jmb examples\类.jsh 20
+compiler\target\release\micc.exe --lines-of build\类.jmb "*" 20
+# 查看文件表、代码目录与全部行记录
+compiler\target\release\micc.exe --debug-dump build\类.jmb
+
+# 发布/烧录时剥离：去掉整段并把 flags.bit0 清零
+compiler\target\release\micc.exe examples\类.jsh --strip-debug -o build\类-发布.jmb
+```
+
+- 体积上限只按**剥离调试段后**的长度计算（E111 / E130），调试段单独报数，自身超过 64 KB 报 E131。
+- 加载器与固件**默认不解析**该段；旧文件、剥离文件、损坏段一律按「无调试信息」处理，不影响运行。
+- 编译器成功输出会同时给出 `剥离调试段后 M 字节，调试段 K 字节`。
+- 格式与取舍见 [docs/JMB调试表设计.md](docs/JMB调试表设计.md)，字节码层约定见
+  [docs/微字节码规格.md](docs/微字节码规格.md) 的「2.7 尾部可选调试段」。
+
+### 2.5 源码包（H4 最小切分）
 
 `砾包.toml` 声明包，`micc pack` 递归解析依赖并在源码层合并成一个 `.jmb`；
 `micc install` 生成 `.砾/锁.toml` 与 `.砾/包` 缓存，`--离线` 只读锁与缓存。
@@ -165,6 +189,7 @@ compiler/                  Rust 编译器 micc
   src/langcard.rs            语言卡生成器
   src/error.rs               编译期错误码与文案
   src/writer.rs              .jmb 写出与反汇编
+  src/debug.rs               .jmb 调试段解析与行号双向查询
 runtime/                   C99 运行时（不依赖 HAL，可移植）
   include/                   jishim.h / jm_native.h / jm_port.h / jm_opcodes.h（生成）
   src/                       vm / heap / builtin / loader / native / error
@@ -188,13 +213,16 @@ docs/                      路径图、字节码规格、原生函数表、调�
 
 | 脚本 | 用途 |
 |------|------|
-| [tools/build.ps1](tools/build.ps1) | 主机构建 + 三套回归（`-SkipTests` 跳过回归） |
+| [tools/build.ps1](tools/build.ps1) | 主机构建 + 五套回归（`-SkipTests` 跳过回归） |
 | [tools/build-firmware.ps1](tools/build-firmware.ps1) | 交叉编译固件（`-Example 名字` 切换示例） |
 | [tools/flash-firmware.ps1](tools/flash-firmware.ps1) | SWD 烧录（默认预览，`-Apply` 才写） |
 | [tools/capture-serial.ps1](tools/capture-serial.ps1) | 串口录制到 `build\uart\`（`-Port` / `-Seconds` / `-Out`） |
 | [tools/test.ps1](tools/test.ps1) | 输出回归（逐字节对比 `tests\expected`） |
 | [tools/test-errors.ps1](tools/test-errors.ps1) | 错误码回归（E004 / E007 / E009 / E013 / E023 / E027 / E028 / E035 / E036 / E037 / E102 / E103 / E117 / E118 / E120 / E121 / E122 / E123） |
 | [tools/test-native-import.ps1](tools/test-native-import.ps1) | 原生导入回归（引脚 / ADC / 定时器各三类错误 + 正确用例） |
+| [tools/test-packages.ps1](tools/test-packages.ps1) | 包用例回归（单包/双包/菱形/离线/预算等） |
+| [tools/test-debug.ps1](tools/test-debug.ps1) | 调试表回归（双向查询/跨函数/跨包/剥离/损坏/旧文件） |
+| [tools/size-report.ps1](tools/size-report.ps1) | 固件 Flash/RAM 体积报告与基线对比（`-Label` 命名，`-UpdateBaseline` 更新基线） |
 | [tools/toolchains.ps1](tools/toolchains.ps1) | 工具链定位与版本自检 |
 | [tools/fetch-toolchain.ps1](tools/fetch-toolchain.ps1) | 按锁文件下载并校验 ARM 工具链 |
 

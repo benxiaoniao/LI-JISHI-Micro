@@ -21,12 +21,14 @@ struct Opts {
     dir: PathBuf,
     out: Option<PathBuf>,
     offline: bool,
+    strip_debug: bool,
 }
 
 fn parse_opts(args: &[String], allow_out: bool) -> Result<Opts> {
     let mut dir = PathBuf::from(".");
     let mut out = None;
     let mut offline = false;
+    let mut strip_debug = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -45,12 +47,18 @@ fn parse_opts(args: &[String], allow_out: bool) -> Result<Opts> {
                 out = Some(PathBuf::from(&args[i]));
             }
             "--离线" | "--offline" => offline = true,
+            "--strip-debug" => strip_debug = true,
             "-h" | "--help" => return Err(usage_err("micc pack / micc install")),
             other => return Err(usage_err(format!("不认识的参数：{}", other))),
         }
         i += 1;
     }
-    Ok(Opts { dir, out, offline })
+    Ok(Opts {
+        dir,
+        out,
+        offline,
+        strip_debug,
+    })
 }
 
 fn usage_err(msg: impl Into<String>) -> CompileError {
@@ -89,6 +97,7 @@ fn do_pack(args: &[String]) -> Result<()> {
             false,
             stmts,
             dep.manifest.exports.clone(),
+            entry_display(dep),
         );
         pack_merge::check_dependency_top_level(&unit)?;
         if let Some(exports) = &unit.exports {
@@ -114,13 +123,14 @@ fn do_pack(args: &[String]) -> Result<()> {
         true,
         root_stmts,
         None,
+        entry_display(&tree.root),
     ));
 
     let native_union = check_native(&tree)?;
 
     let merged = pack_merge::merge(&mut units)?;
     let mut imports: HashSet<String> = HashSet::new();
-    pack_merge::collect_imports(&merged, &mut imports);
+    pack_merge::collect_imports(&merged.stmts, &mut imports);
     for m in &imports {
         if !native_union.contains(m) {
             return Err(CompileError::new(
@@ -139,10 +149,14 @@ fn do_pack(args: &[String]) -> Result<()> {
         }
     }
 
-    let prog = codegen::compile(&merged)?;
+    let prog = codegen::compile(
+        &merged.stmts,
+        merged.files.clone(),
+        &merged.spans,
+    )?;
 
-    let class_fields = pack_merge::class_field_counts(&merged);
-    let heap = pack_merge::heap_estimate(&merged, &class_fields);
+    let class_fields = pack_merge::class_field_counts(&merged.stmts);
+    let heap = pack_merge::heap_estimate(&merged.stmts, &class_fields);
     let budget = tree.root.manifest.heap_budget as u64;
     if heap * 100 > budget * HEAP_USE_PERCENT {
         return Err(CompileError::new(
@@ -159,17 +173,17 @@ fn do_pack(args: &[String]) -> Result<()> {
         ));
     }
 
-    let bytes = writer::write(&prog)?;
+    let enc = writer::write(&prog, !opts.strip_debug)?;
+    // 上限守的是进芯片的体积：调试段在烧录前会被剥掉，不计入。
     let limit = tree.root.manifest.bytecode_limit.min(65535);
-    if bytes.len() > limit {
+    if enc.base_len > limit {
         return Err(CompileError::new(
             "E130",
             1,
             1,
             format!(
-                "打包后 .jmb 为 {} B，超过 [包] 字节码上限 {} B",
-                bytes.len(),
-                limit
+                "打包后 .jmb 为 {} B（剥离调试段后），超过 [包] 字节码上限 {} B",
+                enc.base_len, limit
             ),
         ));
     }
@@ -185,7 +199,7 @@ fn do_pack(args: &[String]) -> Result<()> {
             })?;
         }
     }
-    std::fs::write(&out_path, &bytes)
+    std::fs::write(&out_path, &enc.bytes)
         .map_err(|e| usage_err(format!("写不了 {}：{}", out_path.display(), e)))?;
 
     println!(
@@ -212,7 +226,17 @@ fn do_pack(args: &[String]) -> Result<()> {
         prog.codes.len(),
         prog.classes.len()
     );
-    println!("  字节码：{} B（上限 {} B）", bytes.len(), limit);
+    if enc.debug_len > 0 {
+        println!(
+            "  字节码：{} B（剥离调试段后 {} B，上限 {} B；调试段另计 {} B）",
+            enc.bytes.len(),
+            enc.base_len,
+            limit,
+            enc.debug_len
+        );
+    } else {
+        println!("  字节码：{} B（无调试段，上限 {} B）", enc.bytes.len(), limit);
+    }
     println!(
         "  堆下界估计：{} B（预算 {} B，允许 {} B）",
         heap,
@@ -242,6 +266,15 @@ fn load_tree(opts: &Opts) -> Result<Tree> {
     } else {
         pack_resolve::resolve_online(&opts.dir)
     }
+}
+
+/// 调试表里的源文件名：尽量相对当前目录，统一用 `/`。
+fn entry_display(pkg: &Resolved) -> String {
+    let path = pkg.dir.join(&pkg.manifest.entry);
+    let abs = path.canonicalize().unwrap_or(path);
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let rel = abs.strip_prefix(&cwd).unwrap_or(&abs);
+    rel.to_string_lossy().replace('\\', "/")
 }
 
 fn parse_entry(pkg: &Resolved) -> Result<Vec<crate::ast::Stmt>> {

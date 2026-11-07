@@ -15,6 +15,13 @@ pub enum ConstVal {
     False,
 }
 
+/// 语句级调试标记：指令流偏移 → 源码行号。
+#[derive(Clone, Copy, Debug)]
+pub struct Mark {
+    pub off: u32,
+    pub line: u32,
+}
+
 #[derive(Debug)]
 pub struct CodeObj {
     pub name_idx: u8,
@@ -23,6 +30,10 @@ pub struct CodeObj {
     pub code: Vec<u8>,
     /// 闭包捕获表：`(父帧槽, 子帧槽)`，按出现顺序排列。
     pub caps: Vec<(u8, u8)>,
+    /// 本代码对象所属源文件（调试表 `file_id`）。
+    pub file_id: u8,
+    /// 语句开始处的（偏移, 行号），按偏移严格递增。
+    pub marks: Vec<Mark>,
 }
 
 #[derive(Debug)]
@@ -42,6 +53,8 @@ pub struct Program {
     pub codes: Vec<CodeObj>,
     pub classes: Vec<ClassObj>,
     pub entry: u8,
+    /// 源文件表，下标即 `file_id`；写入调试段。
+    pub files: Vec<String>,
 }
 
 /// 名字表溢出时按 `包名::` 前缀统计占用（单文件编译没有前缀，算「入口包」）。
@@ -246,6 +259,10 @@ struct FnState {
     self_blocked: bool,
     /// 当前帧是 `初始化`：禁止显式 `返回`（E120）。
     in_init: bool,
+    /// 当前语句所属的源文件（调试表 `file_id`）。
+    file_id: u8,
+    /// 语句级调试标记（偏移 → 行号）。
+    marks: Vec<Mark>,
 }
 
 impl FnState {
@@ -263,6 +280,21 @@ impl FnState {
     }
     fn here(&self) -> usize {
         self.code.len()
+    }
+    /// 记一条语句级调试标记。同一偏移只保留最后一次（前面的语句没有生成指令）；
+    /// 同一行连续出现时只留最早一条，减小调试段。
+    fn mark(&mut self, line: u32) {
+        let off = self.code.len() as u32;
+        if let Some(last) = self.marks.last_mut() {
+            if last.off == off {
+                last.line = line;
+                return;
+            }
+            if last.line == line {
+                return;
+            }
+        }
+        self.marks.push(Mark { off, line });
     }
     fn jump(&mut self, op: u8) -> usize {
         let at = self.code.len() + 1;
@@ -635,7 +667,20 @@ fn collect_free_stmts(stmts: &[Stmt], bound: &HashSet<String>, out: &mut Vec<Str
     }
 }
 
-pub fn compile(stmts: &[Stmt]) -> Result<Program> {
+/// 顶层语句下标 → 源文件（`spans` 是合并时记录的 `[起, 止, file_id]`）。
+fn file_at(spans: &[(usize, usize, u8)], i: usize) -> u8 {
+    spans
+        .iter()
+        .find(|(a, b, _)| i >= *a && i < *b)
+        .map(|(_, _, f)| *f)
+        .unwrap_or(0)
+}
+
+pub fn compile(
+    stmts: &[Stmt],
+    files: Vec<String>,
+    spans: &[(usize, usize, u8)],
+) -> Result<Program> {
     // 先汇总顶层导入：`导入 模块` 是纯编译期声明，不生成字节码，
     // 但模块里的原生名字会进入本文件的名字作用域（供静态检查）。
     let mut imported: HashSet<String> = HashSet::new();
@@ -664,10 +709,12 @@ pub fn compile(stmts: &[Stmt]) -> Result<Program> {
         nlocals: 0,
         code: Vec::new(),
         caps: Vec::new(),
+        file_id: 0,
+        marks: Vec::new(),
     });
 
     // 类先于模块代码编译：类表要在 `新建` 之前完整，方法体也独立成代码对象。
-    compile_classes(&mut b, stmts, &imported)?;
+    compile_classes(&mut b, stmts, &imported, spans)?;
 
     let mut fs = FnState {
         code: Vec::new(),
@@ -685,18 +732,24 @@ pub fn compile(stmts: &[Stmt]) -> Result<Program> {
         current_class: None,
         self_blocked: false,
         in_init: false,
+        file_id: spans.last().map(|s| s.2).unwrap_or(0),
+        marks: Vec::new(),
     };
+    fs.mark(stmts.first().map(|s| s.line).unwrap_or(1));
 
     // 顶层导入已校验；其余语句照常编译。嵌套的「导入」由 compile_stmt 拒绝。
-    for s in stmts {
+    for (si, s) in stmts.iter().enumerate() {
         if matches!(s.kind, StmtKind::Import(_)) {
             continue;
         }
+        fs.file_id = file_at(spans, si);
         compile_stmt(&mut fs, &mut b, s)?;
     }
     fs.emit(OP_HALT);
 
     b.codes[0].nlocals = fs.nlocals;
+    b.codes[0].file_id = fs.file_id;
+    b.codes[0].marks = fs.marks;
     b.codes[0].code = fs.code;
 
     Ok(Program {
@@ -705,10 +758,16 @@ pub fn compile(stmts: &[Stmt]) -> Result<Program> {
         codes: b.codes,
         classes: b.classes,
         entry: 0,
+        files,
     })
 }
 
-fn compile_classes(b: &mut Builder, stmts: &[Stmt], imported: &HashSet<String>) -> Result<()> {
+fn compile_classes(
+    b: &mut Builder,
+    stmts: &[Stmt],
+    imported: &HashSet<String>,
+    spans: &[(usize, usize, u8)],
+) -> Result<()> {
     // 顶层名字（类名不能与它们重名）。
     let mut top = HashSet::new();
     for s in stmts {
@@ -724,8 +783,8 @@ fn compile_classes(b: &mut Builder, stmts: &[Stmt], imported: &HashSet<String>) 
     }
 
     // 第一遍：分配类下标（类名全局唯一）。
-    let mut decls: Vec<&ClassDecl> = Vec::new();
-    for s in stmts {
+    let mut decls: Vec<(&ClassDecl, u8)> = Vec::new();
+    for (si, s) in stmts.iter().enumerate() {
         if let StmtKind::Class(c) = &s.kind {
             if top.contains(&c.name) {
                 return Err(CompileError::new(
@@ -753,12 +812,12 @@ fn compile_classes(b: &mut Builder, stmts: &[Stmt], imported: &HashSet<String>) 
                 fields: Vec::new(),
                 methods: Vec::new(),
             });
-            decls.push(c);
+            decls.push((c, file_at(spans, si)));
         }
     }
 
     // 第二遍：类名 / 字段名 / 方法名进全局名字表，并做类内唯一性检查。
-    for (ci, c) in decls.iter().enumerate() {
+    for (ci, (c, _)) in decls.iter().enumerate() {
         let name_idx = b.intern_name(&c.name, 1, 1)?;
         b.classes[ci].name_idx = name_idx;
         if c.fields.len() > 255 || c.methods.len() > 255 {
@@ -801,7 +860,7 @@ fn compile_classes(b: &mut Builder, stmts: &[Stmt], imported: &HashSet<String>) 
     }
 
     // 第三遍：编译方法体与合成的初始化代码对象。
-    for (ci, c) in decls.iter().enumerate() {
+    for (ci, (c, fid)) in decls.iter().enumerate() {
         let ci = ci as u8;
         for m in &c.methods {
             if m.name == "初始化" {
@@ -811,10 +870,10 @@ fn compile_classes(b: &mut Builder, stmts: &[Stmt], imported: &HashSet<String>) 
             // 先占位登记名字，后面的方法才能静态看到前面的方法（E122 检查要用）。
             let slot = b.classes[ci as usize].methods.len();
             b.classes[ci as usize].methods.push((midx, 0));
-            let code = compile_method(b, ci, midx, &m.params, &m.body, imported, m.line)?;
+            let code = compile_method(b, ci, midx, &m.params, &m.body, imported, m.line, *fid)?;
             b.classes[ci as usize].methods[slot].1 = code;
         }
-        let init_code = compile_class_init(b, c, ci, imported)?;
+        let init_code = compile_class_init(b, c, ci, imported, *fid)?;
         b.classes[ci as usize].init_code = init_code;
     }
     Ok(())
@@ -829,6 +888,7 @@ fn compile_method(
     body: &[Stmt],
     imported: &HashSet<String>,
     line: u32,
+    file_id: u8,
 ) -> Result<u8> {
     let idx = b.codes.len();
     if idx >= 255 {
@@ -841,6 +901,8 @@ fn compile_method(
         nlocals: params.len() as u8 + 1,
         code: Vec::new(),
         caps: Vec::new(),
+        file_id,
+        marks: Vec::new(),
     });
 
     let mut fs = FnState {
@@ -859,7 +921,10 @@ fn compile_method(
         current_class: Some(class_idx),
         self_blocked: false,
         in_init: false,
+        file_id,
+        marks: Vec::new(),
     };
+    fs.mark(line);
     fs.slots.insert("本".to_string(), 0);
 
     for (i, p) in params.iter().enumerate() {
@@ -896,6 +961,7 @@ fn compile_method(
 
     b.codes[idx as usize].nlocals = fs.nlocals;
     b.codes[idx as usize].caps = fs.caps;
+    b.codes[idx as usize].marks = fs.marks;
     b.codes[idx as usize].code = fs.code;
     Ok(idx)
 }
@@ -906,6 +972,7 @@ fn compile_class_init(
     c: &ClassDecl,
     class_idx: u8,
     imported: &HashSet<String>,
+    file_id: u8,
 ) -> Result<u8> {
     let user = c.methods.iter().find(|m| m.name == "初始化");
     let params: Vec<String> = user.map(|m| m.params.clone()).unwrap_or_default();
@@ -922,6 +989,8 @@ fn compile_class_init(
         nlocals: params.len() as u8 + 1,
         code: Vec::new(),
         caps: Vec::new(),
+        file_id,
+        marks: Vec::new(),
     });
 
     let mut fs = FnState {
@@ -940,7 +1009,10 @@ fn compile_class_init(
         current_class: Some(class_idx),
         self_blocked: false,
         in_init: true,
+        file_id,
+        marks: Vec::new(),
     };
+    fs.mark(user.map(|m| m.line).unwrap_or(1));
     fs.slots.insert("本".to_string(), 0);
 
     for (i, p) in params.iter().enumerate() {
@@ -995,10 +1067,12 @@ fn compile_class_init(
 
     b.codes[idx as usize].nlocals = fs.nlocals;
     b.codes[idx as usize].caps = fs.caps;
+    b.codes[idx as usize].marks = fs.marks;
     b.codes[idx as usize].code = fs.code;
     Ok(idx)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn compile_function(
     b: &mut Builder,
     name: &str,
@@ -1009,6 +1083,7 @@ fn compile_function(
     current_class: Option<u8>,
     line: u32,
     col: u32,
+    file_id: u8,
 ) -> Result<u8> {
     let idx = b.codes.len();
     if idx >= 255 {
@@ -1022,6 +1097,8 @@ fn compile_function(
         nlocals: params.len() as u8,
         code: Vec::new(),
         caps: Vec::new(),
+        file_id,
+        marks: Vec::new(),
     });
 
     let mut fs = FnState {
@@ -1040,7 +1117,10 @@ fn compile_function(
         current_class,
         self_blocked: false,
         in_init: false,
+        file_id,
+        marks: Vec::new(),
     };
+    fs.mark(line);
 
     for (i, p) in params.iter().enumerate() {
         if native_spec::entry(p).is_some() {
@@ -1078,6 +1158,7 @@ fn compile_function(
 
     b.codes[idx as usize].nlocals = fs.nlocals;
     b.codes[idx as usize].caps = fs.caps;
+    b.codes[idx as usize].marks = fs.marks;
     b.codes[idx as usize].code = fs.code;
     Ok(idx)
 }
@@ -1090,6 +1171,7 @@ fn compile_stmts(fs: &mut FnState, b: &mut Builder, stmts: &[Stmt]) -> Result<()
 }
 
 fn compile_stmt(fs: &mut FnState, b: &mut Builder, s: &Stmt) -> Result<()> {
+    fs.mark(s.line);
     match &s.kind {
         StmtKind::Import(_) => {
             return Err(CompileError::new(
@@ -1311,6 +1393,7 @@ fn compile_stmt(fs: &mut FnState, b: &mut Builder, s: &Stmt) -> Result<()> {
                 fs.current_class,
                 s.line,
                 1,
+                fs.file_id,
             )?;
             if b.codes[idx as usize].caps.is_empty() {
                 fs.emit_u8(OP_MAKE_FUNCTION, idx);

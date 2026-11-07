@@ -34,8 +34,8 @@ try {
     & $micc --check-native
     if ($LASTEXITCODE -ne 0) { throw "原生表头与规格不一致" }
 
-    Write-Host "== 3/6 编译示例为 .jmb"
-    & $micc ("examples\" + $Example + ".jsh") -o "$out\app.jmb" | Out-Null
+    Write-Host "== 3/6 编译示例为 .jmb（剥离调试段，烧录不占 Flash）"
+    & $micc ("examples\" + $Example + ".jsh") -o "$out\app.jmb" --strip-debug | Out-Null
     if ($LASTEXITCODE -ne 0) { throw ("编译失败：" + $Example + ".jsh") }
 
     Write-Host "== 4/6 生成内嵌字节数组"

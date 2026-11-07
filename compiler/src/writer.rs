@@ -1,4 +1,4 @@
-use crate::codegen::{ConstVal, Program};
+﻿use crate::codegen::{ConstVal, Program};
 use crate::error::{CompileError, Result};
 use crate::opcodes::*;
 
@@ -17,7 +17,140 @@ const CAP_ENTRY: usize = 2;
 /// JMB v4：类记录每项 8 字节。
 const CLASS_REC: usize = 8;
 
-pub fn write(prog: &Program) -> Result<Vec<u8>> {
+/// 编码结果：`bytes` 是最终文件（可能含调试段），
+/// `base_len` 是剥离调试段后的长度（体积上限按它算），`debug_len` 是调试段字节数。
+pub struct Encoded {
+    pub bytes: Vec<u8>,
+    pub base_len: usize,
+    pub debug_len: usize,
+}
+
+fn put_var(v: u16, out: &mut Vec<u8>) {
+    if v < 255 {
+        out.push(v as u8);
+    } else {
+        out.push(255);
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+}
+
+/// 有符号增量 → zigzag 无符号（-1→1，+1→2）。
+fn zigzag(d: i32) -> u16 {
+    (((d << 1) ^ (d >> 31)) & 0xffff) as u16
+}
+
+fn push_name(pool: &mut Vec<u8>, name: &str) -> Result<u16> {
+    let off = pool.len();
+    if off > 65535 {
+        return Err(CompileError::new(
+            "E131",
+            1,
+            1,
+            "调试段的文件名池超过 64KB",
+        ));
+    }
+    pool.extend_from_slice(name.as_bytes());
+    pool.push(0);
+    Ok(off as u16)
+}
+
+/// 生成尾部可选调试段（不含 6 B 尾索引）。`p5.bit0` 由调用方置位。
+fn encode_debug(prog: &Program) -> Result<Option<Vec<u8>>> {
+    let files: Vec<&str> = if prog.files.is_empty() {
+        vec!["<未知>"]
+    } else {
+        prog.files.iter().map(|s| s.as_str()).collect()
+    };
+    if files.len() > 255 || prog.codes.len() > 255 {
+        return Err(CompileError::new(
+            "E131",
+            1,
+            1,
+            "调试段的文件或代码对象超过 255 个",
+        ));
+    }
+
+    let mut pool = Vec::new();
+    let mut file_offs = Vec::new();
+    for f in &files {
+        file_offs.push(push_name(&mut pool, f)?);
+    }
+
+    // 先编码行记录（偏移相对代码对象起点），再回填代码目录。
+    let mut record_blobs: Vec<Vec<u8>> = Vec::new();
+    for c in &prog.codes {
+        let mut blob = Vec::new();
+        let mut prev_off = 0u32;
+        let mut prev_line = 0u32;
+        for (i, m) in c.marks.iter().enumerate() {
+            if i == 0 {
+                put_var(m.off.min(65535) as u16, &mut blob);
+                put_var(m.line.min(65535) as u16, &mut blob);
+            } else {
+                if m.off < prev_off {
+                    return Err(CompileError::new(
+                        "E131",
+                        1,
+                        1,
+                        "调试标记的偏移倒退（编译器内部错误）",
+                    ));
+                }
+                put_var((m.off - prev_off).min(65535) as u16, &mut blob);
+                let d = m.line as i32 - prev_line as i32;
+                put_var(zigzag(d), &mut blob);
+            }
+            prev_off = m.off;
+            prev_line = m.line;
+        }
+        record_blobs.push(blob);
+    }
+
+    let header_len = 16usize;
+    let file_table_len = 2 * files.len();
+    let code_dir_len = 6 * prog.codes.len();
+    let str_off = header_len + file_table_len + code_dir_len;
+    let mut record_off = str_off + pool.len();
+
+    let mut section = Vec::new();
+    section.extend_from_slice(b"DBG1");
+    section.push(1); // 版本
+    section.push(0); // flags
+    section.push(files.len() as u8);
+    section.push(prog.codes.len() as u8);
+    section.extend_from_slice(&(header_len as u16).to_le_bytes());
+    section.extend_from_slice(&((header_len + file_table_len) as u16).to_le_bytes());
+    section.extend_from_slice(&(str_off as u16).to_le_bytes());
+    section.extend_from_slice(&[0, 0]); // 保留
+
+    for off in &file_offs {
+        section.extend_from_slice(&off.to_le_bytes());
+    }
+
+    for (c, blob) in prog.codes.iter().zip(record_blobs.iter()) {
+        section.extend_from_slice(&(record_off as u16).to_le_bytes());
+        section.extend_from_slice(&(c.marks.len() as u16).to_le_bytes());
+        section.push(c.file_id);
+        section.push(0); // 保留
+        record_off += blob.len();
+    }
+
+    section.extend_from_slice(&pool);
+    for blob in &record_blobs {
+        section.extend_from_slice(blob);
+    }
+
+    if section.len() > 65535 {
+        return Err(CompileError::new(
+            "E131",
+            1,
+            1,
+            "调试段超过 64KB；可用 --strip-debug 剥离后再试",
+        ));
+    }
+    Ok(Some(section))
+}
+
+pub fn write(prog: &Program, with_debug: bool) -> Result<Encoded> {
     let nconsts = prog.consts.len();
     let nnames = prog.names.len();
     let ncodes = prog.codes.len();
@@ -82,11 +215,12 @@ pub fn write(prog: &Program) -> Result<Vec<u8>> {
             "E111",
             1,
             1,
-            ".jmb 超过 64KB（u16 偏移的上限）",
+            ".jmb 超过 64KB（u16 偏移的上限；调试段不计入）",
         ));
     }
 
-    let mut out = Vec::with_capacity(total);
+    let debug = if with_debug { encode_debug(prog)? } else { None };
+    let mut out = Vec::with_capacity(total + debug.as_ref().map(|d| d.len() + 6).unwrap_or(0));
     // 头
     out.extend_from_slice(&MAGIC);
     out.push(VERSION); // version：JMB v4（类表）
@@ -193,7 +327,24 @@ pub fn write(prog: &Program) -> Result<Vec<u8>> {
     }
 
     debug_assert_eq!(out.len(), total);
-    Ok(out)
+
+    let debug_len = match debug {
+        Some(mut d) => {
+            out[5] |= 1; // p5.bit0：带尾部调试段
+            d.extend_from_slice(&(d.len() as u16).to_le_bytes());
+            d.extend_from_slice(b"DBG1");
+            let n = d.len();
+            out.extend_from_slice(&d);
+            n
+        }
+        None => 0,
+    };
+
+    Ok(Encoded {
+        bytes: out,
+        base_len: total,
+        debug_len,
+    })
 }
 
 /// 反汇编（调试用）
