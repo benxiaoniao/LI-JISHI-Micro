@@ -14,6 +14,7 @@ try {
     New-Item -ItemType Directory -Path $sandbox | Out-Null
     $script:fail = 0
     $script:total = 0
+    $script:skip = 0
 
     # 写一个包：砾包.toml + 主.jsh。故意带 UTF-8 BOM，顺带覆盖 BOM 处理。
     function New-Pkg([string]$dir, [string]$toml, [string]$src) {
@@ -620,7 +621,107 @@ try {
     $installCode = $LASTEXITCODE
     Check-Error "索引：哈希不符 → E136" @{ code = $installCode; out = $io } "E136" "不一致"
 
-    Write-Host ("包用例：共 " + $script:total + " 个，失败 " + $script:fail + " 个")
+    # ---------- 23. HTTP 静态索引：真 curl 下载 + tar 解包 + 哈希校验 + 打包运行 ----------
+    # 本机起 python -m http.server；起不来（没有 python / 没端口 / 2 秒内没就绪）就显式跳过，
+    # 不拿本地目录冒充 HTTP 证据。
+    $pyExe = Get-Command python -ErrorAction SilentlyContinue
+    if ($null -eq $pyExe) {
+        Write-Host "[跳过] HTTP 索引：本机没有 python，无法起静态服务"
+        $script:skip++
+    }
+    else {
+        $httpRoot = Join-Path $sandbox "http"
+        $pkgSrc = Join-Path $httpRoot "工具-1.0.0"
+        $toml = @"
+[包]
+名字 = "工具"
+版本 = "1.0.0"
+
+[导出]
+名字 = ["版本"]
+"@
+        $srcHttp = @"
+函数 版本()：
+    返回 "1.0.0"
+"@
+        New-Pkg $pkgSrc $toml $srcHttp
+        $h = Get-PkgHash $pkgSrc
+        Compress-Archive -Path (Join-Path $pkgSrc "*") -DestinationPath (Join-Path $httpRoot "tool-1.0.0.zip") -Force
+        $zipBytes = (Get-Item (Join-Path $httpRoot "tool-1.0.0.zip")).Length
+
+        $port = 0
+        try {
+            $probe = New-Object System.Net.Sockets.TcpListener -ArgumentList @([Net.IPAddress]::Loopback, 0)
+            $probe.Start()
+            $port = $probe.LocalEndpoint.Port
+            $probe.Stop()
+        }
+        catch {
+            Write-Host "[跳过] HTTP 索引：挑不到空闲端口"
+            $script:skip++
+        }
+
+        if ($port -gt 0) {
+            $idxHttp = @"
+索引版本 = 1
+
+[包]
+"工具@1.0.0" = { 来源 = "http://127.0.0.1:$port/tool-1.0.0.zip", 校验 = "$h" }
+"@
+            [IO.File]::WriteAllText((Join-Path $httpRoot "index.toml"), $idxHttp, (New-Object System.Text.UTF8Encoding($false)))
+
+            $srv = $null
+            try {
+                $srv = Start-Process -FilePath $pyExe.Source -ArgumentList @("-m", "http.server", "$port", "--bind", "127.0.0.1", "--directory", $httpRoot) -WindowStyle Hidden -PassThru
+                $ready = $false
+                for ($i = 0; $i -lt 20; $i++) {
+                    Start-Sleep -Milliseconds 250
+                    try {
+                        $c = New-Object System.Net.Sockets.TcpClient
+                        $c.Connect("127.0.0.1", $port)
+                        $c.Close()
+                        $ready = $true
+                        break
+                    }
+                    catch { }
+                }
+                if (-not $ready) {
+                    Write-Host "[跳过] HTTP 索引：静态服务 2 秒内没就绪"
+                    $script:skip++
+                }
+                else {
+                    $appHttp = Join-Path $httpRoot "应用"
+                    $toml = @"
+[包]
+名字 = "应用"
+版本 = "1.0.0"
+
+[依赖]
+工具 = { 版本 = "1.0.0" }
+"@
+                    New-Pkg $appHttp $toml '打印(工具.版本())'
+                    $savedNoProxy = $env:NO_PROXY
+                    $env:NO_PROXY = "127.0.0.1,localhost"
+                    $io = (& $micc install --目录 $appHttp --索引 ("http://127.0.0.1:" + $port + "/index.toml") 2>&1 | Out-String)
+                    $installCode = $LASTEXITCODE
+                    $env:NO_PROXY = $savedNoProxy
+
+                    $lockFile = Join-Path $appHttp ".砾\锁.toml"
+                    $lockText = if (Test-Path $lockFile) { [IO.File]::ReadAllText($lockFile) } else { "<缺少锁文件>" }
+                    $cached = Join-Path $appHttp ".砾\包\工具-1.0.0\主.jsh"
+                    $r = Invoke-Pack $appHttp -Offline
+                    $out = Run-Jmb (Join-Path $appHttp "应用.jmb")
+                    Write-Host ("[信息] HTTP 索引 1 个条目；归档 " + $zipBytes + " 字节；锁文件：" + ($lockText -replace "`r`n", " | "))
+                    Check "HTTP 索引：curl 下载 + tar 解包 + 哈希校验 + 离线打包运行" (($installCode -eq 0) -and ($lockText.Contains('版本 = "1.0.0"')) -and (Test-Path $cached) -and ($r.code -eq 0) -and ($out -eq "1.0.0")) ($io + $r.out + "`n缓存存在：" + (Test-Path $cached) + "`n实际输出：" + $out + "`n锁文件：" + $lockText)
+                }
+            }
+            finally {
+                if ($srv -and -not $srv.HasExited) { Stop-Process -Id $srv.Id -Force }
+            }
+        }
+    }
+
+    Write-Host ("包用例：共 " + $script:total + " 个，失败 " + $script:fail + " 个，跳过 " + $script:skip + " 个")
     if ($script:fail -gt 0) { exit 1 }
     exit 0
 }
