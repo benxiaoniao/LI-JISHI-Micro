@@ -87,8 +87,8 @@ impl Constraint {
 
 #[derive(Clone, Debug)]
 pub struct DepSpec {
-    /// 相对当前包目录的路径（也允许绝对路径）。
-    pub path: String,
+    /// 相对当前包目录的路径（也允许绝对路径）；`None` 表示从静态索引解析。
+    pub path: Option<String>,
     pub constraint: Constraint,
 }
 
@@ -139,7 +139,7 @@ fn read_text(path: &Path) -> Result<String> {
 }
 
 /// 去掉引号外的 `#` 注释。
-fn strip_comment(line: &str) -> &str {
+pub(crate) fn strip_comment(line: &str) -> &str {
     let mut quote: Option<char> = None;
     for (i, ch) in line.char_indices() {
         match quote {
@@ -189,7 +189,7 @@ fn parse_quoted(s: &str) -> Option<(String, usize)> {
     None
 }
 
-enum Val {
+pub(crate) enum Val {
     Str(String),
     Int(i64),
     Arr(Vec<String>),
@@ -280,7 +280,7 @@ fn parse_value(s: &str) -> Option<Val> {
 }
 
 impl Val {
-    fn as_str(self) -> Option<String> {
+    pub(crate) fn as_str(self) -> Option<String> {
         match self {
             Val::Str(s) => Some(s),
             Val::Int(i) => Some(i.to_string()),
@@ -290,7 +290,7 @@ impl Val {
 }
 
 /// 解析 `键 = 值`；键允许中文裸键或引号。
-fn parse_field(s: &str) -> Option<(String, Val)> {
+pub(crate) fn parse_field(s: &str) -> Option<(String, Val)> {
     let s = s.trim();
     let (key, rest) = if s.starts_with('"') || s.starts_with('\'') {
         let (k, used) = parse_quoted(s)?;
@@ -424,9 +424,7 @@ pub fn parse_manifest(path: &Path, text: &str) -> Result<Manifest> {
                         }
                     }
                 }
-                let Some(dep_path) = dep_path else {
-                    return Err(err(path, line_no, format!("依赖「{}」缺少 路径", key)));
-                };
+                // 不写 路径 = 从静态索引解析（H5）；写了就是本地路径依赖。
                 if deps.iter().any(|(n, _)| n == &key) {
                     return Err(err(path, line_no, format!("依赖「{}」重复声明", key)));
                 }

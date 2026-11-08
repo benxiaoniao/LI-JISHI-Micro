@@ -7,6 +7,7 @@ mod lexer;
 mod native_spec;
 mod opcodes;
 mod pack;
+mod pack_index;
 mod pack_manifest;
 mod pack_merge;
 mod pack_resolve;
@@ -21,7 +22,8 @@ use std::process::exit;
 fn usage() {
     eprintln!("用法：micc <输入.jsh> [-o 输出.jmb] [--dump] [--strip-debug]");
     eprintln!("      micc pack [--目录 <包目录>] [-o 输出.jmb] [--离线] [--strip-debug]");
-    eprintln!("      micc install [--目录 <包目录>] [--离线]");
+    eprintln!("      micc install [--目录 <包目录>] [--索引 <索引文件|URL>] [--离线]");
+    eprintln!("      micc hash [--目录 <包目录>]                # 算目录内容哈希（填索引的 校验）");
     eprintln!("      micc --line-of <x.jmb> <代码下标> <偏移>   # 指令位置 → 源文件:行");
     eprintln!("      micc --lines-of <x.jmb> <文件|*> <行号>    # 源码行 → 指令范围");
     eprintln!("      micc --debug-dump <x.jmb>                  # 打印调试表");
@@ -252,6 +254,9 @@ fn main() {
     }
     if args[0] == "install" {
         exit(pack::cmd_install(&args[1..]));
+    }
+    if args[0] == "hash" {
+        exit(pack::cmd_hash(&args[1..]));
     }
 
     let mut input: Option<PathBuf> = None;

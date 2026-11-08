@@ -492,6 +492,134 @@ try {
     $out = Run-Jmb $exampleJmb
     Check "仓库示例包 examples/packages：打包并运行" (($code -eq 0) -and ($out -eq "你好，砾`n42")) ($o + "`n实际输出：" + $out)
 
+    # ---------- 18. 静态索引：按 ^ 约束挑版本（1.2.0），install 后在线/离线都可打包 ----------
+    $idxRoot = Join-Path $sandbox "索引"
+    $artifact = Join-Path $idxRoot "工件"
+    foreach ($v in @("1.0.0", "1.2.0", "2.0.0")) {
+        $toml = @"
+[包]
+名字 = "工具"
+版本 = "$v"
+
+[导出]
+名字 = ["版本"]
+"@
+        $src = @"
+函数 版本()：
+    返回 "$v"
+"@
+        New-Pkg (Join-Path $artifact "工具-$v") $toml $src
+    }
+    function Get-PkgHash([string]$dir) {
+        $o = (& $micc hash --目录 $dir 2>&1 | Out-String).Trim()
+        if ($LASTEXITCODE -ne 0) { throw ("micc hash 失败：" + $o) }
+        return $o
+    }
+    $h100 = Get-PkgHash (Join-Path $artifact "工具-1.0.0")
+    $h120 = Get-PkgHash (Join-Path $artifact "工具-1.2.0")
+    $h200 = Get-PkgHash (Join-Path $artifact "工具-2.0.0")
+    $idxFile = Join-Path $idxRoot "砾索引.toml"
+    $idxText = @"
+# 静态索引夹具：来源相对本文件
+索引版本 = 1
+
+[包]
+"工具@1.0.0" = { 来源 = "file:工件/工具-1.0.0", 校验 = "$h100" }
+"工具@1.2.0" = { 来源 = "file:工件/工具-1.2.0", 校验 = "$h120" }
+"工具@2.0.0" = { 来源 = "file:工件/工具-2.0.0", 校验 = "$h200" }
+"@
+    [IO.File]::WriteAllText($idxFile, $idxText, (New-Object System.Text.UTF8Encoding($false)))
+
+    $app18 = Join-Path $idxRoot "应用"
+    $toml = @"
+[包]
+名字 = "应用"
+版本 = "1.0.0"
+
+[依赖]
+工具 = { 版本 = "^1.0.0" }
+"@
+    New-Pkg $app18 $toml '打印(工具.版本())'
+    $io = (& $micc install --目录 $app18 --索引 $idxFile 2>&1 | Out-String)
+    $installCode = $LASTEXITCODE
+    $lockText = [IO.File]::ReadAllText((Join-Path $app18 ".砾\锁.toml"))
+    $rOff = Invoke-Pack $app18 -Offline
+    $outOff = Run-Jmb (Join-Path $app18 "应用.jmb")
+    $rOn = Invoke-Pack $app18
+    $outOn = Run-Jmb (Join-Path $app18 "应用.jmb")
+    Check "索引：^1.0.0 选中 1.2.0，install 后在线/离线都可运行" (($installCode -eq 0) -and $lockText.Contains('版本 = "1.2.0"') -and ($rOff.code -eq 0) -and ($rOn.code -eq 0) -and ($outOff -eq "1.2.0") -and ($outOn -eq "1.2.0")) ($io + $rOff.out + $rOn.out + "`n离线输出：" + $outOff + "`n在线输出：" + $outOn)
+
+    # ---------- 19. 静态索引：* 取最高版本（2.0.0） ----------
+    $app19 = Join-Path $idxRoot "应用最大"
+    $toml = @"
+[包]
+名字 = "应用"
+版本 = "1.0.0"
+
+[依赖]
+工具 = { 版本 = "*" }
+"@
+    New-Pkg $app19 $toml '打印(工具.版本())'
+    $io = (& $micc install --目录 $app19 --索引 $idxFile 2>&1 | Out-String)
+    $installCode = $LASTEXITCODE
+    $lockText = [IO.File]::ReadAllText((Join-Path $app19 ".砾\锁.toml"))
+    $r = Invoke-Pack $app19 -Offline
+    $out = Run-Jmb (Join-Path $app19 "应用.jmb")
+    Check "索引：* 选中最高版本 2.0.0" (($installCode -eq 0) -and $lockText.Contains('版本 = "2.0.0"') -and ($r.code -eq 0) -and ($out -eq "2.0.0")) ($io + $r.out + "`n实际输出：" + $out)
+
+    # ---------- 20. 静态索引：没有满足约束的版本（E134） ----------
+    $app20 = Join-Path $idxRoot "应用缺版本"
+    $toml = @"
+[包]
+名字 = "应用"
+版本 = "1.0.0"
+
+[依赖]
+工具 = { 版本 = "^1.3.0" }
+"@
+    New-Pkg $app20 $toml '打印(工具.版本())'
+    $io = (& $micc install --目录 $app20 --索引 $idxFile 2>&1 | Out-String)
+    $installCode = $LASTEXITCODE
+    Check-Error "索引：没有满足 ^1.3.0 的版本 → E134" @{ code = $installCode; out = $io } "E134" "没有满足"
+
+    # ---------- 21. 静态索引：索引里没有这个包（E133） ----------
+    $app21 = Join-Path $idxRoot "应用缺包"
+    $toml = @"
+[包]
+名字 = "应用"
+版本 = "1.0.0"
+
+[依赖]
+无此包 = { 版本 = "*" }
+"@
+    New-Pkg $app21 $toml '打印(1)'
+    $io = (& $micc install --目录 $app21 --索引 $idxFile 2>&1 | Out-String)
+    $installCode = $LASTEXITCODE
+    Check-Error "索引：包不存在 → E133" @{ code = $installCode; out = $io } "E133" "索引里没有包"
+
+    # ---------- 22. 静态索引：内容哈希不符（E136） ----------
+    $badIdx = Join-Path $idxRoot "砾索引-坏校验.toml"
+    $badText = @"
+索引版本 = 1
+
+[包]
+"工具@1.0.0" = { 来源 = "file:工件/工具-1.0.0", 校验 = "fnv1a64:0000000000000000" }
+"@
+    [IO.File]::WriteAllText($badIdx, $badText, (New-Object System.Text.UTF8Encoding($false)))
+    $app22 = Join-Path $idxRoot "应用坏校验"
+    $toml = @"
+[包]
+名字 = "应用"
+版本 = "1.0.0"
+
+[依赖]
+工具 = { 版本 = "1.0.0" }
+"@
+    New-Pkg $app22 $toml '打印(工具.版本())'
+    $io = (& $micc install --目录 $app22 --索引 $badIdx 2>&1 | Out-String)
+    $installCode = $LASTEXITCODE
+    Check-Error "索引：哈希不符 → E136" @{ code = $installCode; out = $io } "E136" "不一致"
+
     Write-Host ("包用例：共 " + $script:total + " 个，失败 " + $script:fail + " 个")
     if ($script:fail -gt 0) { exit 1 }
     exit 0

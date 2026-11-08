@@ -1,12 +1,14 @@
-//! H4 的依赖解析、锁文件与离线目录（最小可用切分）。
+//! H4/H5 的依赖解析、锁文件与离线目录。
 //!
 //! 规则（已拍板）：
-//! - 只支持源码包（本地路径依赖），不做二进制包与索引；
+//! - 源码包；依赖可写本地 `路径`，也可不写路径、从静态索引解析（H5）；
 //! - 按包名去重，一个包名只允许一个版本；菱形依赖只装一份；
-//! - 离线模式只读 `.砾/锁.toml` 与 `.砾/包`，不碰网络、不读依赖声明里的路径。
+//! - 离线模式只读 `.砾/锁.toml` 与 `.砾/包`，不碰网络、不读依赖声明里的路径；
+//! - 在线 `pack` 对索引依赖也只读锁与缓存，真正的下载由 `micc install` 负责。
 
 use crate::error::{CompileError, Result};
-use crate::pack_manifest::{read_lock, write_lock, Constraint, LockEntry, Manifest};
+use crate::pack_index::{load_index, verify_entry, Index, IndexEntry, TempDirs};
+use crate::pack_manifest::{read_lock, write_lock, Constraint, DepSpec, LockEntry, Manifest};
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -32,7 +34,7 @@ fn pkg_err(line: u32, msg: impl Into<String>) -> CompileError {
     CompileError::new("E126", line, 1, msg)
 }
 
-/// 在线解析：从根包目录出发，按 `砾包.toml` 里的路径递归找依赖。
+/// 在线解析：从根包目录出发，路径依赖按目录递归；索引依赖读锁与缓存。
 pub fn resolve_online(root_dir: &Path) -> Result<Tree> {
     let root_manifest = Manifest::load(root_dir)?;
     let root = Resolved {
@@ -40,6 +42,7 @@ pub fn resolve_online(root_dir: &Path) -> Result<Tree> {
         dir: root_dir.to_path_buf(),
         source: "root".to_string(),
     };
+    let lock = read_lock(root_dir)?;
     let mut resolved: BTreeMap<String, Resolved> = BTreeMap::new();
     let mut order: Vec<String> = Vec::new();
     let mut chain: Vec<String> = vec![root.manifest.name.clone()];
@@ -47,10 +50,11 @@ pub fn resolve_online(root_dir: &Path) -> Result<Tree> {
 
     for (dep_name, spec) in sorted_deps(&root.manifest.deps) {
         visit_online(
-            &root_dir.join(&spec.path),
+            root_dir,
+            root_dir,
             &dep_name,
-            &spec.constraint,
-            format!("path:{}", spec.path),
+            &spec,
+            &lock,
             &mut chain,
             &mut dirs,
             &mut resolved,
@@ -73,18 +77,32 @@ fn sorted_deps(
     v
 }
 
+/// 在线遍历：路径依赖按目录走；索引依赖只读锁与缓存（下载由 install 负责）。
 #[allow(clippy::too_many_arguments)]
 fn visit_online(
-    dir: &Path,
+    root_dir: &Path,
+    base: &Path,
     dep_name: &str,
-    constraint: &Constraint,
-    source: String,
+    spec: &DepSpec,
+    lock: &Option<Vec<LockEntry>>,
     chain: &mut Vec<String>,
     dirs: &mut Vec<PathBuf>,
     resolved: &mut BTreeMap<String, Resolved>,
     order: &mut Vec<String>,
 ) -> Result<()> {
-    let canon = canonical(dir)?;
+    let Some(rel) = &spec.path else {
+        return visit_index_online(
+            root_dir,
+            dep_name,
+            &spec.constraint,
+            lock,
+            chain,
+            resolved,
+            order,
+        );
+    };
+    let dir = base.join(rel);
+    let canon = canonical(&dir)?;
     if dirs.contains(&canon) {
         let mut path = chain.clone();
         path.push(dep_name.to_string());
@@ -96,24 +114,31 @@ fn visit_online(
 
     if let Some(prev) = resolved.get(dep_name) {
         if prev.dir != canon {
-            return Err(pkg_err(
-                1,
+            let msg = if prev.source.starts_with("index:") {
+                format!(
+                    "同名包「{}」先由索引解析（{}），又声明了路径 {}；一个包名只允许一份",
+                    dep_name,
+                    prev.source,
+                    dir.display()
+                )
+            } else {
                 format!(
                     "同名包「{}」来自两个目录：{} 与 {}；一个包名只允许一份",
                     dep_name,
                     prev.dir.display(),
                     dir.display()
-                ),
-            ));
+                )
+            };
+            return Err(pkg_err(1, msg));
         }
-        if !constraint.allows(prev.manifest.version) {
+        if !spec.constraint.allows(prev.manifest.version) {
             return Err(pkg_err(
                 1,
                 format!(
                     "版本冲突：{} 需要「{}」{}，但已经解析到 {}（来源链：{}）",
                     chain.last().map(String::as_str).unwrap_or("?"),
                     dep_name,
-                    constraint.text(),
+                    spec.constraint.text(),
                     prev.manifest.version,
                     chain.join(" → ")
                 ),
@@ -122,26 +147,26 @@ fn visit_online(
         return Ok(());
     }
 
-    let manifest = Manifest::load(dir)?;
+    let manifest = Manifest::load(&canon)?;
     if manifest.name != dep_name {
         return Err(pkg_err(
             1,
             format!(
                 "依赖名「{}」与 {} 里的包名「{}」不一致",
                 dep_name,
-                dir.join(crate::pack_manifest::MANIFEST_NAME).display(),
+                canon.join(crate::pack_manifest::MANIFEST_NAME).display(),
                 manifest.name
             ),
         ));
     }
-    if !constraint.allows(manifest.version) {
+    if !spec.constraint.allows(manifest.version) {
         return Err(pkg_err(
             1,
             format!(
                 "版本不满足：{} 需要「{}」{}，实际是 {}（来源链：{}）",
                 chain.last().map(String::as_str).unwrap_or("?"),
                 dep_name,
-                constraint.text(),
+                spec.constraint.text(),
                 manifest.version,
                 chain.join(" → ")
             ),
@@ -150,12 +175,13 @@ fn visit_online(
 
     chain.push(dep_name.to_string());
     dirs.push(canon.clone());
-    for (sub_name, spec) in sorted_deps(&manifest.deps) {
+    for (sub_name, sub_spec) in sorted_deps(&manifest.deps) {
         visit_online(
-            &dir.join(&spec.path),
+            root_dir,
+            &canon,
             &sub_name,
-            &spec.constraint,
-            format!("path:{}", spec.path),
+            &sub_spec,
+            lock,
             chain,
             dirs,
             resolved,
@@ -170,7 +196,142 @@ fn visit_online(
         Resolved {
             manifest,
             dir: canon,
-            source,
+            source: format!("path:{}", rel),
+        },
+    );
+    order.push(dep_name.to_string());
+    Ok(())
+}
+
+/// 在线遍历里的索引依赖：锁里必须有它，缓存必须存在且哈希一致。
+fn visit_index_online(
+    root_dir: &Path,
+    dep_name: &str,
+    constraint: &Constraint,
+    lock: &Option<Vec<LockEntry>>,
+    chain: &mut Vec<String>,
+    resolved: &mut BTreeMap<String, Resolved>,
+    order: &mut Vec<String>,
+) -> Result<()> {
+    if chain.iter().any(|n| n == dep_name) {
+        let mut path = chain.clone();
+        path.push(dep_name.to_string());
+        return Err(pkg_err(1, format!("依赖成环：{}", path.join(" → "))));
+    }
+    let Some(entries) = lock else {
+        return Err(pkg_err(
+            1,
+            format!(
+                "「{}」来自索引，但还没有锁文件；请先运行 micc install",
+                dep_name
+            ),
+        ));
+    };
+    let Some(entry) = entries.iter().find(|e| e.name == dep_name) else {
+        return Err(pkg_err(
+            1,
+            format!(
+                "「{}」来自索引，但锁里没有；请先运行 micc install",
+                dep_name
+            ),
+        ));
+    };
+    if !constraint.allows(entry.version) {
+        return Err(pkg_err(
+            1,
+            format!(
+                "版本冲突：{} 需要「{}」{}，锁里是 {}（来源链：{}）",
+                chain.last().map(String::as_str).unwrap_or("?"),
+                dep_name,
+                constraint.text(),
+                entry.version,
+                chain.join(" → ")
+            ),
+        ));
+    }
+    if let Some(prev) = resolved.get(dep_name) {
+        if prev.manifest.version != entry.version {
+            return Err(pkg_err(
+                1,
+                format!(
+                    "同名包「{}」解析到两个版本：{} 与 {}；一个包名只允许一份",
+                    dep_name, prev.manifest.version, entry.version
+                ),
+            ));
+        }
+        return Ok(());
+    }
+    let dir = root_dir
+        .join(LOCK_DIR)
+        .join(CACHE_DIR)
+        .join(format!("{}-{}", entry.name, entry.version));
+    if !dir.is_dir() {
+        return Err(pkg_err(
+            1,
+            format!(
+                "「{}」{} 还没装到 {}；请先运行 micc install",
+                entry.name,
+                entry.version,
+                dir.display()
+            ),
+        ));
+    }
+    let manifest = Manifest::load(&dir)?;
+    if manifest.name != entry.name || manifest.version != entry.version {
+        return Err(pkg_err(
+            1,
+            format!(
+                "缓存里的包与锁不一致：锁要求「{}」{}，缓存里是「{}」{}",
+                entry.name, entry.version, manifest.name, manifest.version
+            ),
+        ));
+    }
+    let got = dir_hash(&dir)?;
+    if got != entry.hash {
+        return Err(pkg_err(
+            1,
+            format!(
+                "校验失败：包「{}」的缓存内容与锁不一致（锁 {}，实际 {}）",
+                entry.name, entry.hash, got
+            ),
+        ));
+    }
+
+    chain.push(dep_name.to_string());
+    let mut result = Ok(());
+    for (sub_name, sub_spec) in sorted_deps(&manifest.deps) {
+        if sub_spec.path.is_some() {
+            result = Err(pkg_err(
+                1,
+                format!(
+                    "缓存里的包「{}」声明了路径依赖「{}」；索引包只能依赖索引包",
+                    dep_name, sub_name
+                ),
+            ));
+            break;
+        }
+        if let Err(e) = visit_index_online(
+            root_dir,
+            &sub_name,
+            &sub_spec.constraint,
+            lock,
+            chain,
+            resolved,
+            order,
+        ) {
+            result = Err(e);
+            break;
+        }
+    }
+    chain.pop();
+    result?;
+
+    resolved.insert(
+        dep_name.to_string(),
+        Resolved {
+            manifest,
+            dir,
+            source: entry.source.clone(),
         },
     );
     order.push(dep_name.to_string());
@@ -376,24 +537,216 @@ fn topo_offline(
     Ok(())
 }
 
-/// 安装：把依赖源码复制进 `.砾/包/<名字>-<版本>`，并写锁文件。
-pub fn install(root_dir: &Path) -> Result<Vec<LockEntry>> {
-    let tree = resolve_online(root_dir)?;
-    let mut entries = Vec::new();
-    let cache_root = root_dir.join(LOCK_DIR).join(CACHE_DIR);
-    for dep in &tree.deps {
-        let dest = cache_root.join(format!("{}-{}", dep.manifest.name, dep.manifest.version));
-        copy_package(&dep.dir, &dest)?;
-        entries.push(LockEntry {
-            name: dep.manifest.name.clone(),
-            version: dep.manifest.version,
-            source: dep.source.clone(),
-            hash: dir_hash(&dest)?,
-        });
+/// 安装：路径依赖从目录复制；索引依赖从静态索引挑版本、取内容、校验哈希。
+/// 所有依赖都落到 `.砾/包/<名字>-<版本>`，最后写锁文件。
+pub fn install(root_dir: &Path, index_source: Option<&str>) -> Result<Vec<LockEntry>> {
+    let root_manifest = Manifest::load(root_dir)?;
+    let mut st = Installer {
+        root_dir,
+        cache_root: root_dir.join(LOCK_DIR).join(CACHE_DIR),
+        index_source,
+        index: None,
+        temp: TempDirs::new(),
+        installed: BTreeMap::new(),
+        order: Vec::new(),
+        chain: vec![root_manifest.name.clone()],
+    };
+    for (name, spec) in sorted_deps(&root_manifest.deps) {
+        st.visit(root_dir, &name, &spec)?;
     }
+
+    let mut entries: Vec<LockEntry> = st
+        .order
+        .iter()
+        .filter_map(|n| st.installed.get(n))
+        .map(|p| LockEntry {
+            name: p.manifest.name.clone(),
+            version: p.manifest.version,
+            source: p.source.clone(),
+            hash: p.hash.clone(),
+        })
+        .collect();
     entries.sort_by(|a, b| a.name.cmp(&b.name));
     write_lock(root_dir, &entries)?;
     Ok(entries)
+}
+
+struct Installed {
+    manifest: Manifest,
+    source: String,
+    hash: String,
+}
+
+struct Installer<'a> {
+    root_dir: &'a Path,
+    cache_root: PathBuf,
+    index_source: Option<&'a str>,
+    index: Option<Index>,
+    temp: TempDirs,
+    installed: BTreeMap<String, Installed>,
+    order: Vec<String>,
+    chain: Vec<String>,
+}
+
+impl<'a> Installer<'a> {
+    fn visit(&mut self, base: &Path, dep_name: &str, spec: &DepSpec) -> Result<()> {
+        if let Some(prev) = self.installed.get(dep_name) {
+            if !spec.constraint.allows(prev.manifest.version) {
+                return Err(pkg_err(
+                    1,
+                    format!(
+                        "版本冲突：{} 需要「{}」{}，但已经解析到 {}（来源链：{}）",
+                        self.chain.last().map(String::as_str).unwrap_or("?"),
+                        dep_name,
+                        spec.constraint.text(),
+                        prev.manifest.version,
+                        self.chain.join(" → ")
+                    ),
+                ));
+            }
+            return Ok(());
+        }
+        if self.chain.iter().any(|n| n == dep_name) {
+            let mut path = self.chain.clone();
+            path.push(dep_name.to_string());
+            return Err(pkg_err(1, format!("依赖成环：{}", path.join(" → "))));
+        }
+
+        let (manifest, source, staging, from_index) = match &spec.path {
+            Some(rel) => {
+                let dir = canonical(&base.join(rel))?;
+                let manifest = Manifest::load(&dir)?;
+                if manifest.name != dep_name {
+                    return Err(pkg_err(
+                        1,
+                        format!(
+                            "依赖名「{}」与 {} 里的包名「{}」不一致",
+                            dep_name,
+                            dir.join(crate::pack_manifest::MANIFEST_NAME).display(),
+                            manifest.name
+                        ),
+                    ));
+                }
+                if !spec.constraint.allows(manifest.version) {
+                    return Err(pkg_err(
+                        1,
+                        format!(
+                            "版本不满足：{} 需要「{}」{}，实际是 {}（来源链：{}）",
+                            self.chain.last().map(String::as_str).unwrap_or("?"),
+                            dep_name,
+                            spec.constraint.text(),
+                            manifest.version,
+                            self.chain.join(" → ")
+                        ),
+                    ));
+                }
+                (manifest, format!("path:{}", rel), dir, false)
+            }
+            None => {
+                let entry = self.pick(dep_name, &spec.constraint)?;
+                let staging = self.prepare(&entry)?;
+                let manifest = Manifest::load(&staging)?;
+                if manifest.name != entry.name || manifest.version != entry.version {
+                    return Err(CompileError::new(
+                        "E136",
+                        1,
+                        1,
+                        format!(
+                            "索引条目「{}」{} 与包内容的清单不一致：实际是「{}」{}",
+                            entry.name, entry.version, manifest.name, manifest.version
+                        ),
+                    ));
+                }
+                (
+                    manifest,
+                    format!("index:{}", entry.source),
+                    staging,
+                    true,
+                )
+            }
+        };
+
+        let dest = self
+            .cache_root
+            .join(format!("{}-{}", manifest.name, manifest.version));
+        copy_package(&staging, &dest)?;
+        let hash = dir_hash(&dest)?;
+
+        self.chain.push(dep_name.to_string());
+        let mut result = Ok(());
+        for (sub_name, sub_spec) in sorted_deps(&manifest.deps) {
+            if from_index && sub_spec.path.is_some() {
+                result = Err(pkg_err(
+                    1,
+                    format!(
+                        "索引包「{}」{} 声明了路径依赖「{}」；索引包只能依赖索引包",
+                        manifest.name, manifest.version, sub_name
+                    ),
+                ));
+                break;
+            }
+            if let Err(e) = self.visit(&staging, &sub_name, &sub_spec) {
+                result = Err(e);
+                break;
+            }
+        }
+        self.chain.pop();
+        result?;
+
+        self.installed.insert(
+            dep_name.to_string(),
+            Installed {
+                manifest,
+                source,
+                hash,
+            },
+        );
+        self.order.push(dep_name.to_string());
+        Ok(())
+    }
+
+    /// 懒加载索引：优先 `--索引`，否则包目录下的 `砾索引.toml`。
+    fn ensure_index(&mut self) -> Result<()> {
+        if self.index.is_some() {
+            return Ok(());
+        }
+        let source = match self.index_source {
+            Some(s) => s.to_string(),
+            None => {
+                let p = self.root_dir.join(crate::pack_index::INDEX_NAME);
+                if !p.is_file() {
+                    return Err(CompileError::new(
+                        "E132",
+                        1,
+                        1,
+                        format!(
+                            "有依赖要从索引解析，但没给 --索引，且 {} 不存在",
+                            p.display()
+                        ),
+                    )
+                    .with_hint(
+                        "用 micc install --索引 <索引文件|URL>，或把 砾索引.toml 放到包目录里",
+                    ));
+                }
+                p.to_string_lossy().to_string()
+            }
+        };
+        self.index = Some(load_index(&source, &mut self.temp)?);
+        Ok(())
+    }
+
+    fn pick(&mut self, name: &str, constraint: &Constraint) -> Result<IndexEntry> {
+        self.ensure_index()?;
+        let index = self.index.as_ref().expect("索引已加载");
+        index.select(name, constraint).cloned()
+    }
+
+    fn prepare(&mut self, entry: &IndexEntry) -> Result<PathBuf> {
+        let index = self.index.as_ref().expect("索引已加载");
+        let dir = index.materialize(entry, &mut self.temp)?;
+        verify_entry(entry, &dir)?;
+        Ok(dir)
+    }
 }
 
 /// 离线安装：只校验锁与缓存，不复制、不联网。

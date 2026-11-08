@@ -22,13 +22,15 @@ struct Opts {
     out: Option<PathBuf>,
     offline: bool,
     strip_debug: bool,
+    index: Option<String>,
 }
 
-fn parse_opts(args: &[String], allow_out: bool) -> Result<Opts> {
+fn parse_opts(args: &[String], allow_out: bool, allow_index: bool) -> Result<Opts> {
     let mut dir = PathBuf::from(".");
     let mut out = None;
     let mut offline = false;
     let mut strip_debug = false;
+    let mut index = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -46,9 +48,16 @@ fn parse_opts(args: &[String], allow_out: bool) -> Result<Opts> {
                 }
                 out = Some(PathBuf::from(&args[i]));
             }
+            "--索引" | "--index" if allow_index => {
+                i += 1;
+                if i >= args.len() {
+                    return Err(usage_err("--索引 后面要跟索引文件或 URL"));
+                }
+                index = Some(args[i].clone());
+            }
             "--离线" | "--offline" => offline = true,
             "--strip-debug" => strip_debug = true,
-            "-h" | "--help" => return Err(usage_err("micc pack / micc install")),
+            "-h" | "--help" => return Err(usage_err("micc pack / micc install / micc hash")),
             other => return Err(usage_err(format!("不认识的参数：{}", other))),
         }
         i += 1;
@@ -58,6 +67,7 @@ fn parse_opts(args: &[String], allow_out: bool) -> Result<Opts> {
         out,
         offline,
         strip_debug,
+        index,
     })
 }
 
@@ -85,8 +95,28 @@ pub fn cmd_install(args: &[String]) -> i32 {
     }
 }
 
+/// `micc hash`：算目录内容哈希，供发布者手写静态索引时填 校验。
+pub fn cmd_hash(args: &[String]) -> i32 {
+    match do_hash(args) {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("{}", e);
+            1
+        }
+    }
+}
+
+fn do_hash(args: &[String]) -> Result<()> {
+    let opts = parse_opts(args, false, false)?;
+    if !opts.dir.is_dir() {
+        return Err(usage_err(format!("包目录不存在：{}", opts.dir.display())));
+    }
+    println!("{}", pack_resolve::dir_hash(&opts.dir)?);
+    Ok(())
+}
+
 fn do_pack(args: &[String]) -> Result<()> {
-    let opts = parse_opts(args, true)?;
+    let opts = parse_opts(args, true, false)?;
     let tree = load_tree(&opts)?;
 
     let mut units: Vec<Unit> = Vec::new();
@@ -342,7 +372,7 @@ fn check_native(tree: &Tree) -> Result<HashSet<String>> {
 }
 
 fn do_install(args: &[String]) -> Result<()> {
-    let opts = parse_opts(args, false)?;
+    let opts = parse_opts(args, false, true)?;
     if !opts.dir.is_dir() {
         return Err(usage_err(format!(
             "包目录不存在：{}",
@@ -361,14 +391,14 @@ fn do_install(args: &[String]) -> Result<()> {
         return Ok(());
     }
 
-    let entries = pack_resolve::install(&opts.dir)?;
+    let entries = pack_resolve::install(&opts.dir, opts.index.as_deref())?;
     println!(
         "已安装 {} 个包到 {}",
         entries.len(),
         opts.dir.join(".砾").join("包").display()
     );
     for e in &entries {
-        println!("  {} {}　{}", e.name, e.version, e.source);
+        println!("  {} {}　{}　{}", e.name, e.version, e.source, e.hash);
     }
     println!("锁文件：{}", crate::pack_manifest::lock_path(&opts.dir).display());
     Ok(())
