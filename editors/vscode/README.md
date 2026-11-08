@@ -12,19 +12,23 @@
 
 ### 1.1 本地打包 `.vsix`
 
-在仓库根目录执行：
+进入扩展目录（从仓库根目录开始）：
 
 ```powershell
 cd editors\vscode
 npm install
 npm run compile
+# vsce 不会自动建目录，先建 dist
+New-Item -ItemType Directory -Force dist | Out-Null
 npx --yes @vscode/vsce package --out dist\li-vscode-0.1.0.vsix
 ```
 
-`npx` 首次运行需要联网下载 `@vscode/vsce`；之后可用 `npm run package`。
+`npx` 首次运行需要联网下载 `@vscode/vsce`。
 产物在 `editors\vscode\dist\li-vscode-0.1.0.vsix`。
 
 ### 1.2 安装到 VS Code
+
+回到仓库根目录后执行（仍在 `editors\vscode` 则把路径换成 `dist\li-vscode-0.1.0.vsix`）：
 
 ```powershell
 code --install-extension editors\vscode\dist\li-vscode-0.1.0.vsix
@@ -42,7 +46,8 @@ code --install-extension editors\vscode\dist\li-vscode-0.1.0.vsix
 
 | 类别 | 示例 |
 |---|---|
-| 关键字 | `令 如果 否则如果 否则 当 循环 次 遍历 在 中断 继续 函数 返回 导入` |
+| 关键字 | `令 如果 否则如果 否则 当 循环 次 遍历 在 中断 继续 返回 函数 导入` |
+| 类与异常 | `类 新建 本 尝试 捕获 抛出`（已支持，正常着色） |
 | 逻辑字面量 / 词运算符 | `真 假 空` / `与 或 非` |
 | 内建函数 | `打印 文本 整数 小数 长度 范围 类型 总和 最大 最小 绝对值` |
 | 原生函数 | `引脚写 引脚读 引脚翻转 串口写 等待毫秒 ADC初始化 ADC读 定时器初始化 定时器计数 定时器延时` |
@@ -50,7 +55,7 @@ code --install-extension editors\vscode\dist\li-vscode-0.1.0.vsix
 | 文本 | `"…"`、`'…'`、`“…”`、`‘…’`，转义 `\n \t \\ \" \'` |
 | 注释 | `# 到行尾` |
 | 原生模块导入 | `导入 引脚` 中的 `导入` 与模块名分别着色 |
-| 未支持的关键字 | `类 继承 新建 尝试 捕获 最终 抛出 匹配 情形 枚举 用 断言 超` 标红（语言卡里明确不支持） |
+| 未支持的关键字 | `继承 最终 匹配 情形 枚举 用 断言 超` 标红（语言卡里明确不支持） |
 
 ### 2.2 编译诊断
 
@@ -123,7 +128,7 @@ powershell -ExecutionPolicy Bypass -File tools\build.ps1 -SkipTests
 
 - 关键字：`keywords` 中 `supported: true` 的条目
 - 内建函数：`builtins` 的名字与文档
-- 原生模块：`导入 ` 后提示模块名（`引脚` / `ADC` / `定时器`）
+- 原生模块：`导入 ` 后提示模块名（`引脚` / `ADC` / `定时器` / `队列` / `信号量` / `外部中断` / `任务`）
 - 原生函数：只在该文件已 `导入` 对应模块后出现
 
 因为砾的标识符是中文，VS Code 的自动弹出不一定会在中文输入时触发，**手动 `Ctrl+Space` 最稳**。
@@ -175,7 +180,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File test\run-it.ps1
 
 - `verify.js` 覆盖 24 项：同文件符号/类/方法、跨包 `工具.加一`、裸包名、不存在符号、原生模块语言卡、E007 定位、无调试段退回、断点命中（第 32 行）与未命中（退出码 2），以及 5 项格式化（缩进/运算符空格/幂等/注释与空行/示例零改写）。
 - `run-it.ps1` 启动真实 `Code.exe --extensionTestsPath`，覆盖 12 项：扩展激活、命令注册、`c.加`/`c.值`/`查点` 三处同文件跳转、`打印` 不跳转、跨包跳转、`导入 引脚` 跳语言卡、Shift+Alt+F 格式化提供者（含幂等）、F5 错误进问题面板并定位第 3 行、F9 + F5 断点停第 32 行、再按 F9 清除。
-- 集成测试夹具在 `build/editor-it/`（已 gitignore），由 `run-it.ps1` 自动重建。
+- 集成测试夹具提交在 `editors\vscode\test\fixtures\`；`run-it.ps1` 每次运行先同步到
+  `build\editor-it\`（`build` 被 gitignore，所以不能依赖它已存在）。
 
 ---
 

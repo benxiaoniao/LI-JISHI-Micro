@@ -10,11 +10,17 @@ param(
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 
-$cli = "F:\STM32CubeIDE_2.2.0\STM32CubeIDE\plugins\com.st.stm32cube.ide.mcu.externaltools.cubeprogrammer.win32_2.2.500.202603051304\tools\bin\STM32_Programmer_CLI.exe"
+$cli = if ($env:STM32_PROGRAMMER_CLI) {
+    $env:STM32_PROGRAMMER_CLI
+} else {
+    "F:\STM32CubeIDE_2.2.0\STM32CubeIDE\plugins\com.st.stm32cube.ide.mcu.externaltools.cubeprogrammer.win32_2.2.500.202603051304\tools\bin\STM32_Programmer_CLI.exe"
+}
 $bin = Join-Path $root "build\stm32\jishim.bin"
 $addr = "0x08000000"
 
-if (-not (Test-Path $cli)) { throw "找不到 STM32_Programmer_CLI.exe：$cli" }
+if (-not (Test-Path $cli)) {
+    throw ("找不到 STM32_Programmer_CLI.exe：" + $cli + "`n装 STM32CubeProgrammer 后设环境变量 STM32_PROGRAMMER_CLI，或改本脚本顶部 `$cli（见 docs\工具链.md 第 5 步）")
+}
 if (-not (Test-Path $bin)) { throw "找不到固件：$bin（先运行 .\tools\build-firmware.ps1）" }
 
 # 只读：列出探针并连接；写入：-d 下载 + 校验 + 复位

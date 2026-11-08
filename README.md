@@ -41,12 +41,17 @@ ADC 满量程（PA0 接 3V3）、以及第四轮读到 4094 触发 E023 的故�
 
 ## 2. 构建
 
-需要：Rust（构建 `micc`）、主机 C 编译器（构建 `jmrun`）、`arm-none-eabi-gcc`（构建固件）。
+需要：Rust（构建 `micc`）、主机 C 编译器（构建 `jmrun`）、`arm-none-eabi-gcc`（构建固件）、
+Node.js 18+（仅编辑器扩展需要）。
 
 ```powershell
 # 一次装好 ARM 工具链（按锁文件哈希校验；默认装到 ASCII 缓存目录）
 powershell -ExecutionPolicy Bypass -File tools\fetch-toolchain.ps1
 ```
+
+已装过时脚本会提示「目录已存在，跳过」并正常退出（退出码 0）；要强制重装加 `-Force`，
+要装进仓库自己的 `tools\toolchains\`（方便随仓库拷贝）加 `-Bundle`。
+Rust、主机 gcc 的下载地址与版本要求见 [docs/工具链.md](docs/工具链.md) 第 1–3 步。
 
 工具链解析顺序与路径覆盖见 [tools/toolchains.ps1](tools/toolchains.ps1) 与 [docs/工具链.md](docs/工具链.md)：
 包内 `tools/toolchains/<名字>/bin` → 外部缓存（`%LOCALAPPDATA%\jishi\toolchains`）→
@@ -165,8 +170,9 @@ powershell -ExecutionPolicy Bypass -File tools\flash-firmware.ps1 -Apply   # 实
 ```
 
 约束：**只写 + 校验 + 软复位**，不整片擦除、不动选项字节、不开 GDB Server。
-需要擦除的扇区由下载过程按需处理。脚本里的 `STM32_Programmer_CLI.exe` 路径是当前机器的
-STM32CubeIDE 插件路径；换机器时改 [tools/flash-firmware.ps1](tools/flash-firmware.ps1) 顶部的 `$cli`。
+需要擦除的扇区由下载过程按需处理。脚本默认指向本机的 STM32CubeIDE 插件路径；换机器时优先设环境变量
+`STM32_PROGRAMMER_CLI` 指向 `STM32_Programmer_CLI.exe`，或改 [tools/flash-firmware.ps1](tools/flash-firmware.ps1) 顶部的 `$cli`。
+CLI 随 **STM32CubeProgrammer**（或 STM32CubeIDE）安装，下载与路径见 [docs/工具链.md](docs/工具链.md) 第 5 步。
 
 ### 3.2 接线
 
@@ -181,13 +187,18 @@ STM32CubeIDE 插件路径；换机器时改 [tools/flash-firmware.ps1](tools/fla
 
 ### 3.3 抓串口
 
+先确认实际端口（CH340 常见 COM3–COM8，别照抄示例里的 COM3）：
+
 ```powershell
-powershell -ExecutionPolicy Bypass -File tools\capture-serial.ps1 -Port COM3 -Seconds 60
+[System.IO.Ports.SerialPort]::GetPortNames()
+powershell -ExecutionPolicy Bypass -File tools\capture-serial.ps1 -Port COM4 -Seconds 60
 ```
 
 行为：先打开端口开始录制 → 观察 2 秒并打印实际收到的字节数（收到 0 字节会明确告警）→
 提示按复位 → 持续落盘到 `build\uart\uart-<时间戳>.log`（共享读，录制中也能打开）→
 每 10 秒打印进度 → 收 0 字节时退出码 2。
+注意：打开端口后 2 秒自检收到的字节可能来自**复位前**仍在运行的旧程序；只有按过复位、
+看到启动横幅之后的数据才是本次运行的输出。
 
 脚本是同步阻塞式读取，**必须在前台或工具托管的常驻后台运行**。
 不要用 `Start-Process` 起子进程：子进程会随宿主终端被回收，表现是端口开了、
@@ -239,11 +250,11 @@ docs/                      路径图、字节码规格、原生函数表、调�
 | [tools/build-firmware.ps1](tools/build-firmware.ps1) | 交叉编译固件（`-Example 名字` 切换示例） |
 | [tools/flash-firmware.ps1](tools/flash-firmware.ps1) | SWD 烧录（默认预览，`-Apply` 才写） |
 | [tools/capture-serial.ps1](tools/capture-serial.ps1) | 串口录制到 `build\uart\`（`-Port` / `-Seconds` / `-Out`） |
-| [tools/test.ps1](tools/test.ps1) | 输出回归（逐字节对比 `tests\expected`） |
-| [tools/test-errors.ps1](tools/test-errors.ps1) | 错误码回归（E004 / E007 / E009 / E013 / E023 / E027 / E028 / E035 / E036 / E037 / E102 / E103 / E117 / E118 / E120 / E121 / E122 / E123） |
+| [tools/test.ps1](tools/test.ps1) | 输出回归（逐字节对比 `tests\expected`，18/18） |
+| [tools/test-errors.ps1](tools/test-errors.ps1) | 错误码回归（E004 / E007 / E009 / E013 / E023 / E027 / E028 / E035 / E036 / E037 / E102 / E103 / E117 / E118 / E120 / E121 / E122 / E123 / E124，24/24） |
 | [tools/test-native-import.ps1](tools/test-native-import.ps1) | 原生导入回归（引脚 / ADC / 定时器 / 队列 / 信号量 / 外部中断各三类错误 + 任务 + 正确用例，25/25） |
-| [tools/test-packages.ps1](tools/test-packages.ps1) | 包用例回归（单包/双包/菱形/离线/预算等） |
-| [tools/test-debug.ps1](tools/test-debug.ps1) | 调试表回归（双向查询/跨函数/跨包/剥离/损坏/旧文件） |
+| [tools/test-packages.ps1](tools/test-packages.ps1) | 包用例回归（单包/双包/菱形/离线/预算等，23/23） |
+| [tools/test-debug.ps1](tools/test-debug.ps1) | 调试表回归（双向查询/跨函数/跨包/剥离/损坏/旧文件，26/26） |
 | [tools/size-report.ps1](tools/size-report.ps1) | 固件 Flash/RAM 体积报告与基线对比（`-Label` 命名，`-UpdateBaseline` 更新基线） |
 | [tools/toolchains.ps1](tools/toolchains.ps1) | 工具链定位与版本自检 |
 | [tools/fetch-toolchain.ps1](tools/fetch-toolchain.ps1) | 按锁文件下载并校验 ARM 工具链 |
@@ -267,11 +278,13 @@ ADC 满量程（PA0 接 3V3 读 4095 / 3300 mV，末位 4094 属正常抖动）�
 - ADC 是 12 位、单次阻塞转换、239.5 周期采样（ADC 时钟 12 MHz），不适合高速连续采样。
 - TIM2 是 16 位 1 kHz 计数器，约 65.5 秒回绕；跨回绕的差值要自己处理。
 - 整数只有 29 位（±268,435,455）；小数是 Q12 定点（值域约 ±524288，精度 1/4096），
-  不是软浮点。闭包按值捕获、捕获变量只读；类、属性访问在编译期显式报错。
+  不是软浮点。闭包按值捕获、捕获变量只读；`类` 支持字段、方法、`本` 与 `新建`，
+  但没有继承和虚分派，方法也不能当值取出来单独调用。
 - 异常只有一条路径：显式 `抛出` 才能被 `捕获`。除零（E007）、堆耗尽（E017）等 VM 故障，
   以及原生函数返回的 E030/E031/E033 都是终止性错误，`捕获` 拦不住；未捕获的抛出会以
   `[砾] 运行失败: 错误[E027] 未捕获的异常：<值>` 结束。没有 `最后`，`尝试` 后必须紧跟同层
-  `捕获`，嵌套上限 8 层（E028）。详见语言卡与 [examples/异常.jsh](examples/异常.jsh)。
+  `捕获`；try 栈按任务独立，根任务 8 层、子任务 4 层，超过报 E028。详见语言卡与
+  [examples/异常.jsh](examples/异常.jsh)、[examples/跨任务异常.jsh](examples/跨任务异常.jsh)。
 - 闭包是引用计数的堆对象；闭包与列表/字典互相引用成环时不会回收（没有 GC），
   反复创建会耗尽堆并报 `E017`。详见语言卡与 [examples/闭包.jsh](examples/闭包.jsh)。
 - 整数/整数的 `/` 是**真除法**：结果必须整除，否则运行期报 `E023`。只要有一个操作数是小数，

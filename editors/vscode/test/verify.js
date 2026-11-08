@@ -258,8 +258,10 @@ try {
   });
   check('格式化：已在仓库里的示例不被改写', () => {
     const dir = path.join(root, 'examples');
+    // Windows 默认 core.autocrlf=true，工作区可能是 CRLF；比较前统一成 LF。
+    const norm = s => s.replace(/\r\n/g, '\n');
     for (const name of fs.readdirSync(dir).filter(f => f.endsWith('.jsh'))) {
-      const src = fs.readFileSync(path.join(dir, name), 'utf8');
+      const src = norm(fs.readFileSync(path.join(dir, name), 'utf8'));
       assert.strictEqual(core.formatSource(src), src, name + ' 被格式化改写了');
     }
   });

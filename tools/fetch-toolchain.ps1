@@ -29,7 +29,8 @@ if (-not $tc) { throw ("锁定文件里没有工具链：" + $Name) }
 $cacheRoot = if ($env:JM_TOOLCHAIN_ROOT) { $env:JM_TOOLCHAIN_ROOT } else { Join-Path $env:LOCALAPPDATA "jishi\toolchains" }
 $target = if ($Bundle) { Join-Path $toolchainDir $Name } else { Join-Path $cacheRoot $Name }
 if ((Test-Path $target) -and (-not $Force)) {
-    throw ("目录已存在：" + $target + "；要重装请加 -Force")
+    Write-Host ("[跳过] 目录已存在：" + $target + "；要重装请加 -Force")
+    exit 0
 }
 
 if (-not $tc.archive.url) {

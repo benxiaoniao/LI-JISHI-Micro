@@ -130,7 +130,7 @@ pub const RUNTIME_ERROR_DOCS: &[RuntimeErrorDoc] = &[
     RuntimeErrorDoc { name: "E_IMPORT", meaning: "导入指令保留（编译期导入不生成该指令）" },
     RuntimeErrorDoc { name: "E_FILE", meaning: "字节码文件损坏或超出边界" },
     RuntimeErrorDoc { name: "E_UNCAUGHT", meaning: "未捕获的异常：`抛出` 的值一路传到了最外层（`错误[E027] 未捕获的异常：<值>`）" },
-    RuntimeErrorDoc { name: "E_TRY_DEPTH", meaning: "`尝试` 嵌套超过 8 层（运行时固定栈）" },
+    RuntimeErrorDoc { name: "E_TRY_DEPTH", meaning: "`尝试` 嵌套超过当前任务上限（根任务 8 层、子任务 4 层）" },
     RuntimeErrorDoc { name: "E_TRY_STATE", meaning: "`尝试` 栈与当前帧不匹配（字节码不平衡，通常由编译器 bug 引起）" },
     RuntimeErrorDoc { name: "E_FIELD", meaning: "实例没有这个字段（E035）" },
     RuntimeErrorDoc { name: "E_NOT_INSTANCE", meaning: "对非实例取字段或调方法（E036）" },

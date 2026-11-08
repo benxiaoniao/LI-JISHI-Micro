@@ -1,0 +1,10 @@
+# 统一换行：源码在库里按 LF 存放，避免 Windows 默认 core.autocrlf 把 .jsh 检出成 CRLF
+# （格式化器/回归按 LF 比较，CRLF 会让“示例不被改写”误报）。
+* text=auto
+*.jsh text eol=lf
+*.md text eol=lf
+*.rs text eol=lf
+*.c text eol=lf
+*.h text eol=lf
+*.json text eol=lf
+*.toml text eol=lf
