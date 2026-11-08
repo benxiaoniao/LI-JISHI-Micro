@@ -35,7 +35,15 @@ try {
         @{ file = "PWM占空比越界.jsh"; code = "E030"; stage = "运行" },
         @{ file = "PWM类型.jsh";     code = "E031"; stage = "运行" },
         @{ file = "PWM未启动.jsh";   code = "E033"; stage = "运行" },
-        @{ file = "PWM停止未启动.jsh"; code = "E033"; stage = "运行" }
+        @{ file = "PWM停止未启动.jsh"; code = "E033"; stage = "运行" },
+        @{ file = "I2C未初始化.jsh"; code = "E033"; stage = "运行" },
+        @{ file = "I2C地址越界.jsh"; code = "E030"; stage = "运行" },
+        @{ file = "I2C引脚越界.jsh"; code = "E030"; stage = "运行" },
+        @{ file = "I2C速率越界.jsh"; code = "E030"; stage = "运行" },
+        @{ file = "I2C数据越界.jsh"; code = "E030"; stage = "运行" },
+        @{ file = "I2C类型.jsh";     code = "E031"; stage = "运行" },
+        @{ file = "I2C设备未应答.jsh"; code = "E032"; stage = "运行" },
+        @{ file = "I2C探测未初始化.jsh"; code = "E033"; stage = "运行" }
     )
     $fail = 0
     foreach ($c in $cases) {

@@ -32,6 +32,7 @@
 
 #define RCC_APB1ENR_TIM2EN  (1u << 0)
 #define RCC_APB1ENR_TIM4EN  (1u << 2)
+#define RCC_APB1ENR_I2C2EN  (1u << 22)
 
 /* ADC 预分频：时钟 / 6（72 MHz → 12 MHz，上限 14 MHz） */
 #define RCC_CFGR_ADCPRE_MASK  (3u << 14)
@@ -49,6 +50,7 @@
 #define GPIOA_ODR       REG32(0x4001080Cu)
 #define GPIOB_CRL       REG32(0x40010C00u)
 #define GPIOB_CRH       REG32(0x40010C04u)
+#define GPIOB_IDR       REG32(0x40010C08u)
 #define GPIOB_ODR       REG32(0x40010C0Cu)
 #define GPIOC_CRL       REG32(0x40011000u)
 #define GPIOC_CRH       REG32(0x40011004u)
@@ -114,6 +116,28 @@
 #define TIM4_CCR3       REG32(0x4000083Cu)
 #define TIM4_CCR4       REG32(0x40000840u)
 
+/* I2C2（PB10 = SCL / PB11 = SDA，默认映射，无需 AFIO 重映射）
+ * I2C2 挂在 APB1：72 MHz 主频时 PCLK1 = 36 MHz（PPRE1=/2），
+ * 所以 CCR / TRISE 必须按 36 MHz 算；若 HSE 缺席退回 HSI 8 MHz，则按 8 MHz 算。 */
+#define I2C2_CR1        REG32(0x40005800u)
+#define I2C2_CR2        REG32(0x40005804u)
+#define I2C2_DR         REG32(0x40005810u)
+#define I2C2_SR1        REG32(0x40005814u)
+#define I2C2_SR2        REG32(0x40005818u)
+#define I2C2_CCR        REG32(0x4000581Cu)
+#define I2C2_TRISE      REG32(0x40005820u)
+
+#define I2C_CR1_PE      (1u << 0)
+#define I2C_CR1_START   (1u << 8)
+#define I2C_CR1_STOP    (1u << 9)
+#define I2C_CR1_SWRST   (1u << 15)
+#define I2C_SR1_SB      (1u << 0)
+#define I2C_SR1_ADDR    (1u << 1)
+#define I2C_SR1_BTF     (1u << 2)
+#define I2C_SR1_TXE     (1u << 7)
+#define I2C_SR1_AF      (1u << 10)
+#define I2C_CCR_FS      (1u << 15)
+
 /* EXTI：编码引脚 0–15 = PA0–PA15，16–31 = PB0–PB15，32–47 = PC0–PC15；
  * EXTI 线号 = 引脚 % 16，端口选择写 AFIO_EXTICR1–4。 */
 #define AFIO_EXTICR1    REG32(0x40010008u)
@@ -145,6 +169,7 @@
 /* ---------------- 状态 ---------------- */
 
 static uint32_t g_sysclk = 8000000u;
+static uint32_t g_pclk1 = 8000000u;   /* APB1 时钟：I2C2 的 CCR/TRISE 按它算 */
 static volatile uint32_t g_ms = 0;
 static volatile uint8_t g_adc_ready = 0u;
 static volatile uint8_t g_timer_ready = 0u;
@@ -182,9 +207,11 @@ static uint32_t clock_init(void)
         }
 
         g_sysclk = 72000000u;
+        g_pclk1 = 36000000u;   /* PPRE1 = /2 */
     } else {
         /* HSE 缺席（无外部晶振）：退回内部 HSI 8 MHz */
         g_sysclk = 8000000u;
+        g_pclk1 = 8000000u;    /* 兜底路径没有改 PPRE1，APB1 = 8 MHz */
     }
     return g_sysclk;
 }
@@ -398,21 +425,18 @@ int port_adc_read(uint32_t channel, uint32_t *raw)
     return 0;
 }
 
-/* ---------------- TIM2（1 kHz 毫秒计数） ---------------- */
+/* ---------------- 定时器（毫秒基准） ----------------
+ * 注意：TIM2 的 PSC 是 16 位，72 MHz 下分到 1 kHz 需要 71999，超出 16 位——
+ * 原来的写法写进寄存器后只剩低 16 位（6463），实际计数约 11.1 kHz，「毫秒」是错的。
+ * 毫秒统一改用 SysTick 的 1 ms 计数 g_ms；TIM2 只留作 1 MHz 自由运行（PSC=71）。
+ */
 
 void port_timer_init(void)
 {
-    uint32_t psc = g_sysclk / 1000u;
-
-    if (psc == 0u) {
-        psc = 1u;
-    }
-    psc -= 1u;   /* 计数频率 = TIM2CLK / (PSC + 1) = 1 kHz */
-
     RCC_APB1ENR |= RCC_APB1ENR_TIM2EN;
     TIM2_CR1 = 0u;
-    TIM2_PSC = psc;
-    TIM2_ARR = 0xFFFFu;   /* 16 位自由运行，约 65.5 秒回绕 */
+    TIM2_PSC = 71u;       /* 72 MHz / 72 = 1 MHz：每计数 1 µs */
+    TIM2_ARR = 0xFFFFu;   /* 16 位自由运行，约 65.5 ms 回绕（不用于毫秒） */
     TIM2_EGR = 1u;        /* UG：立即把 PSC/ARR 装进影子寄存器 */
     TIM2_CNT = 0u;
     TIM2_CR1 = 1u;        /* CEN = 1 */
@@ -422,18 +446,14 @@ void port_timer_init(void)
 
 int port_timer_delay_ms(uint32_t ms)
 {
-    uint16_t last;
-    uint32_t elapsed = 0u;
+    uint32_t start;
 
     if (g_timer_ready == 0u || ms > 60000u) {
         return -1;
     }
 
-    last = (uint16_t)(TIM2_CNT & 0xFFFFu);
-    while (elapsed < ms) {
-        uint16_t now = (uint16_t)(TIM2_CNT & 0xFFFFu);
-        elapsed += (uint16_t)(now - last);   /* 16 位差值，天然处理回绕 */
-        last = now;
+    start = g_ms;
+    while ((uint32_t)(g_ms - start) < ms) {
     }
     return 0;
 }
@@ -443,12 +463,12 @@ int port_timer_count(uint32_t *ms)
     if (g_timer_ready == 0u || ms == 0) {
         return -1;
     }
-    *ms = TIM2_CNT & 0xFFFFu;
+    *ms = g_ms & 0xFFFFu;
     return 0;
 }
 
 /* ---------------- TIM4 PWM（PB6–PB9 = CH1–CH4） ----------------
- * TIM2 已是 jmk_delay 的 1 kHz 毫秒基准，这里用 TIM4，互不影响。
+ * 毫秒基准是 SysTick（g_ms），TIM2 只做 1 MHz 计数；这里用 TIM4，互不影响。
  * ARR 固定 999 → 一个周期正好 1000 个计数，CCR 直接写千分比（0–1000）。
  * PC13 只有 GPIO，没有定时器通道，不能做 PWM；PB6–PB9 上板可用。
  */
@@ -566,6 +586,314 @@ int port_pwm_stop(void)
 
     g_pwm_on = 0u;
     return 0;
+}
+
+/* ---------------- I2C：硬件 I2C2 + 软件位翻转 ----------------
+ * 一次调用 = 一次完整事务（START … STOP），不跨调用保持总线。
+ * SSD1306 只要「地址 + 控制字节 + 1–6 个数据字节」，所以不做缓冲队列。
+ * 引脚编码：0–15 = PA0–PA15，16–31 = PB0–PB15，32–47 = PC0–PC15。
+ */
+
+#define I2C_PIN_HW_SCL 26u   /* PB10 */
+#define I2C_PIN_HW_SDA 27u   /* PB11 */
+
+static uint8_t g_i2c_ready = 0u;
+static uint8_t g_i2c_hw = 0u;
+static uint32_t g_i2c_scl = 0u;
+static uint32_t g_i2c_sda = 0u;
+
+static volatile uint32_t *gpio_reg(uint32_t port, uint32_t off)
+{
+    return (volatile uint32_t *)(0x40010800u + port * 0x400u + off);
+}
+
+/* 通用开漏输出 50 MHz（CR nibble = 0x7），依赖外部上拉 */
+static void i2c_gpio_open_drain(uint32_t pin)
+{
+    uint32_t port = pin / 16u;
+    uint32_t line = pin % 16u;
+    uint32_t shift = (line & 7u) * 4u;
+    volatile uint32_t *cr = gpio_reg(port, (line < 8u) ? 0x00u : 0x04u);
+
+    RCC_APB2ENR |= (1u << (2u + port));   /* IOPAEN / IOPBEN / IOPCEN */
+    *cr = (*cr & ~(0xFu << shift)) | (0x7u << shift);
+}
+
+static void bb_write(uint32_t pin, uint32_t level)
+{
+    volatile uint32_t *odr = gpio_reg(pin / 16u, 0x0Cu);
+    if (level != 0u) {
+        *odr |= (1u << (pin % 16u));
+    } else {
+        *odr &= ~(1u << (pin % 16u));
+    }
+}
+
+static uint32_t bb_read(uint32_t pin)
+{
+    return (*gpio_reg(pin / 16u, 0x08u) >> (pin % 16u)) & 1u;
+}
+
+/* 约 1–2 µs 的半位延时：几十 kHz 量级，不求精确 */
+static void bb_delay(void)
+{
+    volatile uint32_t i;
+    for (i = 0u; i < 30u; i++) {
+    }
+}
+
+static void bb_start(void)
+{
+    bb_write(g_i2c_sda, 1u);
+    bb_write(g_i2c_scl, 1u);
+    bb_delay();
+    bb_write(g_i2c_sda, 0u);
+    bb_delay();
+    bb_write(g_i2c_scl, 0u);
+    bb_delay();
+}
+
+static void bb_stop(void)
+{
+    bb_write(g_i2c_sda, 0u);
+    bb_delay();
+    bb_write(g_i2c_scl, 1u);
+    bb_delay();
+    bb_write(g_i2c_sda, 1u);
+    bb_delay();
+}
+
+/* 返回 0 = 收到 ACK */
+static uint32_t bb_write_byte(uint32_t byte)
+{
+    uint32_t i;
+    uint32_t ack;
+
+    for (i = 0u; i < 8u; i++) {
+        bb_write(g_i2c_sda, (byte & 0x80u) ? 1u : 0u);
+        bb_delay();
+        bb_write(g_i2c_scl, 1u);
+        bb_delay();
+        bb_write(g_i2c_scl, 0u);
+        bb_delay();
+        byte <<= 1;
+    }
+
+    bb_write(g_i2c_sda, 1u);
+    bb_delay();
+    bb_write(g_i2c_scl, 1u);
+    bb_delay();
+    ack = bb_read(g_i2c_sda);
+    bb_write(g_i2c_scl, 0u);
+    bb_delay();
+    return ack;
+}
+
+static int i2c2_wait(uint32_t flag, uint32_t fail_flag)
+{
+    uint32_t timeout = 200000u;
+
+    while ((I2C2_SR1 & flag) == 0u) {
+        if (fail_flag != 0u && (I2C2_SR1 & fail_flag) != 0u) {
+            return -1;
+        }
+        if (--timeout == 0u) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static void i2c2_clear_addr(void)
+{
+    (void)I2C2_SR1;
+    (void)I2C2_SR2;
+}
+
+static int i2c2_init(uint32_t speed_khz)
+{
+    uint32_t pclk1_mhz = g_pclk1 / 1000000u;
+    uint32_t pclk1_khz = g_pclk1 / 1000u;   /* CCR 的分频必须按 kHz 算，别把 Hz 直接除 */
+    uint32_t ccr;
+
+    RCC_APB2ENR |= RCC_APB2ENR_IOPBEN;
+    RCC_APB1ENR |= RCC_APB1ENR_I2C2EN;
+
+    /* PB10 / PB11 配成复用开漏 50 MHz：CRH 的 bit8–11 / bit12–15 */
+    GPIOB_CRH = (GPIOB_CRH & ~((0xFu << 8) | (0xFu << 12)))
+              | (0xFu << 8) | (0xFu << 12);
+
+    I2C2_CR1 = I2C_CR1_SWRST;   /* 软复位，清掉可能残留的忙状态 */
+    I2C2_CR1 = 0u;
+
+    /* FREQ[5:0] 必须写 APB1 的 MHz 数：36 MHz → 36，8 MHz → 8 */
+    I2C2_CR2 = pclk1_mhz;
+
+    if (speed_khz <= 100u) {
+        ccr = pclk1_khz / (2u * speed_khz);          /* 标准模式：Thigh = Tlow = CCR × Tpclk1 */
+        if (ccr < 4u) {
+            ccr = 4u;
+        }
+        I2C2_CCR = ccr;
+        I2C2_TRISE = pclk1_mhz + 1u;                 /* 1000 ns × fPCLK1 + 1 */
+    } else {
+        ccr = pclk1_khz / (3u * speed_khz);          /* 快速模式：Tlow = 2 × Thigh */
+        if (ccr < 1u) {
+            ccr = 1u;
+        }
+        I2C2_CCR = I2C_CCR_FS | ccr;
+        I2C2_TRISE = (pclk1_mhz * 3u) / 10u + 1u;    /* 300 ns × fPCLK1 + 1 */
+    }
+
+    I2C2_CR1 = I2C_CR1_PE;
+    return 0;
+}
+
+static int i2c2_begin(uint32_t addr)
+{
+    I2C2_CR1 |= I2C_CR1_START;
+    if (i2c2_wait(I2C_SR1_SB, 0u) != 0) {
+        I2C2_CR1 |= I2C_CR1_STOP;
+        return -1;
+    }
+    I2C2_DR = addr << 1;                 /* 写方向：R/W = 0 */
+    if (i2c2_wait(I2C_SR1_ADDR, I2C_SR1_AF) != 0) {
+        I2C2_SR1 &= ~I2C_SR1_AF;         /* 清 AF */
+        I2C2_CR1 |= I2C_CR1_STOP;
+        return -1;
+    }
+    i2c2_clear_addr();
+    return 0;
+}
+
+static int i2c2_send(uint32_t byte)
+{
+    if (i2c2_wait(I2C_SR1_TXE, I2C_SR1_AF) != 0) {
+        return -1;
+    }
+    I2C2_DR = byte;
+    return 0;
+}
+
+static int i2c2_write(uint32_t addr, uint32_t ctrl, const uint32_t *data, uint32_t len)
+{
+    uint32_t i;
+
+    if (i2c2_begin(addr) != 0) {
+        return -1;
+    }
+    if (i2c2_send(ctrl) != 0) {
+        I2C2_CR1 |= I2C_CR1_STOP;
+        return -1;
+    }
+    for (i = 0u; i < len; i++) {
+        if (i2c2_send(data[i]) != 0) {
+            I2C2_CR1 |= I2C_CR1_STOP;
+            return -1;
+        }
+    }
+    if (i2c2_wait(I2C_SR1_BTF, 0u) != 0) {
+        I2C2_CR1 |= I2C_CR1_STOP;
+        return -1;
+    }
+    I2C2_CR1 |= I2C_CR1_STOP;
+    return 0;
+}
+
+static int i2c2_probe(uint32_t addr)
+{
+    I2C2_CR1 |= I2C_CR1_START;
+    if (i2c2_wait(I2C_SR1_SB, 0u) != 0) {
+        I2C2_CR1 |= I2C_CR1_STOP;
+        return 0;
+    }
+    I2C2_DR = addr << 1;
+    if (i2c2_wait(I2C_SR1_ADDR, I2C_SR1_AF) != 0) {
+        I2C2_SR1 &= ~I2C_SR1_AF;
+        I2C2_CR1 |= I2C_CR1_STOP;
+        return 0;
+    }
+    i2c2_clear_addr();
+    I2C2_CR1 |= I2C_CR1_STOP;
+    return 1;
+}
+
+int port_i2c_init(uint32_t scl_pin, uint32_t sda_pin, uint32_t speed_khz)
+{
+    if (scl_pin > 47u || sda_pin > 47u || speed_khz < 10u || speed_khz > 400u ||
+        scl_pin == sda_pin) {
+        return -1;
+    }
+
+    g_i2c_ready = 0u;
+    g_i2c_scl = scl_pin;
+    g_i2c_sda = sda_pin;
+
+    if (scl_pin == I2C_PIN_HW_SCL && sda_pin == I2C_PIN_HW_SDA) {
+        if (i2c2_init(speed_khz) != 0) {
+            return -1;
+        }
+        g_i2c_hw = 1u;
+    } else {
+        i2c_gpio_open_drain(scl_pin);
+        i2c_gpio_open_drain(sda_pin);
+        bb_write(sda_pin, 1u);           /* 释放总线，靠外部上拉拉高 */
+        bb_write(scl_pin, 1u);
+        g_i2c_hw = 0u;
+    }
+
+    g_i2c_ready = 1u;
+    return (int)g_i2c_hw;                /* 1 = 硬件 I2C2，0 = 软件位翻转 */
+}
+
+int port_i2c_write(uint32_t addr, uint32_t ctrl, const uint32_t *data, uint32_t len)
+{
+    uint32_t i;
+
+    if (g_i2c_ready == 0u || addr > 127u || ctrl > 255u || len == 0u) {
+        return -1;
+    }
+
+    if (g_i2c_hw != 0u) {
+        return i2c2_write(addr, ctrl, data, len);
+    }
+
+    bb_start();
+    if (bb_write_byte(addr << 1) != 0u) {
+        bb_stop();
+        return -1;
+    }
+    if (bb_write_byte(ctrl) != 0u) {
+        bb_stop();
+        return -1;
+    }
+    for (i = 0u; i < len; i++) {
+        if (bb_write_byte(data[i]) != 0u) {
+            bb_stop();
+            return -1;
+        }
+    }
+    bb_stop();
+    return 0;
+}
+
+int port_i2c_probe(uint32_t addr)
+{
+    if (g_i2c_ready == 0u || addr > 127u) {
+        return -1;
+    }
+
+    if (g_i2c_hw != 0u) {
+        return i2c2_probe(addr);
+    }
+
+    {
+        uint32_t ack;
+        bb_start();
+        ack = bb_write_byte(addr << 1);
+        bb_stop();
+        return (ack == 0u) ? 1 : 0;
+    }
 }
 
 /* ---------------- EXTI（PA0–PA4 → EXTI0–4） ---------------- */

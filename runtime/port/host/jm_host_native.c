@@ -1,4 +1,5 @@
 #include <stdint.h>
+#include <stdio.h>
 #include "jm_native.h"
 #include "jm_native_table.h"
 #include "jm_port.h"
@@ -519,6 +520,165 @@ static const JmNativeEntry HOST_TIMER_TABLE[] = {
     F103_TIMER_TABLE_INIT
 };
 
+/* ---- 主机端 I2C 替身 ----
+ * PC 上没有 I2C 总线，这里只做两件事：
+ *   1) 与板级完全相同的参数校验与错误码；
+ *   2) 把「发出去的字节」打到 stdout，供逐条核对 SSD1306 初始化命令序列。
+ * 为了让扫描与初始化示例在主机上跑通，模拟 0x3C 有应答（SSD1306 常见地址）。
+ */
+static uint8_t g_host_i2c_ready = 0u;
+static uint8_t g_host_i2c_hw = 0u;
+
+static int n_i2c_init(JmStateRef st, const JmValue *args, uint8_t nargs,
+                      JmValue *out) {
+    int32_t scl = 0;
+    int32_t sda = 0;
+    int32_t khz = 0;
+
+    if (nargs != 3) {
+        return jm_native_fail(st, JM_NE_PARAM,
+                              "I2C初始化需要三个参数：SCL引脚, SDA引脚, 速率千赫兹");
+    }
+    if (jm_value_to_int(args[0], &scl) != 0 ||
+        jm_value_to_int(args[1], &sda) != 0 ||
+        jm_value_to_int(args[2], &khz) != 0) {
+        return jm_native_fail(st, JM_NE_TYPE, "I2C初始化：参数必须是整数");
+    }
+    if (scl < 0 || scl > 47 || sda < 0 || sda > 47) {
+        return jm_native_fail(st, JM_NE_PARAM,
+                              "引脚编码 0–47（0–15=PA0–PA15，16–31=PB0–PB15，32–47=PC0–PC15）");
+    }
+    if (scl == sda) {
+        return jm_native_fail(st, JM_NE_PARAM, "SCL 与 SDA 不能是同一个引脚");
+    }
+    if (khz < 10 || khz > 400) {
+        return jm_native_fail(st, JM_NE_PARAM, "I2C 速率范围 10–400 kHz");
+    }
+
+    g_host_i2c_hw = (scl == 26 && sda == 27) ? 1u : 0u;
+    g_host_i2c_ready = 1u;
+    printf("[I2C] 初始化：%s，SCL=%d SDA=%d，%d kHz\n",
+           g_host_i2c_hw ? "硬件 I2C2" : "软件位翻转", scl, sda, khz);
+    *out = jm_value_bool(g_host_i2c_hw);
+    return JM_NATIVE_OK;
+}
+
+static int host_i2c_check_addr(JmStateRef st, int32_t addr) {
+    if (addr < 0 || addr > 127) {
+        return jm_native_fail(st, JM_NE_PARAM, "I2C 设备地址范围 0–127");
+    }
+    if (g_host_i2c_ready == 0u) {
+        return jm_native_fail(st, JM_NE_STATE, "I2C 未初始化，先调用 I2C初始化()");
+    }
+    if (addr != 0x3C) {
+        char msg[96];
+        snprintf(msg, sizeof(msg), "I2C 设备 0x%02X 未应答（主机端口只模拟 0x3C）",
+                 (unsigned)addr);
+        return jm_native_fail(st, JM_NE_HW, msg);
+    }
+    return 0;
+}
+
+static void host_i2c_trace(int32_t addr, uint32_t ctrl, const uint32_t *data,
+                           uint8_t count) {
+    uint8_t i;
+    if (ctrl != 0x00u) {
+        return;   /* 0x40 是显存数据，逐字节打印会把输出冲爆 */
+    }
+    printf("[I2C] 0x%02X 命令：", (unsigned)addr);
+    for (i = 0u; i < count; i++) {
+        printf(" 0x%02X", (unsigned)data[i]);
+    }
+    printf("\n");
+}
+
+static int n_i2c_write(JmStateRef st, const JmValue *args, uint8_t nargs,
+                       JmValue *out) {
+    int32_t addr = 0;
+    int32_t ctrl = 0;
+    int32_t data = 0;
+    uint32_t byte;
+
+    if (nargs != 3) {
+        return jm_native_fail(st, JM_NE_PARAM,
+                              "I2C写需要三个参数：设备地址, 控制字节, 数据字节");
+    }
+    if (jm_value_to_int(args[0], &addr) != 0 ||
+        jm_value_to_int(args[1], &ctrl) != 0 ||
+        jm_value_to_int(args[2], &data) != 0) {
+        return jm_native_fail(st, JM_NE_TYPE, "I2C写：参数必须是整数");
+    }
+    if (ctrl < 0 || ctrl > 255 || data < 0 || data > 255) {
+        return jm_native_fail(st, JM_NE_PARAM, "I2C 控制字节/数据字节范围 0–255");
+    }
+    if (host_i2c_check_addr(st, addr) != 0) {
+        return -1;
+    }
+    byte = (uint32_t)data;
+    host_i2c_trace(addr, (uint32_t)ctrl, &byte, 1u);
+    *out = jm_value_nil();
+    return JM_NATIVE_OK;
+}
+
+static int n_i2c_write_block(JmStateRef st, const JmValue *args, uint8_t nargs,
+                             JmValue *out) {
+    int32_t addr = 0;
+    int32_t ctrl = 0;
+    uint32_t data[6];
+    uint8_t count = 0u;
+    uint8_t i;
+
+    if (nargs < 3 || nargs > 8) {
+        return jm_native_fail(st, JM_NE_PARAM,
+                              "I2C写块需要 3–8 个参数：设备地址, 控制字节, 数据1[, 数据2 … 数据6]");
+    }
+    if (jm_value_to_int(args[0], &addr) != 0 ||
+        jm_value_to_int(args[1], &ctrl) != 0) {
+        return jm_native_fail(st, JM_NE_TYPE, "I2C写块：地址与控制字节必须是整数");
+    }
+    if (ctrl < 0 || ctrl > 255) {
+        return jm_native_fail(st, JM_NE_PARAM, "I2C 控制字节范围 0–255");
+    }
+    for (i = 2u; i < nargs; i++) {
+        int32_t v = 0;
+        if (jm_value_to_int(args[i], &v) != 0) {
+            return jm_native_fail(st, JM_NE_TYPE, "I2C 数据字节必须是整数");
+        }
+        if (v < 0 || v > 255) {
+            return jm_native_fail(st, JM_NE_PARAM, "I2C 数据字节范围 0–255");
+        }
+        data[count] = (uint32_t)v;
+        count++;
+    }
+    if (host_i2c_check_addr(st, addr) != 0) {
+        return -1;
+    }
+    host_i2c_trace(addr, (uint32_t)ctrl, data, count);
+    *out = jm_value_nil();
+    return JM_NATIVE_OK;
+}
+
+static int n_i2c_probe(JmStateRef st, const JmValue *args, uint8_t nargs,
+                       JmValue *out) {
+    int32_t addr = 0;
+
+    if (nargs != 1 || jm_value_to_int(args[0], &addr) != 0) {
+        return jm_native_fail(st, JM_NE_TYPE, "I2C探测需要一个整数参数：设备地址");
+    }
+    if (addr < 0 || addr > 127) {
+        return jm_native_fail(st, JM_NE_PARAM, "I2C 设备地址范围 0–127");
+    }
+    if (g_host_i2c_ready == 0u) {
+        return jm_native_fail(st, JM_NE_STATE, "I2C 未初始化，先调用 I2C初始化()");
+    }
+    *out = jm_value_bool(addr == 0x3C);   /* 主机只模拟 SSD1306 的常见地址 */
+    return JM_NATIVE_OK;
+}
+
+static const JmNativeEntry HOST_BUS_TABLE[] = {
+    F103_BUS_TABLE_INIT
+};
+
 int jm_host_native_register(void) {
     if (jm_native_register(HOST_QUEUE_TABLE, (uint8_t)JM_QUEUE_ENTRY_COUNT) != 0) {
         return -1;
@@ -533,6 +693,9 @@ int jm_host_native_register(void) {
         return -1;
     }
     if (jm_native_register(HOST_TIMER_TABLE, (uint8_t)F103_TIMER_ENTRY_COUNT) != 0) {
+        return -1;
+    }
+    if (jm_native_register(HOST_BUS_TABLE, (uint8_t)F103_BUS_ENTRY_COUNT) != 0) {
         return -1;
     }
     return 0;

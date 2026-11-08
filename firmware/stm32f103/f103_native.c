@@ -232,6 +232,158 @@ static int n_pwm_stop(JmStateRef st, const JmValue *args, uint8_t nargs,
     return JM_NATIVE_OK;
 }
 
+/* ---- 「总线」表：I2C（PB10/PB11 走硬件 I2C2，其它引脚走软件位翻转） ---- */
+
+static uint8_t g_i2c_ready = 0u;
+
+static int n_i2c_init(JmStateRef st, const JmValue *args, uint8_t nargs,
+                      JmValue *out) {
+    int32_t scl = 0;
+    int32_t sda = 0;
+    int32_t khz = 0;
+    int rc;
+
+    if (nargs != 3) {
+        return jm_native_fail(st, JM_NE_PARAM,
+                              "I2C初始化需要三个参数：SCL引脚, SDA引脚, 速率千赫兹");
+    }
+    if (jm_value_to_int(args[0], &scl) != 0 ||
+        jm_value_to_int(args[1], &sda) != 0 ||
+        jm_value_to_int(args[2], &khz) != 0) {
+        return jm_native_fail(st, JM_NE_TYPE, "I2C初始化：参数必须是整数");
+    }
+    if (scl < 0 || scl > 47 || sda < 0 || sda > 47) {
+        return jm_native_fail(st, JM_NE_PARAM,
+                              "引脚编码 0–47（0–15=PA0–PA15，16–31=PB0–PB15，32–47=PC0–PC15）");
+    }
+    if (scl == sda) {
+        return jm_native_fail(st, JM_NE_PARAM, "SCL 与 SDA 不能是同一个引脚");
+    }
+    if (khz < 10 || khz > 400) {
+        return jm_native_fail(st, JM_NE_PARAM, "I2C 速率范围 10–400 kHz");
+    }
+
+    rc = port_i2c_init((uint32_t)scl, (uint32_t)sda, (uint32_t)khz);
+    if (rc < 0) {
+        return jm_native_fail(st, JM_NE_HW, "I2C 初始化失败");
+    }
+    g_i2c_ready = 1u;
+    *out = jm_value_bool(rc != 0);      /* 真 = 硬件 I2C2，假 = 软件位翻转 */
+    return JM_NATIVE_OK;
+}
+
+static int n_i2c_arg_bytes(JmStateRef st, const JmValue *args, uint8_t first,
+                           uint8_t nargs, uint32_t *buf, uint8_t *count) {
+    uint8_t i;
+
+    *count = 0u;
+    for (i = first; i < nargs; i++) {
+        int32_t v = 0;
+        if (jm_value_to_int(args[i], &v) != 0) {
+            return jm_native_fail(st, JM_NE_TYPE, "I2C 数据字节必须是整数");
+        }
+        if (v < 0 || v > 255) {
+            return jm_native_fail(st, JM_NE_PARAM, "I2C 数据字节范围 0–255");
+        }
+        buf[*count] = (uint32_t)v;
+        (*count)++;
+    }
+    return 0;
+}
+
+static int n_i2c_write(JmStateRef st, const JmValue *args, uint8_t nargs,
+                       JmValue *out) {
+    int32_t addr = 0;
+    int32_t ctrl = 0;
+    int32_t data_i = 0;
+    uint32_t data;
+
+    if (nargs != 3) {
+        return jm_native_fail(st, JM_NE_PARAM,
+                              "I2C写需要三个参数：设备地址, 控制字节, 数据字节");
+    }
+    if (jm_value_to_int(args[0], &addr) != 0 ||
+        jm_value_to_int(args[1], &ctrl) != 0 ||
+        jm_value_to_int(args[2], &data_i) != 0) {
+        return jm_native_fail(st, JM_NE_TYPE, "I2C写：参数必须是整数");
+    }
+    if (addr < 0 || addr > 127) {
+        return jm_native_fail(st, JM_NE_PARAM, "I2C 设备地址范围 0–127");
+    }
+    if (ctrl < 0 || ctrl > 255 || data_i < 0 || data_i > 255) {
+        return jm_native_fail(st, JM_NE_PARAM, "I2C 控制字节/数据字节范围 0–255");
+    }
+    if (g_i2c_ready == 0u) {
+        return jm_native_fail(st, JM_NE_STATE, "I2C 未初始化，先调用 I2C初始化()");
+    }
+    data = (uint32_t)data_i;
+    if (port_i2c_write((uint32_t)addr, (uint32_t)ctrl, &data, 1u) != 0) {
+        return jm_native_fail(st, JM_NE_HW, "I2C 写失败（设备未应答或总线超时）");
+    }
+    *out = jm_value_nil();
+    return JM_NATIVE_OK;
+}
+
+static int n_i2c_write_block(JmStateRef st, const JmValue *args, uint8_t nargs,
+                             JmValue *out) {
+    int32_t addr = 0;
+    int32_t ctrl_b = 0;
+    uint32_t ctrl;
+    uint32_t data[6];
+    uint8_t count = 0u;
+    int rc;
+
+    if (nargs < 3 || nargs > 8) {
+        return jm_native_fail(st, JM_NE_PARAM,
+                              "I2C写块需要 3–8 个参数：设备地址, 控制字节, 数据1[, 数据2 … 数据5]");
+    }
+    if (jm_value_to_int(args[0], &addr) != 0 ||
+        jm_value_to_int(args[1], &ctrl_b) != 0) {
+        return jm_native_fail(st, JM_NE_TYPE, "I2C写块：地址与控制字节必须是整数");
+    }
+    if (addr < 0 || addr > 127) {
+        return jm_native_fail(st, JM_NE_PARAM, "I2C 设备地址范围 0–127");
+    }
+    if (ctrl_b < 0 || ctrl_b > 255) {
+        return jm_native_fail(st, JM_NE_PARAM, "I2C 控制字节范围 0–255");
+    }
+    rc = n_i2c_arg_bytes(st, args, 2u, nargs, data, &count);
+    if (rc != 0) {
+        return -1;
+    }
+    if (g_i2c_ready == 0u) {
+        return jm_native_fail(st, JM_NE_STATE, "I2C 未初始化，先调用 I2C初始化()");
+    }
+    ctrl = (uint32_t)ctrl_b;
+    if (port_i2c_write((uint32_t)addr, ctrl, data, (uint32_t)count) != 0) {
+        return jm_native_fail(st, JM_NE_HW, "I2C 写块失败（设备未应答或总线超时）");
+    }
+    *out = jm_value_nil();
+    return JM_NATIVE_OK;
+}
+
+static int n_i2c_probe(JmStateRef st, const JmValue *args, uint8_t nargs,
+                       JmValue *out) {
+    int32_t addr = 0;
+    int rc;
+
+    if (arg_int(st, args, nargs, &addr, "I2C探测需要一个参数：设备地址") != 0) {
+        return -1;
+    }
+    if (addr < 0 || addr > 127) {
+        return jm_native_fail(st, JM_NE_PARAM, "I2C 设备地址范围 0–127");
+    }
+    if (g_i2c_ready == 0u) {
+        return jm_native_fail(st, JM_NE_STATE, "I2C 未初始化，先调用 I2C初始化()");
+    }
+    rc = port_i2c_probe((uint32_t)addr);
+    if (rc < 0) {
+        return jm_native_fail(st, JM_NE_HW, "I2C 探测失败");
+    }
+    *out = jm_value_bool(rc != 0);
+    return JM_NATIVE_OK;
+}
+
 /* 语言层「任务」不再走原生表：创建/让出/延时/等待由 VM 绿色调度器实现。 */
 
 /* ---- 语言层任务间通信（JM8 续）：整数句柄 → 静态 JMK 对象槽 ----
@@ -616,6 +768,10 @@ static const JmNativeEntry IRQ_TABLE[] = {
     JM_IRQ_TABLE_INIT
 };
 
+static const JmNativeEntry BUS_TABLE[] = {
+    F103_BUS_TABLE_INIT
+};
+
 int f103_native_register(void) {
     /* 中断里只允许走这条回调；它只做 jmk_queue_send_from_isr，不进 VM。 */
     port_exti_set_hook(irq_post_from_isr);
@@ -635,6 +791,9 @@ int f103_native_register(void) {
         return -1;
     }
     if (jm_native_register(IRQ_TABLE, (uint8_t)JM_IRQ_ENTRY_COUNT) != 0) {
+        return -1;
+    }
+    if (jm_native_register(BUS_TABLE, (uint8_t)F103_BUS_ENTRY_COUNT) != 0) {
         return -1;
     }
     return 0;

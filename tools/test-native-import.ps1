@@ -65,6 +65,15 @@ else {
     Write-Host "  [PASS] 编译通过（导入 定时器 + PWM）"
 }
 
+& $micc (Join-Path $root "examples\board\OLED文字.jsh") -o (Join-Path $root "build\native-i2c-ok.jmb") | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "  [FAIL] OLED 文字示例被拒绝"
+    $script:fail++
+}
+else {
+    Write-Host "  [PASS] 编译通过（导入 总线 + I2C）"
+}
+
 function Expect-CompileError {
     param([string]$File, [string]$Code, [string]$Title)
     Write-Host ("== " + $Title)
@@ -100,6 +109,10 @@ Expect-CompileError "tests\errors\PWM名拼错.jsh" "E115" "PWM：名字拼错�
 Expect-CompileError "tests\errors\PWM参数个数.jsh" "E115" "PWM：参数个数不符应报 E115"
 Expect-CompileError "tests\errors\PWM未导入.jsh" "E113" "PWM：未导入就调用应报 E113"
 
+Expect-CompileError "tests\errors\I2C名拼错.jsh" "E115" "总线：名字拼错应报 E115"
+Expect-CompileError "tests\errors\I2C参数个数.jsh" "E115" "总线：参数个数不符应报 E115"
+Expect-CompileError "tests\errors\I2C未导入.jsh" "E113" "总线：未导入就调用应报 E113"
+
 Expect-CompileError "tests\errors\任务参数个数.jsh" "E115" "任务：参数个数不符应报 E115"
 Expect-CompileError "tests\errors\任务未导入.jsh" "E113" "任务：未导入就调用应报 E113"
 
@@ -119,5 +132,5 @@ if ($script:fail -ne 0) {
     Write-Host ("原生导入回归失败：" + $script:fail + " 项")
     exit 1
 }
-Write-Host "原生导入回归：29/29 通过（引脚 / ADC / 定时器 / 队列 / 信号量 / 外部中断 / PWM 各 3 个错误用例，任务 2 个错误用例；6 个正确示例）"
+Write-Host "原生导入回归：33/33 通过（引脚 / ADC / 定时器 / 队列 / 信号量 / 外部中断 / PWM / 总线各 3 个错误用例，任务 2 个错误用例；7 个正确示例）"
 exit 0

@@ -53,6 +53,15 @@ int  port_pwm_start(uint32_t pin, uint32_t freq_hz, uint32_t duty_permille);
 int  port_pwm_set_duty(uint32_t duty_permille);
 int  port_pwm_stop(void);
 
+/* I2C：SCL/SDA 引脚编码 0–47（0–15=PA0–PA15，16–31=PB0–PB15，32–47=PC0–PC15）。
+ * 26/27（PB10/PB11）走硬件 I2C2（APB1，72 MHz 主频时 36 MHz）；其它组合走软件位翻转，
+ * 引脚配成开漏输出，必须有外部上拉（OLED 模块自带 4.7k）。速率 10–400 kHz。
+ * port_i2c_init 返回 1 = 硬件通道，0 = 软件模拟，-1 = 参数越界/初始化失败。
+ * port_i2c_probe 返回 1 = 有 ACK，0 = 无 ACK，-1 = 未初始化/地址越界。 */
+int  port_i2c_init(uint32_t scl_pin, uint32_t sda_pin, uint32_t speed_khz);
+int  port_i2c_write(uint32_t addr, uint32_t ctrl, const uint32_t *data, uint32_t len);
+int  port_i2c_probe(uint32_t addr);
+
 /* EXTI：PA0–PA4 对应 EXTI0–4，边沿 0=上升 1=下降 2=双沿。
  * 引脚会被改成下拉输入；中断里只做计数与 hook 回调，hook 不许碰 VM。 */
 void port_exti_bind(uint32_t pin, uint32_t edge);
