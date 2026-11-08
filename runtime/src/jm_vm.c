@@ -2,6 +2,11 @@
 
 JmState jm_state;
 
+#if JM_STACK_WATERMARK
+/* 值栈高水位：本次 jm_run 里 sp 达到过的最大槽数（见 jm_internal.h 的开关说明）。 */
+uint16_t jm_stack_hw = 0;
+#endif
+
 #ifdef JM_HOST_DEBUG
 /* 由主机端口（runtime/port/host/jm_main.c）实现；返回非 0 表示命中断点。 */
 int jm_host_break_hit(uint8_t code_idx, uint16_t ip);
@@ -948,6 +953,7 @@ int jm_execute(JmState *st) {
             VM_FAIL(E_STACK, "值栈溢出");                                           \
         }                                                                          \
         st->stack[st->sp++] = (v_);                                                \
+        JM_HW_NOTE(st);                                                            \
     } while (0)
 #define POP_V(dst_)                                                                \
     do {                                                                           \

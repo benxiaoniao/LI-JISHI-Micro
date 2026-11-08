@@ -3,12 +3,15 @@
 
 #include <stdint.h>
 
-/* 平台端口：运行时只通过这两个函数与外界打交道。 */
+/* 平台端口：运行时只通过这几个函数与外界打交道。 */
 
 /* 输出一段文本（主机：stdout；STM32：UART）。 */
 void jm_port_write(const char *s, uint32_t n);
 
-/* 毫秒计数（任务调度用；v0 还未用到，先留接口）。 */
+/* 单调毫秒计数（绿色调度用它算截止时间与最近唤醒点）。 */
 uint32_t jm_port_millis(void);
+
+/* 睡眠指定毫秒（主机：Sleep/nanosleep；STM32：jmk_delay）。 */
+void jm_port_sleep_ms(uint32_t ms);
 
 #endif

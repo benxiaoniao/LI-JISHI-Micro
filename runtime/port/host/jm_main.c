@@ -210,6 +210,13 @@ int main(int argc, char **argv) {
     }
 
     int rc = jm_run(buf, (size_t)n);
+#if JM_STACK_WATERMARK
+    /* 观测构建专用：把本次运行的值栈峰值打到 stdout，便于按示例采集。 */
+    {
+        extern uint16_t jm_stack_hw;
+        printf("[值栈峰值] %u 槽 / %d\n", (unsigned)jm_stack_hw, (int)JM_STACK_SLOTS);
+    }
+#endif
     if (rc != 0) {
         fprintf(stderr, "%s\n", jm_last_error());
 #ifdef JM_HOST_DEBUG

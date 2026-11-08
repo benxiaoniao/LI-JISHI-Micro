@@ -136,6 +136,9 @@ int jm_loader_init(JmState *st, const void *data, size_t len) {
 int jm_run(const void *jmb, size_t len) {
     JmState *st = &jm_state;
     memset(st, 0, sizeof(*st));
+#if JM_STACK_WATERMARK
+    jm_stack_hw = 0;
+#endif
     for (int i = 0; i < JM_MAX_GLOBALS; i++) {
         st->globals[i] = JM_UNDEF;
         st->const_cache[i] = JM_UNDEF;
@@ -163,6 +166,7 @@ int jm_run(const void *jmb, size_t len) {
         }
         st->stack[st->sp++] = JM_UNDEF;
     }
+    JM_HW_NOTE(st);
 
     if (jm_execute(st)) {
         return -1;

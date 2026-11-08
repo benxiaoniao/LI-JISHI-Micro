@@ -536,3 +536,11 @@ uint32_t jm_port_millis(void)
 {
     return g_ms;
 }
+
+void jm_port_sleep_ms(uint32_t ms)
+{
+    if (ms == 0u) {
+        return;
+    }
+    jmk_delay(ms);
+}

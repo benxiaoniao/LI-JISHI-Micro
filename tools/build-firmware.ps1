@@ -3,7 +3,9 @@
 # 用法：.\tools\build-firmware.ps1 [-Example 你好]
 
 param(
-    [string]$Example = "你好"
+    [string]$Example = "你好",
+    # 额外宏，用于体积/观测两档对照，例如 -Define "-DJM_STACK_DIAG=0"
+    [string[]]$Define = @()
 )
 
 $ErrorActionPreference = "Stop"
@@ -81,6 +83,7 @@ try {
         -Wall -Wextra -ffreestanding -fno-common `
         -fdata-sections -ffunction-sections `
         -DJM_HEAP_SIZE=6144 `
+        @Define `
         -I "runtime\include" -I "runtime\src" -I "firmware\stm32f103" `
         -nostartfiles `
         -T "firmware\stm32f103\stm32f103c8.ld" `

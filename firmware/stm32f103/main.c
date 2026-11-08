@@ -278,6 +278,18 @@ static void task_vm(void *arg)
         port_log("\r\n");
     }
 
+#if JM_STACK_WATERMARK
+    /* 值栈高水位（观测构建专用）：与主机同一份运行时统计。 */
+    {
+        extern uint16_t jm_stack_hw;
+        port_log("[砾] 值栈峰值=");
+        port_log_u32(jm_stack_hw);
+        port_log(" 槽 / ");
+        port_log_u32(JM_STACK_SLOTS);
+        port_log("\r\n");
+    }
+#endif
+
 #if JM_STACK_DIAG
     /* 栈峰值：栈创建时已用 0xA5 填满，jmk_stack_used 扫描未被覆盖的部分 */
     if (jmk_current) {

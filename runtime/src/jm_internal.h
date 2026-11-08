@@ -250,6 +250,25 @@ typedef struct {
 
 extern JmState jm_state;
 
+/* 值栈高水位观测（默认关）。打开后每次 PUSH_V 记录 sp 峰值，`jm_run` 开始时清零，
+ * 结束时由端口打印。默认关的理由：PUSH_V 在解释器热路径上，每压一个值多一次比较
+ * 和一次可写全局写；需要数据时用 -DJM_STACK_WATERMARK=1 单独构建。 */
+#ifndef JM_STACK_WATERMARK
+#define JM_STACK_WATERMARK 0
+#endif
+
+#if JM_STACK_WATERMARK
+extern uint16_t jm_stack_hw;
+#define JM_HW_NOTE(st_)                                                            \
+    do {                                                                           \
+        if ((uint16_t)(st_)->sp > jm_stack_hw) {                                   \
+            jm_stack_hw = (uint16_t)(st_)->sp;                                     \
+        }                                                                          \
+    } while (0)
+#else
+#define JM_HW_NOTE(st_) ((void)0)
+#endif
+
 int jm_fail(JmState *st, int code, const char *detail);
 int jm_fail_aux(JmState *st, int code, const char *detail, int aux);
 
