@@ -376,6 +376,85 @@ static const JmNativeEntry HOST_IRQ_TABLE[] = {
     JM_IRQ_TABLE_INIT
 };
 
+/* ---- 主机端 ADC / 定时器替身 ----
+ * PC 上没有 ADC 和 TIM2，但同一份 .jsh 要在主机上回归。这里给的是**确定性替身**：
+ * ADC读(0) 按固定锯齿波返回，定时器计数 用 jm_port_millis 换算成 16 位毫秒。
+ * 板级 f103_native.c 里的同名函数才是真的寄存器驱动；两边名字与参数个数一致。
+ */
+#define HOST_ADC_STEPS 8u
+static const int32_t g_host_adc_wave[HOST_ADC_STEPS] = {
+    0, 1024, 2048, 3072, 4095, 3072, 2048, 1024
+};
+static uint32_t g_host_adc_pos;
+static uint32_t g_host_timer_base;
+
+static int n_adc_init(JmStateRef st, const JmValue *args, uint8_t nargs,
+                      JmValue *out) {
+    (void)st;
+    (void)args;
+    (void)nargs;
+    g_host_adc_pos = 0u;
+    *out = jm_value_bool(1);
+    return JM_NATIVE_OK;
+}
+
+static int n_adc_read(JmStateRef st, const JmValue *args, uint8_t nargs,
+                      JmValue *out) {
+    int32_t channel = 0;
+    (void)nargs;
+    if (jm_value_to_int(args[0], &channel) != 0) {
+        return jm_native_fail(st, JM_NE_TYPE, "ADC读：通道必须是整数");
+    }
+    if (channel < 0 || channel > 7) {
+        return jm_native_fail(st, JM_NE_PARAM, "通道范围 0–7");
+    }
+    *out = jm_value_int(g_host_adc_wave[g_host_adc_pos % HOST_ADC_STEPS]);
+    g_host_adc_pos++;
+    return JM_NATIVE_OK;
+}
+
+static int n_timer_init(JmStateRef st, const JmValue *args, uint8_t nargs,
+                        JmValue *out) {
+    (void)st;
+    (void)args;
+    (void)nargs;
+    g_host_timer_base = jm_port_millis();
+    *out = jm_value_bool(1);
+    return JM_NATIVE_OK;
+}
+
+static int n_timer_delay(JmStateRef st, const JmValue *args, uint8_t nargs,
+                         JmValue *out) {
+    int32_t ms = 0;
+    (void)nargs;
+    if (jm_value_to_int(args[0], &ms) != 0) {
+        return jm_native_fail(st, JM_NE_TYPE, "定时器延时：毫秒必须是整数");
+    }
+    if (ms < 0 || ms > 60000) {
+        return jm_native_fail(st, JM_NE_PARAM, "延时范围 0–60000 毫秒");
+    }
+    jm_port_sleep_ms((uint32_t)ms);
+    *out = jm_value_bool(1);
+    return JM_NATIVE_OK;
+}
+
+static int n_timer_count(JmStateRef st, const JmValue *args, uint8_t nargs,
+                         JmValue *out) {
+    (void)st;
+    (void)args;
+    (void)nargs;
+    *out = jm_value_int((int32_t)(uint16_t)(jm_port_millis() - g_host_timer_base));
+    return JM_NATIVE_OK;
+}
+
+static const JmNativeEntry HOST_ADC_TABLE[] = {
+    F103_ADC_TABLE_INIT
+};
+
+static const JmNativeEntry HOST_TIMER_TABLE[] = {
+    F103_TIMER_TABLE_INIT
+};
+
 int jm_host_native_register(void) {
     if (jm_native_register(HOST_QUEUE_TABLE, (uint8_t)JM_QUEUE_ENTRY_COUNT) != 0) {
         return -1;
@@ -384,6 +463,12 @@ int jm_host_native_register(void) {
         return -1;
     }
     if (jm_native_register(HOST_IRQ_TABLE, (uint8_t)JM_IRQ_ENTRY_COUNT) != 0) {
+        return -1;
+    }
+    if (jm_native_register(HOST_ADC_TABLE, (uint8_t)F103_ADC_ENTRY_COUNT) != 0) {
+        return -1;
+    }
+    if (jm_native_register(HOST_TIMER_TABLE, (uint8_t)F103_TIMER_ENTRY_COUNT) != 0) {
         return -1;
     }
     return 0;
