@@ -316,7 +316,7 @@ const SEMANTICS: &[SemanticRow] = &[
     SemanticRow { topic: "真值", rule: "假：0、0.0、空、假、未定义、空文本、空列表、空字典、空范围；其余为真（含函数与内建）。" },
     SemanticRow { topic: "下标", rule: "列表/文本支持负下标（-1 是最后一个）；字典按键查找，键不存在报 E_INDEX；文本下标按字符而不是字节。" },
     SemanticRow { topic: "原生模块", rule: "`导入 模块` 只能写在模块顶层；导入后模块里的原生函数名才能调用，名字与参数个数在编译期校验（E112/E113/E115）；`.jmb` 仍只带名字，运行期由 native 表绑定。" },
-    SemanticRow { topic: "绿色任务", rule: "`导入 任务` 后用 `创建(函数)` 起一个无参子任务（根任务之外最多 3 个），`让出()` 主动换出，`延时(毫秒)` 睡到指定时刻；调度是协作式、按槽轮转，不抢占、无优先级。子任务值栈 96 槽、调用帧 24、`尝试` 只有 1 层（第 2 层报 E028）；根任务仍是 512 槽 / 32 帧 / 8 层。" },
+    SemanticRow { topic: "绿色任务", rule: "`导入 任务` 后用 `创建(函数)` 起一个无参子任务（根任务之外最多 3 个），`让出()` 主动换出，`延时(毫秒)` 睡到指定时刻；调度是协作式、按槽轮转，不抢占、无优先级。子任务值栈 96 槽、调用帧 24、`尝试` 最多 4 层（第 5 层报 E028）；根任务仍是 512 槽 / 32 帧 / 8 层。" },
     SemanticRow { topic: "任务等待", rule: "带超时的 `队列接收(队, 毫秒)`、`队列发送(队, 值, 毫秒)`、`信号量等待(信号量, 毫秒)` 会先探测一次，失败就只睡 1 tick 再重试，其他任务照常运行；到期仍不成功返回 `空`（接收）或 `假`（发送/信号量）。不带超时的形式仍是普通原生调用。" },
     SemanticRow { topic: "作用域", rule: "函数内的 `令` 是局部槽；内层函数读取外层局部变量时会按值捕获（定义时快照、只读）；未在函数内声明而同名的读取会落到模块级全局。" },
     SemanticRow { topic: "函数", rule: "模块级函数与闭包都是一等值：可以赋值、传参、作为返回值；实参按值传递；形参与实参个数必须一致；调用层数上限 32。" },
@@ -347,9 +347,9 @@ const LIMITS: &[LimitRow] = &[
     LimitRow { item: "闭包捕获/函数", value: "255 个（E116）" },
     LimitRow { item: "列表元素/字典项", value: "各 255 个（字面量编译期）" },
     LimitRow { item: "调用层数", value: "32 层（JM_MAX_FRAMES）" },
-    LimitRow { item: "尝试嵌套", value: "8 层（JM_MAX_TRY_DEPTH，超过报 E028）" },
+    LimitRow { item: "尝试嵌套", value: "每任务独立 try 栈：根任务 8 层、子任务 4 层（超过报 E028）" },
     LimitRow { item: "绿色任务", value: "根任务 + 最多 3 个子任务（`创建` 第 4 次报 E038）" },
-    LimitRow { item: "子任务限制", value: "值栈 96 槽、调用帧 24、`尝试` 只有 1 层（超过报 E028）" },
+    LimitRow { item: "子任务限制", value: "值栈 96 槽、调用帧 24、`尝试` 最多 4 层（超过报 E028）" },
     LimitRow { item: "未捕获异常显示", value: "固定 64 B 缓冲（60 B 正文 + 3 B「…」 + NUL）；正文放不下就截断并以「…」结尾，不会静默丢弃" },
     LimitRow { item: "类", value: "255 个；每类字段 255 个、方法 255 个" },
     LimitRow { item: "值栈", value: "512 槽（JM_STACK_SLOTS）" },
@@ -904,7 +904,7 @@ pub fn render_json() -> Result<String, String> {
     // 语言层绿色任务：不走 native 表，单独给出
     j.push_str("  \"task_module\": {\n");
     j.push_str(&format!("    \"module\": \"{}\",\n", esc(vm_spec::TASK_MODULE)));
-    j.push_str("    \"note\": \"根任务 + 最多 3 个子任务，协作式按槽轮转；子任务值栈 96 槽、调用帧 24、尝试 1 层\",\n");
+    j.push_str("    \"note\": \"根任务 + 最多 3 个子任务，协作式按槽轮转；子任务值栈 96 槽、调用帧 24、尝试 4 层\",\n");
     j.push_str("    \"functions\": [\n");
     for (i, f) in vm_spec::TASK_FNS.iter().enumerate() {
         let doc = TASK_FN_DOCS
@@ -1178,7 +1178,7 @@ pub fn render_markdown() -> Result<String, String> {
     m.push_str("单一事实来源：`compiler/src/native_spec.rs`。`micc --emit-native-header` 生成 `runtime/include/jm_native_table.h`，板级与主机端口都展开同一份头；`micc --check-native` 在构建里比对，防止只改一侧。运行期仍由 `jm_native_register` 按名字绑定。\n\n");
 
     m.push_str("## 语言层任务（绿色）\n\n");
-    m.push_str("`导入 任务` 后启动的是 VM 内部的协作式子任务，不走原生表：根任务之外最多 3 个子任务，按槽轮转，不抢占、无优先级。子任务值栈 96 槽、调用帧 24，**`尝试` 只有 1 层**（第 2 层报 E028）；根任务仍是 512 槽 / 32 帧 / 8 层。子任务退出后句柄不回收，`创建` 第 4 次报 E038。\n\n");
+    m.push_str("`导入 任务` 后启动的是 VM 内部的协作式子任务，不走原生表：根任务之外最多 3 个子任务，按槽轮转，不抢占、无优先级。子任务值栈 96 槽、调用帧 24，**`尝试` 最多 4 层**（第 5 层报 E028）；根任务仍是 512 槽 / 32 帧 / 8 层。子任务退出后句柄不回收，`创建` 第 4 次报 E038。\n\n");
     m.push_str("| 函数 | 参数个数 | 说明 |\n|---|---|---|\n");
     for f in vm_spec::TASK_FNS {
         let doc = TASK_FN_DOCS

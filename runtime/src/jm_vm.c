@@ -1784,8 +1784,10 @@ int jm_execute(JmState *st) {
         case OP_TRY: {
             uint16_t tgt = rd16(code + ip);
             ip += 2;
-            if (st->tp >= JM_MAX_TRY_DEPTH) {
-                VM_FAIL(E_TRY_DEPTH, "尝试嵌套超过 8 层");
+            if (st->tp >= (int)st->tries_cap) {
+                VM_FAIL(E_TRY_DEPTH, st->tries_cap == JM_MAX_TRY_DEPTH
+                                          ? "尝试嵌套超过 8 层"
+                                          : "尝试嵌套超过 4 层（子任务）");
             }
             JmTry *r = &st->tries[st->tp++];
             r->frame_idx = (uint8_t)st->fp;

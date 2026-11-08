@@ -217,12 +217,13 @@ typedef struct {
 
 /* ---------------- 绿色任务（VM 内协作调度） ----------------
  * root（槽位 0）沿用原来的 512 槽 / 32 帧 / 8 层 try；子任务各有一片
- * 96 槽值栈、24 帧帧栈、1 层 try。尺寸变化时 static_assert 会挡住，
- * 因为 RAM 预算按 6 B/帧、36 B/任务 算过。 */
+ * 96 槽值栈、24 帧帧栈、4 层 try。try 栈按任务独立切片，容量由
+ * `JmState.tries_cap` 在 OP_TRY 处检查，互不覆盖。尺寸变化时
+ * static_assert 会挡住，因为 RAM 预算按 6 B/帧、36 B/任务 算过。 */
 #define JM_MAX_GREEN_TASKS 4u   /* root + 最多 3 个子任务 */
 #define JM_CHILD_STACK_SLOTS 96u
 #define JM_CHILD_FRAMES 24u
-#define JM_CHILD_TRIES 1u
+#define JM_CHILD_TRIES 4u
 
 #define JM_TASK_FREE 0u
 #define JM_TASK_READY 1u
