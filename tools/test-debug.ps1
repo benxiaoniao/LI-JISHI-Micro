@@ -1,5 +1,7 @@
 ﻿# 调试表回归：行记录、双向查询、剥离、损坏容忍、旧文件、跨包 file_id。
 # 夹具全部建在 $env:TEMP，跑完删除，不污染仓库。
+# 注意：同一时刻只跑一个长命令。与其它回归/串口录制/后台任务并行时，命令在沙箱后端
+#       就起不来（零输出，报 sandbox backend failed），与用例无关（见 docs/JM10 方案 §7.3）。
 $ErrorActionPreference = "Continue"
 $root = Split-Path -Parent $PSScriptRoot
 
@@ -412,6 +414,66 @@ try {
     $r = DbgRun "b m3cond.jsh:5 if k == 4`nbl`nc`nq" @("--dbg", $m3jmb)
     Check "REPL b 支持条件断点" `
         (($r.code -eq 0) -and ($r.text -match "if k == 4") -and ((PauseLines $r.text) -contains 5)) $r.text
+
+    # 组合：条件断点 × --task N（两个子任务同一地址，各自的条件与计数互不干扰）
+    $m3tf = Join-Path $sandbox "m3task.jsh"
+    Write-Utf8 $m3tf @"
+导入 任务
+
+函数 甲():
+    令 k = 0
+    当 k < 3:
+        k += 1
+        打印("甲", k)
+    让出()
+
+函数 乙():
+    令 k = 0
+    当 k < 3:
+        k += 1
+        打印("乙", k)
+    让出()
+
+创建(甲)
+创建(乙)
+让出()
+延时(200)
+打印("根结束")
+"@
+    $m3tjmb = Join-Path $sandbox "m3task.jmb"
+    & $micc $m3tf -o $m3tjmb | Out-Null
+    $m3ts = $m3tf.Replace('\', '/')
+
+    $r = DbgRun "bl`nc`nq" @("--dbg", "--break", ($m3ts + ":7 if k == 2"), "--task", "1", $m3tjmb)
+    Check "条件断点 × --task 1：只停子任务甲的第 2 次命中" `
+        (($r.code -eq 0) -and ($r.text -match "暂停：任务 1 「甲」") -and ($r.text -match "已命中 2") -and
+         ((PauseLines $r.text) -contains 7)) $r.text
+
+    # 乙 的打印在第 14 行：同一份源码里两个任务各在自己的代码对象，行号不共用
+    $r = DbgRun "bl`nc`nq" @("--dbg", "--break", ($m3ts + ":14 if k == 2"), "--task", "2", $m3tjmb)
+    Check "条件断点 × --task 2：只停子任务乙第 2 次命中" `
+        (($r.code -eq 0) -and ($r.text -match "暂停：任务 2 「乙」") -and ($r.text -match "已命中 2") -and
+         ($r.text -notmatch "「甲」")) $r.text
+
+    # 含空格文本字面量：走断点脚本（命令行里 shell 会吃掉内嵌双引号）
+    $m3xf = Join-Path $sandbox "m3text.jsh"
+    Write-Utf8 $m3xf "令 标题 = `"甲 乙`"`n打印(标题)`n"
+    $m3xjmb = Join-Path $sandbox "m3text.jmb"
+    & $micc $m3xf -o $m3xjmb | Out-Null
+    $m3xplain = ((& $jmrun $m3xjmb 2>$null | Out-String) -replace "`r`n", "`n").TrimEnd()
+    $bpSpace = Join-Path $sandbox "断点表-空格.txt"
+    Write-Utf8 $bpSpace ('m3text.jsh:2 if 标题 == "甲 乙"' + "`r`n")
+    $r = DbgRun "c`nq" @("--dbg", "--break-file", $bpSpace, $m3xjmb)
+    Check '含空格文本条件成立（断点脚本里的 "甲 乙"）' `
+        (($r.code -eq 0) -and ((PauseLines $r.text) -contains 2) -and
+         ($r.text -notmatch "警告：")) $r.text
+
+    $bpSpace2 = Join-Path $sandbox "断点表-空格不等.txt"
+    Write-Utf8 $bpSpace2 ('m3text.jsh:2 if 标题 == "甲"' + "`r`n")
+    $r = DbgRun "c`nq" @("--dbg", "--break-file", $bpSpace2, $m3xjmb)
+    $m3xout = ((@("c", "q") | & $jmrun --dbg --break-file $bpSpace2 $m3xjmb 2>$null | Out-String) -replace "`r`n", "`n").TrimEnd()
+    Check "含空格文本不等：不停、输出一致" `
+        (($r.code -eq 0) -and ($r.text -notmatch "暂停：") -and ($m3xout -eq $m3xplain)) $r.text
 
     Write-Host ("共 " + $total + " 个用例，失败 " + $fail + " 个")
     if ($fail -gt 0) { exit 1 }

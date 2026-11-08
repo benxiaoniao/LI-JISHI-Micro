@@ -721,6 +721,210 @@ try {
         }
     }
 
+    # ---------- 19. H4b：归档（--归档）+ 二进制包 + micc verify ----------
+    $arcDir = Join-Path $sandbox "归档包"
+    $toml = @"
+[包]
+名字 = "归档包"
+版本 = "1.0.0"
+"@
+    New-Pkg $arcDir $toml '打印("归档", 1 + 1)'
+    $arcZip = Join-Path $arcDir "归档包-1.0.0.zip"
+    $o = (& $micc pack --目录 $arcDir --归档 2>&1 | Out-String)
+    $arcOk = ($LASTEXITCODE -eq 0) -and (Test-Path $arcZip) -and
+             (Test-Path (Join-Path $arcDir "清单.toml")) -and
+             (Test-Path (Join-Path $arcDir "归档包.jmb"))
+    Check "归档：产出 zip + 清单.toml + 产物" $arcOk $o
+
+    $v = (& $micc verify $arcZip 2>&1 | Out-String)
+    Check "verify 归档：校验通过" (($LASTEXITCODE -eq 0) -and $v.Contains("校验通过") -and $v.Contains("fnv1a64:")) $v
+
+    $plain = Join-Path $sandbox "归档对照.jmb"
+    & $micc pack --目录 $arcDir -o $plain | Out-Null
+    $same = $false
+    if ((Test-Path $plain) -and (Test-Path (Join-Path $arcDir "归档包.jmb"))) {
+        $a = [IO.File]::ReadAllBytes($plain)
+        $b = [IO.File]::ReadAllBytes((Join-Path $arcDir "归档包.jmb"))
+        $same = ($a.Length -eq $b.Length) -and ([Convert]::ToBase64String($a) -eq [Convert]::ToBase64String($b))
+    }
+    Check "归档内产物与不带 --归档 的 .jmb 逐字节一致" $same ""
+
+    # 篡改产物：校验必须拦住
+    $pj = Join-Path $arcDir "归档包.jmb"
+    $bytes = [IO.File]::ReadAllBytes($pj)
+    $bytes[$bytes.Length - 1] = $bytes[$bytes.Length - 1] -bxor 0xFF
+    [IO.File]::WriteAllBytes($pj, $bytes)
+    $o = (& $micc verify $arcDir 2>&1 | Out-String)
+    $code = $LASTEXITCODE
+    Check-Error "篡改产物：verify 目录报 E137 校验不符" @{ code = $code; out = $o } "E137" "产物校验不符"
+
+    # 重新归档恢复，再删清单
+    & $micc pack --目录 $arcDir --归档 | Out-Null
+    Remove-Item (Join-Path $arcDir "清单.toml") -Force
+    $o = (& $micc verify $arcDir 2>&1 | Out-String)
+    $code = $LASTEXITCODE
+    Check-Error "缺清单：verify 目录报 E137" @{ code = $code; out = $o } "E137" "没有"
+
+    # 清单被改（大小不符）
+    & $micc pack --目录 $arcDir --归档 | Out-Null
+    $listPath = Join-Path $arcDir "清单.toml"
+    $listText = [IO.File]::ReadAllText($listPath)
+    $listText = $listText -replace "产物大小 = \d+", "产物大小 = 1"
+    [IO.File]::WriteAllText($listPath, $listText, (New-Object System.Text.UTF8Encoding($false)))
+    $o = (& $micc verify $arcDir 2>&1 | Out-String)
+    $code = $LASTEXITCODE
+    Check-Error "清单被改：verify 报 E137 大小不符" @{ code = $code; out = $o } "E137" "产物大小不符"
+
+    # 二进制包：产物字段 + 预编译 .jmb，没有源码
+    $binDir = Join-Path $sandbox "二进制包"
+    New-Item -ItemType Directory -Path $binDir -Force | Out-Null
+    $toml = @"
+[包]
+名字 = "二进制包"
+版本 = "0.2.0"
+产物 = "二进制包.jmb"
+
+[导出]
+名字 = ["加一"]
+"@
+    [IO.File]::WriteAllText((Join-Path $binDir "砾包.toml"), $toml, (New-Object System.Text.UTF8Encoding($true)))
+    Copy-Item $plain (Join-Path $binDir "二进制包.jmb") -Force
+    $o = (& $micc pack --目录 $binDir 2>&1 | Out-String)
+    $code = $LASTEXITCODE
+    Check-Error "二进制包不带 --归档：明确拒绝" @{ code = $code; out = $o } "E125" "二进制包"
+
+    $o = (& $micc pack --目录 $binDir --归档 2>&1 | Out-String)
+    $binZip = Join-Path $binDir "二进制包-0.2.0.zip"
+    Check "二进制包 --归档：产出分发件" (($LASTEXITCODE -eq 0) -and (Test-Path $binZip)) $o
+    $v = (& $micc verify $binZip 2>&1 | Out-String)
+    Check "verify 二进制包：通过且标注二进制包" (($LASTEXITCODE -eq 0) -and $v.Contains("二进制包") -and $v.Contains("校验通过")) $v
+
+    # ---------- 20. H4b：接口清单（micc interface）与导出校验 ----------
+    $h4Root = Join-Path $sandbox "H4b接口"
+    $libDir = Join-Path $h4Root "库"
+    $toml = @"
+[包]
+名字 = "库"
+版本 = "1.2.0"
+
+[导出]
+名字 = ["加一", "问候"]
+"@
+    New-Pkg $libDir $toml @"
+函数 加一(数)：
+    返回 数 + 1
+
+函数 问候(名)：
+    返回 "你好，" + 名
+"@
+    $o = (& $micc interface --目录 $libDir 2>&1 | Out-String)
+    $ifPath = Join-Path $libDir "接口.toml"
+    $ifText = if (Test-Path $ifPath) { [IO.File]::ReadAllText($ifPath) } else { "" }
+    Check "interface：生成接口清单（函数 + 参数个数）" `
+        (($LASTEXITCODE -eq 0) -and $ifText.Contains("加一 = 1") -and $ifText.Contains("问候 = 1") -and
+         $ifText.Contains('包 = "库"')) ($o + "`n" + $ifText)
+
+    & $micc pack --目录 $libDir --归档 | Out-Null
+    $libZip = Join-Path $libDir "库-1.2.0.zip"
+    $v = (& $micc verify $libZip 2>&1 | Out-String)
+    Check "归档带上接口：verify 归档通过" (($LASTEXITCODE -eq 0) -and $v.Contains("校验通过")) $v
+
+    # 接口说错参数个数：目录侧必须拦住（归档里仍是旧接口，不受影响）
+    $badIface = $ifText -replace "加一 = 1", "加一 = 2"
+    [IO.File]::WriteAllText($ifPath, $badIface, (New-Object System.Text.UTF8Encoding($false)))
+    $o = (& $micc verify $libDir 2>&1 | Out-String)
+    $code = $LASTEXITCODE
+    Check-Error "接口参数个数不符：E137" @{ code = $code; out = $o } "E137" "参数个数不符"
+    $v = (& $micc verify $libZip 2>&1 | Out-String)
+    Check "归档内接口未改：zip 仍通过" (($LASTEXITCODE -eq 0) -and $v.Contains("校验通过")) $v
+
+    # 接口列了产物里没有的函数
+    [IO.File]::WriteAllText($ifPath, ($ifText -replace "问候 = 1", "不存在 = 1"), (New-Object System.Text.UTF8Encoding($false)))
+    $o = (& $micc verify $libDir 2>&1 | Out-String)
+    $code = $LASTEXITCODE
+    Check-Error "接口列了不存在的函数：E137" @{ code = $code; out = $o } "E137" "没有这个代码对象"
+
+    # 接口 ABI 不符
+    [IO.File]::WriteAllText($ifPath, ($ifText -replace "原生ABI = 1", "原生ABI = 2"), (New-Object System.Text.UTF8Encoding($false)))
+    $o = (& $micc verify $libDir 2>&1 | Out-String)
+    $code = $LASTEXITCODE
+    Check-Error "接口 ABI 不符：E137" @{ code = $code; out = $o } "E137" "原生ABI"
+
+    # 复原后目录校验重新通过
+    & $micc interface --目录 $libDir | Out-Null
+    $v = (& $micc verify $libDir 2>&1 | Out-String)
+    Check "重新生成接口后目录校验恢复通过" (($LASTEXITCODE -eq 0) -and $v.Contains("校验通过")) $v
+
+    # ---------- 21. H4b：源码归档（pack --源码）+ 本地归档作为 install 来源 ----------
+    $srcRoot = Join-Path $sandbox "H4b源码归档"
+    $lib2 = Join-Path $srcRoot "库"
+    $toml = @"
+[包]
+名字 = "库"
+版本 = "1.0.0"
+
+[导出]
+名字 = ["版本"]
+"@
+    New-Pkg $lib2 $toml @"
+函数 版本()：
+    返回 "1.0.0"
+"@
+    # 先取目录哈希（归档里只有 砾包.toml + .jsh，解包后必须与之一致）
+    $hSrc = Get-PkgHash $lib2
+    $o = (& $micc pack --目录 $lib2 --源码 2>&1 | Out-String)
+    $srcZip = Join-Path $lib2 "库-1.0.0-源码.zip"
+    Check "源码归档：产出 <包名>-<版本>-源码.zip" (($LASTEXITCODE -eq 0) -and (Test-Path $srcZip)) $o
+
+    $o = (& $micc verify $srcZip 2>&1 | Out-String)
+    $code = $LASTEXITCODE
+    Check-Error "源码归档不是产物归档：verify 明确提示" @{ code = $code; out = $o } "E137" "源码归档"
+
+    $idx2 = Join-Path $srcRoot "砾索引.toml"
+    $idx2Text = @"
+索引版本 = 1
+
+[包]
+"库@1.0.0" = { 来源 = "file:库/库-1.0.0-源码.zip", 校验 = "$hSrc" }
+"@
+    [IO.File]::WriteAllText($idx2, $idx2Text, (New-Object System.Text.UTF8Encoding($false)))
+    $app21 = Join-Path $srcRoot "应用"
+    $toml = @"
+[包]
+名字 = "应用"
+版本 = "1.0.0"
+
+[依赖]
+库 = { 版本 = "^1.0.0" }
+"@
+    New-Pkg $app21 $toml '打印(库.版本())'
+    $io = (& $micc install --目录 $app21 --索引 $idx2 2>&1 | Out-String)
+    $installed21 = ($LASTEXITCODE -eq 0) -and (Test-Path (Join-Path $app21 ".砾\包\库-1.0.0\主.jsh"))
+    Check "install：索引来源指向本地源码归档（zip）" $installed21 $io
+
+    $r = Invoke-Pack $app21 -Offline
+    $out = Run-Jmb (Join-Path $app21 "应用.jmb")
+    Check "本地归档安装后：离线打包运行" (($r.code -eq 0) -and ($out -eq "1.0.0")) ($r.out + "`n实际输出：" + $out)
+
+    # 索引里的 校验 写错：解包成功但目录哈希不符，install 必须拒绝
+    $badIdx = Join-Path $srcRoot "砾索引-坏校验.toml"
+    [IO.File]::WriteAllText($badIdx, ($idx2Text -replace $hSrc, "fnv1a64:0000000000000000"), (New-Object System.Text.UTF8Encoding($false)))
+    $app22 = Join-Path $srcRoot "应用2"
+    New-Pkg $app22 $toml '打印(库.版本())'
+    $o = (& $micc install --目录 $app22 --索引 $badIdx 2>&1 | Out-String)
+    $code = $LASTEXITCODE
+    Check-Error "归档内容与索引校验不符：install 报 E136" @{ code = $code; out = $o } "E136" "校验"
+
+    # 归档本身被改坏：解包阶段就要拒绝
+    $bytes = [IO.File]::ReadAllBytes($srcZip)
+    $bytes[$bytes.Length - 30] = $bytes[$bytes.Length - 30] -bxor 0xFF
+    [IO.File]::WriteAllBytes($srcZip, $bytes)
+    $app23 = Join-Path $srcRoot "应用3"
+    New-Pkg $app23 $toml '打印(库.版本())'
+    $o = (& $micc install --目录 $app23 --索引 $idx2 2>&1 | Out-String)
+    $code = $LASTEXITCODE
+    Check-Error "本地归档损坏：install 报 E135 解包失败" @{ code = $code; out = $o } "E135" "解包"
+
     Write-Host ("包用例：共 " + $script:total + " 个，失败 " + $script:fail + " 个，跳过 " + $script:skip + " 个")
     if ($script:fail -gt 0) { exit 1 }
     exit 0

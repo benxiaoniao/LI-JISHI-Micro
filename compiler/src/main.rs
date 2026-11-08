@@ -15,15 +15,18 @@ mod parser;
 mod symbols;
 mod vm_spec;
 mod writer;
+mod zip;
 
 use std::path::PathBuf;
 use std::process::exit;
 
 fn usage() {
     eprintln!("用法：micc <输入.jsh> [-o 输出.jmb] [--dump] [--strip-debug]");
-    eprintln!("      micc pack [--目录 <包目录>] [-o 输出.jmb] [--离线] [--strip-debug]");
+    eprintln!("      micc pack [--目录 <包目录>] [-o 输出] [--离线] [--strip-debug] [--归档]");
     eprintln!("      micc install [--目录 <包目录>] [--索引 <索引文件|URL>] [--离线]");
     eprintln!("      micc hash [--目录 <包目录>]                # 算目录内容哈希（填索引的 校验）");
+    eprintln!("      micc verify <包目录|归档.zip>              # 校验归档/二进制包（清单 + 产物 + 哈希）");
+    eprintln!("      micc interface --目录 <包目录> [-o 接口.toml]  # 生成导出函数接口清单");
     eprintln!("      micc --line-of <x.jmb> <代码下标> <偏移>   # 指令位置 → 源文件:行");
     eprintln!("      micc --lines-of <x.jmb> <文件|*> <行号>    # 源码行 → 指令范围");
     eprintln!("      micc --locals-of <x.jmb> <代码下标>        # 代码对象 → 局部槽符号");
@@ -331,6 +334,12 @@ fn main() {
     }
     if args[0] == "hash" {
         exit(pack::cmd_hash(&args[1..]));
+    }
+    if args[0] == "verify" {
+        exit(pack::cmd_verify(&args[1..]));
+    }
+    if args[0] == "interface" {
+        exit(pack::cmd_interface(&args[1..]));
     }
 
     let mut input: Option<PathBuf> = None;

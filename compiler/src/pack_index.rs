@@ -283,13 +283,23 @@ impl Index {
                 .with_hint("远程索引里的 来源 请写绝对路径或 http(s):// 地址"));
             }
             let dir = local_source_path(source, self.base_dir.as_deref());
+            if dir.is_file() {
+                // 本地归档（`micc pack --源码` 的产物或任意 zip/tar）：解包后再走目录校验。
+                let work = temp.alloc()?;
+                let unpacked = work.join("解包");
+                std::fs::create_dir_all(&unpacked).map_err(|e| {
+                    idx_err(1, format!("建不了临时目录 {}：{}", unpacked.display(), e))
+                })?;
+                extract_archive(&dir, &unpacked)?;
+                return Ok(unwrap_single_dir(unpacked));
+            }
             if !dir.is_dir() {
                 return Err(CompileError::new(
                     "E135",
                     1,
                     1,
                     format!(
-                        "包「{}」{} 的来源 {} 不是目录；本地来源只接受目录",
+                        "包「{}」{} 的来源 {} 既不是目录也不是归档文件；本地来源只接受目录或 .zip/.tar/.tar.gz",
                         entry.name,
                         entry.version,
                         dir.display()

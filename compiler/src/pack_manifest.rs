@@ -101,6 +101,8 @@ pub struct Manifest {
     pub native_abi: u8,
     pub bytecode_limit: usize,
     pub heap_budget: usize,
+    /// 二进制包：预编译产物的相对路径（`.jmb`）。`None` = 源码包。
+    pub product: Option<String>,
     /// `None` = 顶层名字全部导出。
     pub exports: Option<Vec<String>>,
     pub deps: Vec<(String, DepSpec)>,
@@ -317,6 +319,8 @@ pub fn parse_manifest(path: &Path, text: &str) -> Result<Manifest> {
     let mut name: Option<String> = None;
     let mut version: Option<Version> = None;
     let mut entry: Option<String> = None;
+    // 有值 = 二进制包（只发预编译产物，不带源码）。
+    let mut product: Option<String> = None;
     let mut native_mods: Vec<String> = Vec::new();
     let mut native_abi: Option<u8> = None;
     let mut bytecode_limit: Option<usize> = None;
@@ -361,6 +365,24 @@ pub fn parse_manifest(path: &Path, text: &str) -> Result<Manifest> {
                     })?)
                 }
                 "入口" => entry = Some(as_str(path, line_no, &key, value)?),
+                "产物" => {
+                    let v = as_str(path, line_no, &key, value)?;
+                    if !v.ends_with(".jmb") {
+                        return Err(err(
+                            path,
+                            line_no,
+                            format!("产物 必须是 .jmb 文件：{}", v),
+                        ));
+                    }
+                    if v.starts_with('/') || v.starts_with('\\') || v.contains("..") {
+                        return Err(err(
+                            path,
+                            line_no,
+                            format!("产物 只能是包目录内的相对路径：{}", v),
+                        ));
+                    }
+                    product = Some(v);
+                }
                 "原生ABI" => {
                     let v = as_str(path, line_no, &key, value)?;
                     native_abi = Some(v.parse::<u8>().map_err(|_| {
@@ -480,6 +502,7 @@ pub fn parse_manifest(path: &Path, text: &str) -> Result<Manifest> {
         native_abi: native_abi.unwrap_or(crate::native_spec::NATIVE_ABI_VERSION),
         bytecode_limit: bytecode_limit.unwrap_or(DEFAULT_BYTECODE_LIMIT),
         heap_budget: heap_budget.unwrap_or(DEFAULT_HEAP_BUDGET),
+        product,
         exports,
         deps,
     })

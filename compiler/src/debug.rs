@@ -7,6 +7,8 @@
 pub struct CodeEntry {
     pub len: u16,
     pub name: String,
+    /// 参数个数（代码表 p+5），接口清单校验用。
+    pub nparams: u8,
     name_idx: usize,
 }
 
@@ -82,10 +84,12 @@ pub fn parse(bytes: &[u8]) -> Result<Image, String> {
         let off = u16_at(bytes, p).unwrap_or(0);
         let len = u16_at(bytes, p + 2).unwrap_or(0);
         let name_idx = bytes.get(p + 4).copied().unwrap_or(0) as usize;
+        let nparams = bytes.get(p + 5).copied().unwrap_or(0);
         max_code_end = max_code_end.max(off as usize + len as usize);
         codes.push(CodeEntry {
             len,
             name: String::new(),
+            nparams,
             name_idx,
         });
     }
