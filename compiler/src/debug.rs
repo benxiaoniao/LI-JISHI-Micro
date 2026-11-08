@@ -20,6 +20,8 @@ pub struct DebugEntry {
 pub struct CodeDebug {
     pub file_id: u8,
     pub entries: Vec<DebugEntry>,
+    /// 局部槽符号：`(槽号, 名字)`，按槽号递增；没有符号区时为空。
+    pub locals: Vec<(u8, String)>,
 }
 
 pub struct DebugInfo {
@@ -222,7 +224,41 @@ fn parse_debug(bytes: &[u8], ncodes: usize, max_code_end: usize) -> Option<Debug
                 file_id: cur_file,
             });
         }
-        codes.push(CodeDebug { file_id, entries });
+        codes.push(CodeDebug {
+            file_id,
+            entries,
+            locals: Vec::new(),
+        });
+    }
+
+    // 符号区（flags.bit2）：目录 → 各代码块 → 名字池，偏移都相对 sym_off。
+    if section[5] & 4 != 0 {
+        let sym_off = u16_at(section, 14)? as usize;
+        if sym_off == 0 || sym_off + 2 * ncode_dbg > section.len() {
+            return None;
+        }
+        for (i, c) in codes.iter_mut().enumerate() {
+            let entry_off = u16_at(section, sym_off + 2 * i)? as usize;
+            if entry_off == 0 {
+                continue;
+            }
+            let mut pos = sym_off + entry_off;
+            if pos >= section.len() {
+                return None;
+            }
+            let n = section[pos] as usize;
+            pos += 1;
+            for _ in 0..n {
+                if pos + 3 > section.len() {
+                    return None;
+                }
+                let slot = section[pos];
+                let name_off = u16_at(section, pos + 1)? as usize;
+                pos += 3;
+                let name = read_cstr(section, sym_off + name_off, section.len())?;
+                c.locals.push((slot, name));
+            }
+        }
     }
 
     Some(DebugInfo { files, codes })
@@ -239,6 +275,16 @@ impl Image {
         }
         let e = &c.entries[idx - 1];
         Some((d.files.get(e.file_id as usize)?.as_str(), e.line))
+    }
+
+    /// 代码对象的局部槽符号；没有符号区时返回 `None`。
+    pub fn locals_at(&self, code: usize) -> Option<&[(u8, String)]> {
+        let d = self.debug.as_ref()?;
+        let c = d.codes.get(code)?;
+        if c.locals.is_empty() {
+            return None;
+        }
+        Some(&c.locals)
     }
 
     pub fn file_id(&self, name: &str) -> Option<u8> {
@@ -323,6 +369,15 @@ pub fn dump(image: &Image) -> String {
                     c.file_id,
                     c.entries.len()
                 ));
+                if !c.locals.is_empty() {
+                    let list = c
+                        .locals
+                        .iter()
+                        .map(|(slot, name)| format!("{}={}", slot, name))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    s.push_str(&format!("  局部: {}\n", list));
+                }
                 for e in &c.entries {
                     if d.files.len() > 1 {
                         s.push_str(&format!(

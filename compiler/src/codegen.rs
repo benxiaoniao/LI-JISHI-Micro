@@ -36,6 +36,8 @@ pub struct CodeObj {
     pub file_id: u8,
     /// 语句开始处的（偏移, 行号），按偏移严格递增。
     pub marks: Vec<Mark>,
+    /// 局部槽符号表：`(槽号, 名字)`，按槽号递增。无名槽（临时值）不收录。
+    pub locals: Vec<(u8, String)>,
 }
 
 #[derive(Debug)]
@@ -327,6 +329,24 @@ impl FnState {
     }
     fn free_temp(&mut self, t: u8) {
         self.temps.push(t);
+    }
+    /// 合并参数/局部槽与捕获槽，按槽号递增；同名同槽去重。
+    /// 临时槽（`alloc_temp`）没有名字，自然不会出现在这里。
+    fn symbols(&self) -> Vec<(u8, String)> {
+        let mut out: Vec<(u8, String)> = Vec::new();
+        for (name, &slot) in self.slots.iter().chain(self.captures.iter()) {
+            if out.iter().any(|(s, n)| *s == slot && n == name) {
+                continue;
+            }
+            out.push((slot, name.clone()));
+        }
+        out.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+        // 槽号必须一一对应：命名槽只从 nlocals 单调分配，临时槽不进 slots。
+        debug_assert!(
+            out.windows(2).all(|w| w[0].0 != w[1].0),
+            "同一函数里出现两个名字共用一个局部槽"
+        );
+        out
     }
 }
 
@@ -728,6 +748,7 @@ pub fn compile(
         caps: Vec::new(),
         file_id: 0,
         marks: Vec::new(),
+        locals: Vec::new(),
     });
 
     // 类先于模块代码编译：类表要在 `新建` 之前完整，方法体也独立成代码对象。
@@ -764,6 +785,7 @@ pub fn compile(
     }
     fs.emit(OP_HALT);
 
+    b.codes[0].locals = fs.symbols();
     b.codes[0].nlocals = fs.nlocals;
     b.codes[0].file_id = fs.file_id;
     b.codes[0].marks = fs.marks;
@@ -920,6 +942,7 @@ fn compile_method(
         caps: Vec::new(),
         file_id,
         marks: Vec::new(),
+        locals: Vec::new(),
     });
 
     let mut fs = FnState {
@@ -976,6 +999,7 @@ fn compile_method(
     fs.emit_u8(OP_CONST, nil);
     fs.emit(OP_RETURN_METHOD);
 
+    b.codes[idx as usize].locals = fs.symbols();
     b.codes[idx as usize].nlocals = fs.nlocals;
     b.codes[idx as usize].caps = fs.caps;
     b.codes[idx as usize].marks = fs.marks;
@@ -1008,6 +1032,7 @@ fn compile_class_init(
         caps: Vec::new(),
         file_id,
         marks: Vec::new(),
+        locals: Vec::new(),
     });
 
     let mut fs = FnState {
@@ -1082,6 +1107,7 @@ fn compile_class_init(
     fs.emit_u8(OP_LOAD_LOCAL, 0);
     fs.emit(OP_RETURN_METHOD);
 
+    b.codes[idx as usize].locals = fs.symbols();
     b.codes[idx as usize].nlocals = fs.nlocals;
     b.codes[idx as usize].caps = fs.caps;
     b.codes[idx as usize].marks = fs.marks;
@@ -1116,6 +1142,7 @@ fn compile_function(
         caps: Vec::new(),
         file_id,
         marks: Vec::new(),
+        locals: Vec::new(),
     });
 
     let mut fs = FnState {
@@ -1173,6 +1200,7 @@ fn compile_function(
     fs.emit_u8(OP_CONST, nil);
     fs.emit(OP_RETURN);
 
+    b.codes[idx as usize].locals = fs.symbols();
     b.codes[idx as usize].nlocals = fs.nlocals;
     b.codes[idx as usize].caps = fs.caps;
     b.codes[idx as usize].marks = fs.marks;

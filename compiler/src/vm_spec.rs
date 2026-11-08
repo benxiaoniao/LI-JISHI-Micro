@@ -1,10 +1,10 @@
 //! 语言层任务/等待函数的编译期规格。
 //!
-//! 这些名字不走 Native ABI：`创建/让出/延时` 在 VM 绿色调度器里完成，
+//! 这些名字不走 Native ABI：`创建/删除/让出/延时` 在 VM 绿色调度器里完成，
 //! `队列接收/队列发送/信号量等待` 的**带超时形式**降到 `OP_TASK_WAIT`（探测一次、
 //! 挂起、到期重试），不带超时的形式仍是普通原生调用。见 docs/设计-语言层任务.md §3.4。
 
-use crate::opcodes::{OP_TASK_SLEEP, OP_TASK_SPAWN, OP_TASK_YIELD};
+use crate::opcodes::{OP_TASK_KILL, OP_TASK_SLEEP, OP_TASK_SPAWN, OP_TASK_YIELD};
 
 /// `导入 任务` 的模块名。
 pub const TASK_MODULE: &str = "任务";
@@ -15,12 +15,17 @@ pub struct TaskFnSpec {
     pub opcode: u8,
 }
 
-/// 任务模块里的三个名字：只能直接调用，不能当值。
+/// 任务模块里的四个名字：只能直接调用，不能当值。
 pub const TASK_FNS: &[TaskFnSpec] = &[
     TaskFnSpec {
         name: "创建",
         nargs: 1,
         opcode: OP_TASK_SPAWN,
+    },
+    TaskFnSpec {
+        name: "删除",
+        nargs: 1,
+        opcode: OP_TASK_KILL,
     },
     TaskFnSpec {
         name: "让出",

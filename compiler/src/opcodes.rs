@@ -54,6 +54,8 @@ pub const OP_TASK_YIELD: u8 = 39;
 pub const OP_TASK_SLEEP: u8 = 40;
 /// 绿色等待（U8 种类：0 队列接收 / 1 队列发送 / 2 信号量等待）
 pub const OP_TASK_WAIT: u8 = 41;
+/// 删除绿色任务：弹栈取任务句柄，压回 真/假（无操作数）
+pub const OP_TASK_KILL: u8 = 42;
 
 /// 运算子码
 pub const BIN_ADD: u8 = 0;
@@ -95,7 +97,7 @@ pub fn operand(op: u8) -> Operand {
     match op {
         OP_HALT | OP_POP | OP_DUP | OP_SWAP | OP_NEG | OP_NOT | OP_RETURN | OP_GET_ITEM
         | OP_SET_ITEM | OP_GET_ITER | OP_TRY_END | OP_THROW | OP_RETURN_METHOD
-        | OP_TASK_SPAWN | OP_TASK_YIELD | OP_TASK_SLEEP => Operand::None,
+        | OP_TASK_SPAWN | OP_TASK_YIELD | OP_TASK_SLEEP | OP_TASK_KILL => Operand::None,
         OP_JUMP | OP_JUMP_IF_FALSE | OP_JUMP_IF_TRUE | OP_JUMP_IF_FALSE_OR_POP
         | OP_JUMP_IF_TRUE_OR_POP | OP_FOR_ITER | OP_TRY => Operand::U16,
         OP_CALL_METHOD | OP_CALL_INIT => Operand::U8U8,
@@ -147,6 +149,7 @@ pub fn op_name(op: u8) -> &'static str {
         OP_TASK_YIELD => "TASK_YIELD",
         OP_TASK_SLEEP => "TASK_SLEEP",
         OP_TASK_WAIT => "TASK_WAIT",
+        OP_TASK_KILL => "TASK_KILL",
         _ => "?",
     }
 }
@@ -181,7 +184,7 @@ pub fn emit_c_header() -> String {
     let mut s = String::new();
     s.push_str("/* 由 micc --emit-header 生成，请勿手改。 */\n");
     s.push_str("#ifndef JM_OPCODES_H\n#define JM_OPCODES_H\n\n");
-    let ops: [(u8, &str); 42] = [
+    let ops: [(u8, &str); 43] = [
         (OP_HALT, "OP_HALT"),
         (OP_CONST, "OP_CONST"),
         (OP_LOAD_LOCAL, "OP_LOAD_LOCAL"),
@@ -224,6 +227,7 @@ pub fn emit_c_header() -> String {
         (OP_TASK_YIELD, "OP_TASK_YIELD"),
         (OP_TASK_SLEEP, "OP_TASK_SLEEP"),
         (OP_TASK_WAIT, "OP_TASK_WAIT"),
+        (OP_TASK_KILL, "OP_TASK_KILL"),
     ];
     for (v, n) in ops {
         s.push_str(&format!("#define {n} {v}\n"));

@@ -387,6 +387,20 @@ int main(void)
     }
 #endif
 
+    /*
+     * 启动期容量自检：建完任务后栈池还剩多少，串口一眼可见。
+     * 「最大连续块」小于下一次要建的栈 = 那一次 create 必然返回 -1。
+     */
+    port_log("[内核] 栈池: 总 ");
+    port_log_u32(jmk_stack_pool_bytes());
+    port_log(" B / 已用 ");
+    port_log_u32(jmk_stack_pool_used());
+    port_log(" B / 空闲 ");
+    port_log_u32(jmk_stack_pool_free());
+    port_log(" B / 最大连续块 ");
+    port_log_u32(jmk_stack_pool_largest());
+    port_log(" B\r\n");
+
     jmk_start();
 
     for (;;) {

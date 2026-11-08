@@ -26,6 +26,8 @@ fn usage() {
     eprintln!("      micc hash [--目录 <包目录>]                # 算目录内容哈希（填索引的 校验）");
     eprintln!("      micc --line-of <x.jmb> <代码下标> <偏移>   # 指令位置 → 源文件:行");
     eprintln!("      micc --lines-of <x.jmb> <文件|*> <行号>    # 源码行 → 指令范围");
+    eprintln!("      micc --locals-of <x.jmb> <代码下标>        # 代码对象 → 局部槽符号");
+    eprintln!("      micc --line-table <x.jmb>                 # 全量行表：代码\t偏移\t文件\t行");
     eprintln!("      micc --debug-dump <x.jmb>                  # 打印调试表");
     eprintln!("      micc --symbols <x.jsh>                     # 列出定义：种类 名字 行 列");
     eprintln!("      micc --pack-files <包目录>                 # 包与依赖的入口文件（给编辑器跳转）");
@@ -143,6 +145,72 @@ fn cmd_lines_of(args: &[String]) -> i32 {
     0
 }
 
+/// `--locals-of`：代码对象 → 局部槽符号（`槽号<TAB>名字`）。
+fn cmd_locals_of(args: &[String]) -> i32 {
+    if args.len() != 2 {
+        usage();
+        return 2;
+    }
+    let Some(bytes) = read_jmb(&args[0]) else {
+        return 2;
+    };
+    let image = match debug::parse(&bytes) {
+        Ok(im) => im,
+        Err(e) => {
+            eprintln!("{}", e);
+            return 1;
+        }
+    };
+    let Ok(code) = args[1].parse::<usize>() else {
+        eprintln!("代码下标必须是整数");
+        return 2;
+    };
+    if image.codes.get(code).is_none() {
+        eprintln!("代码下标 {} 超出范围（共 {} 个）", code, image.codes.len());
+        return 1;
+    }
+    match image.locals_at(code) {
+        Some(list) => {
+            for (slot, name) in list {
+                println!("{}\t{}", slot, name);
+            }
+            0
+        }
+        None => {
+            eprintln!("该代码对象没有局部符号（旧文件、已剥离或未带符号区）");
+            1
+        }
+    }
+}
+
+/// `--line-table`：整份行表，供宿主一次预取（避免每指令起进程）。
+fn cmd_line_table(args: &[String]) -> i32 {
+    if args.len() != 1 {
+        usage();
+        return 2;
+    }
+    let Some(bytes) = read_jmb(&args[0]) else {
+        return 2;
+    };
+    let image = match debug::parse(&bytes) {
+        Ok(im) => im,
+        Err(e) => {
+            eprintln!("{}", e);
+            return 1;
+        }
+    };
+    let Some(d) = image.debug.as_ref() else {
+        eprintln!("没有可用调试信息（旧文件、已剥离或调试段损坏）");
+        return 1;
+    };
+    for (ci, c) in d.codes.iter().enumerate() {
+        for e in &c.entries {
+            println!("{}\t{}\t{}\t{}", ci, e.off, e.file_id, e.line);
+        }
+    }
+    0
+}
+
 fn cmd_debug_dump(args: &[String]) -> i32 {
     if args.len() != 1 {
         usage();
@@ -209,6 +277,12 @@ fn main() {
     }
     if args[0] == "--lines-of" {
         exit(cmd_lines_of(&args[1..]));
+    }
+    if args[0] == "--locals-of" {
+        exit(cmd_locals_of(&args[1..]));
+    }
+    if args[0] == "--line-table" {
+        exit(cmd_line_table(&args[1..]));
     }
     if args[0] == "--debug-dump" {
         exit(cmd_debug_dump(&args[1..]));

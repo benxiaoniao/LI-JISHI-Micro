@@ -20,6 +20,8 @@ param(
     [string]$Baseline = "tools\size-baseline.json",
     [string]$OutJson = "build\stm32\size-report.json",
     [string]$Label = "",
+    # 保留调试段的 .jmb（build-firmware 生成），用来算调试段体积；缺失时该行显示「未覆盖」
+    [string]$DebugJmb = "build\stm32\app.debug.jmb",
     [switch]$WriteBaseline
 )
 
@@ -114,6 +116,13 @@ try {
     }
     $appJmbBytes = 0
     if ($symbols.ContainsKey("jm_app_jmb")) { $appJmbBytes = $symbols["jm_app_jmb"].size }
+
+    # ---------- .jmb 调试段：剥离前 / 剥离后 ----------
+    # 剥离后以内嵌符号为准；剥离前取 build-firmware 另存的 app.debug.jmb（不进固件）。
+    $jmbStripped = $appJmbBytes
+    $jmbRaw = 0
+    if (Test-Path $DebugJmb) { $jmbRaw = (Get-Item $DebugJmb).Length }
+    $jmbDbgBytes = if ($jmbRaw -gt 0) { $jmbRaw - $jmbStripped } else { -1 }
 
     # ---------- 模块贡献：按 DWARF 编译单元汇总函数区间 ----------
     $modules = @{}
@@ -232,6 +241,18 @@ try {
     Write-Host ("  只读数据（.rodata*）    {0} B（其中内嵌 .jmb {1} B）" -f $rodataBytes, $appJmbBytes)
     Write-Host ("  汇编/链接器生成         {0} B" -f $unattributed)
     Write-Host ""
+    Write-Host ".jmb 调试段（剥离前 / 剥离后，均不占固件 Flash）"
+    if ($jmbRaw -gt 0) {
+        Write-Host ("  剥离前（保留 DBG1）     {0} B" -f $jmbRaw)
+        Write-Host ("  剥离后（内嵌固件）       {0} B" -f $jmbStripped)
+        $dbgPct = 100.0 * $jmbDbgBytes / $jmbRaw
+        Write-Host ("  调试段                  {0} B（占剥离前 {1:N1}%）" -f $jmbDbgBytes, $dbgPct)
+    }
+    else {
+        Write-Host "  剥离前 / 调试段         未覆盖（缺 app.debug.jmb；先跑 tools\build-firmware.ps1）"
+        Write-Host ("  剥离后（内嵌固件）       {0} B" -f $jmbStripped)
+    }
+    Write-Host ""
     Write-Host "模块贡献（代码，按 DWARF 编译单元）"
     Write-Host ("  {0,-42} {1,-12} {2,8}  {3,7}" -f "编译单元", "分组", "代码 B", "占比")
     foreach ($kv in ($modules.GetEnumerator() | Sort-Object Value -Descending)) {
@@ -264,6 +285,11 @@ try {
         flash = [ordered]@{ used = $flashUsed; limit = $flashLimit }
         ram = [ordered]@{ used = $ramUsed; limit = $ramLimit; stack_headroom = $stackHeadroom }
         text = [ordered]@{ code = $moduleTotal; rodata = $rodataBytes; other = $unattributed; app_jmb = $appJmbBytes }
+        jmb_debug = [ordered]@{
+            stripped = $jmbStripped
+            raw = $jmbRaw
+            section = $(if ($jmbDbgBytes -ge 0) { $jmbDbgBytes } else { $null })
+        }
         sections = $sectionSizes
         modules = $modules
         ram_symbols = $ramSymbols
@@ -293,6 +319,11 @@ try {
                 Write-Host ("  {0,-34} {1,9} {2,9} {3,9}" -f "代码（DWARF 函数）", $moduleTotal, $before.text.code, (Format-Delta $moduleTotal $before.text.code))
                 Write-Host ("  {0,-34} {1,9} {2,9} {3,9}" -f "只读数据（.rodata*）", $rodataBytes, $before.text.rodata, (Format-Delta $rodataBytes $before.text.rodata))
                 Write-Host ("  {0,-34} {1,9} {2,9} {3,9}" -f "内嵌 .jmb", $appJmbBytes, $before.text.app_jmb, (Format-Delta $appJmbBytes $before.text.app_jmb))
+            }
+            if ($before.jmb_debug -and $jmbRaw -gt 0) {
+                $oldRaw = if ($null -ne $before.jmb_debug.raw) { [int64]$before.jmb_debug.raw } else { [int64]0 }
+                Write-Host ("  {0,-34} {1,9} {2,9} {3,9}" -f ".jmb 剥离前", $jmbRaw, $oldRaw, (Format-Delta $jmbRaw $oldRaw))
+                Write-Host ("  {0,-34} {1,9} {2,9} {3,9}" -f ".jmb 调试段", $jmbDbgBytes, ([int64]$oldRaw - [int64]$before.jmb_debug.stripped), (Format-Delta $jmbDbgBytes ([int64]$oldRaw - [int64]$before.jmb_debug.stripped)))
             }
             $beforeModules = @{}
             if ($before.modules) {

@@ -175,6 +175,29 @@ static int n_queue_count(JmStateRef st, const JmValue *args, uint8_t nargs,
     return JM_NATIVE_OK;
 }
 
+static int n_queue_destroy(JmStateRef st, const JmValue *args, uint8_t nargs,
+                                JmValue *out) {
+    int32_t handle = 0;
+    HostQueue *q;
+    (void)st;
+    if (nargs != 1 || jm_value_to_int(args[0], &handle) != 0) {
+        *out = jm_value_bool(0);
+        return JM_NATIVE_OK;
+    }
+    q = host_queue_of(handle);
+    if (!q) {
+        *out = jm_value_bool(0);
+        return JM_NATIVE_OK;
+    }
+    q->cap = 0u;
+    q->head = 0u;
+    q->tail = 0u;
+    q->count = 0u;
+    q->used = 0u;
+    *out = jm_value_bool(1);
+    return JM_NATIVE_OK;
+}
+
 static int n_sem_create(JmStateRef st, const JmValue *args, uint8_t nargs,
                              JmValue *out) {
     int32_t initial = 0;

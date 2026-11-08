@@ -128,18 +128,68 @@ fn encode_debug(prog: &Program) -> Result<Option<Vec<u8>>> {
     let file_table_len = 2 * files.len();
     let code_dir_len = 6 * prog.codes.len();
     let str_off = header_len + file_table_len + code_dir_len;
+
+    // 符号区（可选，flags.bit2）：目录（ncodes × u16，相对 sym_off）→ 各代码块
+    // （`u8 n` + n × `{u8 槽号, u16 名字偏移}`）→ 名字池。没有任何具名局部时整段省略。
+    let mut sym_pool: Vec<u8> = Vec::new();
+    let mut code_syms: Vec<Vec<(u8, u16)>> = Vec::new();
+    for c in &prog.codes {
+        let mut v = Vec::new();
+        for (slot, name) in &c.locals {
+            v.push((*slot, push_name(&mut sym_pool, name)?));
+        }
+        code_syms.push(v);
+    }
+    let has_syms = code_syms.iter().any(|v| !v.is_empty());
+    let mut sym_dir: Vec<u16> = Vec::new();
+    let mut sym_blocks: Vec<Vec<u8>> = Vec::new();
+    if has_syms {
+        let dir_len = 2 * prog.codes.len();
+        let blocks_total: usize = code_syms
+            .iter()
+            .map(|v| if v.is_empty() { 0 } else { 1 + 3 * v.len() })
+            .sum();
+        let pool_base = dir_len + blocks_total;
+        let mut cursor = dir_len;
+        for v in &code_syms {
+            if v.is_empty() {
+                sym_dir.push(0);
+                continue;
+            }
+            sym_dir.push(cursor as u16);
+            let mut block = Vec::new();
+            block.push(v.len() as u8);
+            for (slot, pool_off) in v {
+                block.push(*slot);
+                block.extend_from_slice(&((pool_base + *pool_off as usize) as u16).to_le_bytes());
+            }
+            cursor += block.len();
+            sym_blocks.push(block);
+        }
+    }
+
     let mut record_off = str_off + pool.len();
+    let records_total: usize = record_blobs.iter().map(|b| b.len()).sum();
+    let sym_off = if has_syms {
+        str_off + pool.len() + records_total
+    } else {
+        0
+    };
 
     let mut section = Vec::new();
     section.extend_from_slice(b"DBG1");
     section.push(1); // 版本
-    section.push(if multi_file { 2 } else { 0 }); // flags：bit1 = 每条记录带文件标签
+    let mut flags = if multi_file { 2 } else { 0 }; // bit1 = 每条记录带文件标签
+    if has_syms {
+        flags |= 4; // bit2 = 有符号区
+    }
+    section.push(flags);
     section.push(files.len() as u8);
     section.push(prog.codes.len() as u8);
     section.extend_from_slice(&(header_len as u16).to_le_bytes());
     section.extend_from_slice(&((header_len + file_table_len) as u16).to_le_bytes());
     section.extend_from_slice(&(str_off as u16).to_le_bytes());
-    section.extend_from_slice(&[0, 0]); // 保留
+    section.extend_from_slice(&(sym_off as u16).to_le_bytes()); // 保留位 → 符号区偏移（0 = 无）
 
     for off in &file_offs {
         section.extend_from_slice(&off.to_le_bytes());
@@ -156,6 +206,16 @@ fn encode_debug(prog: &Program) -> Result<Option<Vec<u8>>> {
     section.extend_from_slice(&pool);
     for blob in &record_blobs {
         section.extend_from_slice(blob);
+    }
+
+    if has_syms {
+        for off in &sym_dir {
+            section.extend_from_slice(&off.to_le_bytes());
+        }
+        for block in &sym_blocks {
+            section.extend_from_slice(block);
+        }
+        section.extend_from_slice(&sym_pool);
     }
 
     if section.len() > 65535 {

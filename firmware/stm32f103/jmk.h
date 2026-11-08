@@ -150,6 +150,8 @@ typedef struct JmkQueue {
 } JmkQueue;
 
 int jmk_queue_init(JmkQueue *q, void *buf, uint32_t item_size, uint32_t capacity);
+/* 销毁队列：摘下所有等待者（按“未成功” -1 唤醒），清空控制块；槽位缓冲由调用方保留。 */
+int jmk_queue_destroy(JmkQueue *q);
 int jmk_queue_send(JmkQueue *q, const void *item, uint32_t timeout_ms);
 int jmk_queue_recv(JmkQueue *q, void *item, uint32_t timeout_ms);
 int jmk_queue_send_from_isr(JmkQueue *q, const void *item, uint8_t *woken);

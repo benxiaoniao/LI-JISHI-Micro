@@ -198,8 +198,9 @@ int jm_run(const void *jmb, size_t len) {
     JM_HW_NOTE(st);
     st->tasks[0].sp = (uint16_t)st->sp; /* root 的局部槽已铺好，交给调度器 */
 
-    if (jm_execute(st)) {
+    int rc = jm_execute(st);
+    if (rc < 0) {
         return -1;
     }
-    return 0;
+    return rc; /* 0 = 正常结束；1 = 暂停（JM_DEBUG_HOOKS） */
 }

@@ -45,7 +45,10 @@ try {
     & $micc --check-native
     if ($LASTEXITCODE -ne 0) { throw "原生表头与规格不一致" }
 
-    Write-Host "== 3/6 编译示例为 .jmb（剥离调试段，烧录不占 Flash）"
+    Write-Host "== 3/6 编译示例为 .jmb（保留调试段另存，内嵌用剥离版）"
+    # app.debug.jmb 只给体积报告算「剥离前/后」两个数，不进固件。
+    & $micc ("examples\" + $Example + ".jsh") -o "$out\app.debug.jmb" | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw ("编译失败：" + $Example + ".jsh") }
     & $micc ("examples\" + $Example + ".jsh") -o "$out\app.jmb" --strip-debug | Out-Null
     if ($LASTEXITCODE -ne 0) { throw ("编译失败：" + $Example + ".jsh") }
 
@@ -72,6 +75,7 @@ try {
         "runtime\src\jm_heap.c", "runtime\src\jm_vm.c", "runtime\src\jm_builtin.c",
         "runtime\src\jm_loader.c", "runtime\src\jm_error.c",
         "runtime\src\jm_native.c",
+        "runtime\src\jm_debug.c",
         "firmware\stm32f103\stm32f103_port.c",
         "firmware\stm32f103\f103_native.c",
         "firmware\stm32f103\jmk.c",

@@ -250,6 +250,169 @@ try {
     Check "剥离后无法使用断点（无调试信息）" `
         (($LASTEXITCODE -eq 2) -and ($stripBpOut -match "断点无法落地")) $stripBpOut
 
+    # ---------- 9. M2：行表 / 多断点 / 行级单步 / 步过 ----------
+    function DbgRun([string]$inText, [string[]]$argv2) {
+        $lines = @($inText -split "`n")
+        $o = ($lines | & $jmrun @argv2 2>&1 | Out-String) -replace "`r`n", "`n"
+        return @{ code = $LASTEXITCODE; text = $o }
+    }
+    function PauseLines([string]$text) {
+        # PowerShell 把 stderr 转成错误记录时会重复一遍文本，连续相同的行去重。
+        $ms = [regex]::Matches($text, "暂停：任务 (\d+) 「[^」]*」 .*?:(\d+)")
+        $vals = @($ms | ForEach-Object { [int]$_.Groups[2].Value })
+        $out = @()
+        foreach ($v in $vals) {
+            if ($out.Count -eq 0 -or $out[$out.Count - 1] -ne $v) { $out += $v }
+        }
+        return $out
+    }
+    # 夹具用 ASCII 文件名：REPL 的断点规格从 stdin 读入，避免与 argv 编码混用。
+    $m2f = Join-Path $sandbox "m2step.jsh"
+    Write-Utf8 $m2f @"
+函数 加(数)：
+    令 结果 = 数 + 1
+    返回 结果
+令 甲 = 1
+令 乙 = 加(甲)
+打印(乙)
+打印("结束")
+"@
+    $m2jmb = Join-Path $sandbox "m2step.jmb"
+    & $micc $m2f -o $m2jmb | Out-Null
+    $m2s = $m2f.Replace('\', '/')
+
+    $lt = (& $micc --line-table $m2jmb 2>&1 | Out-String)
+    Check "行表包含 代码/偏移/文件/行 四列" `
+        (($LASTEXITCODE -eq 0) -and ($lt -match "(?m)^\d+\t\d+\t\d+\t\d+\r?$")) $lt
+
+    $r = DbgRun "c`nc`nc`nq" @("--dbg", "--break", ($m2s + ":4"), "--break", ($m2s + ":5"), "--break", ($m2s + ":6"), $m2jmb)
+    Check "三个断点按执行顺序 4 → 5 → 6 命中" `
+        (($r.code -eq 0) -and (((PauseLines $r.text) -join ",") -eq "4,5,6")) (($r.text))
+
+    $plain = ((& $jmrun $m2jmb 2>$null | Out-String) -replace "`r`n", "`n").TrimEnd()
+    $hitStdout = ((@("c", "c", "c", "q") | & $jmrun --dbg --break ($m2s + ":4") --break ($m2s + ":5") --break ($m2s + ":6") $m2jmb 2>$null | Out-String) -replace "`r`n", "`n").TrimEnd()
+    Check "多次暂停恢复后 stdout 与普通运行一致" ($hitStdout -eq $plain) ($plain + "`n---`n" + $hitStdout)
+
+    $r = DbgRun "n`nq" @("--dbg", "--break", ($m2s + ":5"), $m2jmb)
+    Check "n 行级单步进入被调函数（5 → 2）" `
+        (($r.code -eq 0) -and (((PauseLines $r.text) -join ",") -eq "5,2") -and ($r.text -match "「加」")) $r.text
+
+    $r = DbgRun "o`nq" @("--dbg", "--break", ($m2s + ":5"), $m2jmb)
+    Check "o 步过不进入被调函数（5 → 6）" `
+        (($r.code -eq 0) -and (((PauseLines $r.text) -join ",") -eq "5,6") -and ($r.text -notmatch "「加」")) $r.text
+
+    $r = DbgRun "bl`nb m2step.jsh:6`nbl`nc`nq" @("--dbg", $m2jmb)
+    Check "REPL b/bl：先列入口断点，再加一点并命中" `
+        (($r.code -eq 0) -and ($r.text -match "#0 ") -and ($r.text -match "m2step\.jsh:6") -and
+         ((PauseLines $r.text) -contains 6)) $r.text
+
+    $tooMany = @("--dbg")
+    for ($i = 0; $i -lt 9; $i++) { $tooMany += @("--break", ($m2s + ":4")) }
+    $tooMany += $m2jmb
+    $r = DbgRun "q`n" $tooMany
+    Check "断点超过 8 个明确拒绝" (($r.code -eq 2) -and ($r.text -match "断点最多 8 个")) $r.text
+
+    # ---------- 10. M2：--task 会话过滤 ----------
+    $taskJmb = "build\任务.jmb"
+    if (Test-Path $taskJmb) {
+        $r = DbgRun "c`nq" @("--dbg", "--break", "任务.jsh:5", "--task", "1", $taskJmb)
+        Check "--task 1 停在子任务（子甲）" `
+            (($r.code -eq 0) -and ($r.text -match "暂停：任务 1 「子甲」") -and
+             ((PauseLines $r.text) -contains 5)) $r.text
+
+        $r = DbgRun "q`n" @("--dbg", "--break", "任务.jsh:5", "--task", "7", $taskJmb)
+        Check "--task 7 不存在：提示一次且断点不再命中" `
+            (($r.code -eq 0) -and ($r.text -match "任务 7 不存在（当前共 4 个）") -and
+             ($r.text -notmatch "暂停：")) $r.text
+
+        $r = DbgRun "q`n" @("--dbg", "--break", "任务.jsh:26", "--task", "1", $taskJmb)
+        Check "--task 1 已结束：提示一次且不再停" `
+            (($r.code -eq 0) -and ($r.text -match "任务 1 已结束") -and ($r.text -notmatch "暂停：")) $r.text
+    } else {
+        Check "--task 相关用例（缺 build\任务.jmb）" $false "先运行 tools\build.ps1"
+    }
+
+    # ---------- 11. M3：条件断点 / 命中计数 / 断点脚本文件 ----------
+    $m3f = Join-Path $sandbox "m3cond.jsh"
+    Write-Utf8 $m3f @"
+函数 跑():
+    令 k = 0
+    当 k < 5:
+        k += 1
+        打印("k =", k)
+    令 名 = "甲"
+    令 好 = 真
+    打印(名, 好)
+跑()
+"@
+    $m3jmb = Join-Path $sandbox "m3cond.jmb"
+    & $micc $m3f -o $m3jmb | Out-Null
+    $m3s = $m3f.Replace('\', '/')
+    $m3plain = ((& $jmrun $m3jmb 2>$null | Out-String) -replace "`r`n", "`n").TrimEnd()
+
+    $r = DbgRun "bl`nc`nq" @("--dbg", "--break", ($m3s + ":5 if k == 3"), $m3jmb)
+    Check "条件断点：k == 3 时停（第 3 次命中）" `
+        (($r.code -eq 0) -and (((PauseLines $r.text) -join ",") -eq "5") -and ($r.text -match "已命中 3")) $r.text
+
+    $r = DbgRun "c`nq" @("--dbg", "--break", ($m3s + ":5 if k == 99"), $m3jmb)
+    $m3noHit = ((@("c", "q") | & $jmrun --dbg --break ($m3s + ":5 if k == 99") $m3jmb 2>$null | Out-String) -replace "`r`n", "`n").TrimEnd()
+    Check "条件不成立：不停、输出与普通运行一致" `
+        (($r.code -eq 0) -and ($r.text -notmatch "暂停：") -and ($m3noHit -eq $m3plain)) $r.text
+
+    $r = DbgRun "c`nq" @("--dbg", "--break", ($m3s + ":8 if 名 == 甲"), $m3jmb)
+    Check "文本条件成立（裸文本字面量）" `
+        (($r.code -eq 0) -and ((PauseLines $r.text) -contains 8)) $r.text
+
+    $r = DbgRun "c`nq" @("--dbg", "--break", ($m3s + ":8 if 好 == 真"), $m3jmb)
+    Check "布尔条件成立（真）" `
+        (($r.code -eq 0) -and ((PauseLines $r.text) -contains 8)) $r.text
+
+    $r = DbgRun "c`nq" @("--dbg", "--break", ($m3s + ":5 if k == 甲"), $m3jmb)
+    Check "类型不匹配：警告一次并按不成立继续" `
+        (($r.code -eq 0) -and ($r.text -match "警告：断点 #0 条件求值失败") -and
+         ($r.text -notmatch "暂停：") -and (([regex]::Matches($r.text, "警告：")).Count -le 2)) $r.text
+
+    $r = DbgRun "c`nq" @("--dbg", "--break", ($m3s + ":5 if 不存在 == 1"), $m3jmb)
+    Check "未知名条件：警告一次并按不成立继续" `
+        (($r.code -eq 0) -and ($r.text -match "警告：断点 #0 条件求值失败") -and
+         ($r.text -notmatch "暂停：")) $r.text
+
+    $r = DbgRun "bl`nc`nq" @("--dbg", "--break", ($m3s + ":5#2"), $m3jmb)
+    Check "命中计数 #2：只第 2 次命中停" `
+        (($r.code -eq 0) -and ($r.text -match "已命中 2") -and (((PauseLines $r.text) -join ",") -eq "5")) $r.text
+
+    $r = DbgRun "bl`nc`nbl`nc`nq" @("--dbg", "--break", ($m3s + ":5%2"), $m3jmb)
+    Check "命中计数 %2：第 2、4 次命中停" `
+        (($r.code -eq 0) -and ($r.text -match "已命中 2") -and ($r.text -match "已命中 4")) $r.text
+
+    $bpOk = Join-Path $sandbox "断点表.txt"
+    Write-Utf8Bom $bpOk ("// 注释`r`n`r`n" + "m3cond.jsh:5 if k == 2`r`n" + 'm3cond.jsh:8 if 名 == "甲"' + "`r`n")
+    $r = DbgRun "c`nc`nq" @("--dbg", "--break-file", $bpOk, $m3jmb)
+    Check "断点脚本：跳过注释/空行，两条按 5 → 8 命中" `
+        (($r.code -eq 0) -and (((PauseLines $r.text) -join ",") -eq "5,8")) $r.text
+
+    $bpBad = Join-Path $sandbox "断点表-坏行.txt"
+    Write-Utf8 $bpBad ("m3cond.jsh:5`r`n" + "m3cond.jsh:5 if k === 1`r`n")
+    $r = DbgRun "q`n" @("--dbg", "--break-file", $bpBad, $m3jmb)
+    Check "断点脚本坏行：报第 2 行并退出 2（不执行任何断点）" `
+        (($r.code -eq 2) -and ($r.text -match "第 2 行") -and ($r.text -notmatch "暂停：")) $r.text
+
+    $r = DbgRun "q`n" @("--dbg", "--break-file", (Join-Path $sandbox "不存在.txt"), $m3jmb)
+    Check "断点脚本不存在：明确报错并退出 2" `
+        (($r.code -eq 2) -and ($r.text -match "打不开断点脚本")) $r.text
+
+    $r = DbgRun "q`n" @("--break-file", $bpOk, $m3jmb)
+    Check "断点脚本只能与 --dbg 一起用" `
+        (($r.code -eq 2) -and ($r.text -match "只能与 --dbg 一起用")) $r.text
+
+    $r = DbgRun "c`nq" @("--break", ($m3s + ":5 if k == 3"), $m3jmb)
+    Check "普通运行（不带 --dbg）拒绝条件断点" `
+        (($r.code -eq 2) -and ($r.text -match "只能与 --dbg 一起用")) $r.text
+
+    $r = DbgRun "b m3cond.jsh:5 if k == 4`nbl`nc`nq" @("--dbg", $m3jmb)
+    Check "REPL b 支持条件断点" `
+        (($r.code -eq 0) -and ($r.text -match "if k == 4") -and ((PauseLines $r.text) -contains 5)) $r.text
+
     Write-Host ("共 " + $total + " 个用例，失败 " + $fail + " 个")
     if ($fail -gt 0) { exit 1 }
     exit 0

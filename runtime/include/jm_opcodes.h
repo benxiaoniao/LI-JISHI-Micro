@@ -44,6 +44,7 @@
 #define OP_TASK_YIELD 39
 #define OP_TASK_SLEEP 40
 #define OP_TASK_WAIT 41
+#define OP_TASK_KILL 42
 
 #define BIN_ADD 0
 #define BIN_SUB 1

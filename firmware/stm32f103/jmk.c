@@ -55,11 +55,16 @@ static int8_t jmk_wait_result[JMK_MAX_TASKS];
 extern void jmk_first_switch(void) __attribute__((noreturn));
 void jmk_task_exit(void) __attribute__((noreturn));
 
+/*
+ * 空闲任务栈恒为静态预留：空闲任务是内核强制实体，不能和用户任务争池。
+ * 静态兼容路径直接使用；动态路径下它不占栈池，3200 B 全部留给用户任务。
+ */
+static uint32_t jmk_idle_stack[JMK_IDLE_STACK_BYTES / 4u]
+    __attribute__((aligned(8)));
+
 #if JMK_USE_STATIC_STACKS
 /* ---- 兼容路径：固定槽位静态栈 ---- */
 static uint32_t jmk_stacks[JMK_MAX_TASKS][JMK_TASK_STACK_BYTES / 4u]
-    __attribute__((aligned(8)));
-static uint32_t jmk_idle_stack[JMK_IDLE_STACK_BYTES / 4u]
     __attribute__((aligned(8)));
 #else
 /* ---- 动态路径：独立栈池 ----
@@ -589,24 +594,9 @@ void jmk_start(void)
     uint32_t pm = crit_enter();
     JmkTcb *first;
 
-    /* 空闲任务：永远在就绪队列里兜底 */
-#if JMK_USE_STATIC_STACKS
+    /* 空闲任务：永远在就绪队列里兜底；栈是静态预留，启动时不可能分配失败 */
     task_build(&jmk_idle_tcb, jmk_idle_stack, JMK_IDLE_STACK_BYTES / 4u,
                idle_entry, 0, 0u, "idle", 0xFFu);
-#else
-    {
-        uint32_t words = 0u;
-        uint32_t *base = pool_alloc(JMK_IDLE_STACK_BYTES, &words);
-        if (!base) {
-            /* 池连空闲任务都放不下：配置错误，停在这里等调试器 */
-            crit_exit(pm);
-            for (;;) {
-                __asm volatile ("wfi");
-            }
-        }
-        task_build(&jmk_idle_tcb, base, words, idle_entry, 0, 0u, "idle", 0xFFu);
-    }
-#endif
     ready_push(&jmk_idle_tcb);
 
     /* SysTick 与 PendSV 都设为最低优先级（0xFF），互相不可抢占 */
@@ -956,6 +946,44 @@ static void queue_read(JmkQueue *q, void *item)
     q->count--;
 }
 
+/*
+ * 销毁队列：在临界区里摘下两条等待链上的全部任务，按“未成功”(-1) 唤醒，
+ * 让它们的发送/接收循环按超时路径返回；随后清空控制块（capacity = 0 作为已销毁标记）。
+ * 槽位缓冲由调用方提供，这里不释放。
+ */
+int jmk_queue_destroy(JmkQueue *q)
+{
+    uint32_t pm;
+    JmkTcb *w;
+
+    if (!q) {
+        return JMK_E_PARAM;
+    }
+    pm = crit_enter();
+    while ((w = wait_pop(&q->wait_recv)) != 0) {
+        ipc_wake(w, 0);
+        if (jmk_current && w->prio > jmk_current->prio) {
+            SCB_ICSR = PENDSVSET;
+        }
+    }
+    while ((w = wait_pop(&q->wait_send)) != 0) {
+        ipc_wake(w, 0);
+        if (jmk_current && w->prio > jmk_current->prio) {
+            SCB_ICSR = PENDSVSET;
+        }
+    }
+    q->buf = 0;
+    q->item_size = 0u;
+    q->capacity = 0u;
+    q->head = 0u;
+    q->tail = 0u;
+    q->count = 0u;
+    q->wait_recv = 0;
+    q->wait_send = 0;
+    crit_exit(pm);
+    return JMK_OK;
+}
+
 int jmk_queue_send(JmkQueue *q, const void *item, uint32_t timeout_ms)
 {
     uint32_t pm;
@@ -965,6 +993,9 @@ int jmk_queue_send(JmkQueue *q, const void *item, uint32_t timeout_ms)
 
     if (!q || !item) {
         return JMK_E_PARAM;
+    }
+    if (q->capacity == 0u) {
+        return JMK_E_PARAM;         /* 已销毁队列 */
     }
     idx = tcb_slot(jmk_current);
     if (idx == 0xFFu) {
@@ -1019,6 +1050,9 @@ int jmk_queue_recv(JmkQueue *q, void *item, uint32_t timeout_ms)
 
     if (!q || !item) {
         return JMK_E_PARAM;
+    }
+    if (q->capacity == 0u) {
+        return JMK_E_PARAM;         /* 已销毁队列 */
     }
     idx = tcb_slot(jmk_current);
     if (idx == 0xFFu) {

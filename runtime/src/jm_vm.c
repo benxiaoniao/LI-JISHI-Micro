@@ -1,5 +1,6 @@
 #include "jm_internal.h"
 #include "jm_native.h"
+#include "jm_debug.h"
 
 JmState jm_state;
 
@@ -1112,6 +1113,17 @@ int jm_execute(JmState *st) {
             goto done;
         }
 #endif
+#if JM_DEBUG_HOOKS
+        /* 调试钩子：命中即暂停并保留现场。不能走 done:（那里会释放全部任务栈），
+         * 也不能改任务状态为 DEAD；置 READY 后由 jm_dbg_resume 重新调度。 */
+        if (jm_host_dbg_tick(cur_code, cur_ip, (uint8_t)st->fp)) {
+            f->ip = cur_ip;
+            st->tasks[st->current].state = JM_TASK_READY;
+            jm_green_swap_out(st);
+            jm_dbg_mark_paused(st->current);
+            return 1;
+        }
+#endif
         if (ip >= clen) {
             VM_FAIL(E_OPCODE, "指令流越界");
         }
@@ -1914,6 +1926,39 @@ int jm_execute(JmState *st) {
             st->sp--;        /* 弹出任务体 */
             jm_release(body);/* 父任务让出这份引用 */
             PUSH_V(jm_v_int((int32_t)slot));
+            break;
+        }
+        case OP_TASK_KILL: {
+            JmValue hv;
+            POP_V(hv);
+            if (JM_TAG(hv) != JM_TAG_INT) {
+                VM_FAIL(JM_NE_TYPE, "删除需要一个整数任务句柄");
+            }
+            int32_t h = jm_int(hv);
+            /* 句柄 1..3；当前任务不能删自己（任务以“返回”结束）。 */
+            if (h <= 0 || h >= (int32_t)JM_MAX_GREEN_TASKS ||
+                (uint8_t)h == st->current ||
+                st->tasks[h].state == JM_TASK_FREE ||
+                st->tasks[h].state == JM_TASK_DEAD) {
+                PUSH_V(jm_v_bool(0));
+                break;
+            }
+            JmGreenTask *victim = &st->tasks[h];
+            while (victim->sp > 0) {
+                victim->sp--;
+                jm_release(victim->stack[victim->sp]);
+            }
+            victim->fp = 0;
+            victim->tp = 0;
+            victim->wake_tick = 0;
+            victim->deadline_tick = 0;
+            victim->wait_kind = 0;
+            victim->wait_native = 0;
+            victim->state = JM_TASK_DEAD;
+            jm_release(victim->body);
+            victim->body = JM_UNDEF;
+            /* 槽位不复用：与子任务自然退出保持同一口径，ntask 不回退。 */
+            PUSH_V(jm_v_bool(1));
             break;
         }
         case OP_TASK_YIELD:

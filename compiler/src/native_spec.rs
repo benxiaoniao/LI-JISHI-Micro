@@ -181,6 +181,13 @@ pub const MODULES: &[NativeModuleSpec] = &[
                 c_fn: "n_queue_count",
                 doc: "返回队列里当前的整数条数。",
             },
+            NativeEntrySpec {
+                name: "队列销毁",
+                min_args: 1,
+                max_args: 1,
+                c_fn: "n_queue_destroy",
+                doc: "队列销毁(句柄)；成功释放该队列控制块并返回 真，句柄无效或已销毁返回 假。正在等待它的任务按“未成功”返回（发送/接收表现为超时）。槽位缓冲归调用方，不随队列释放。",
+            },
         ],
     },
     NativeModuleSpec {
