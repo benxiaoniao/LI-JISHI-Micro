@@ -125,6 +125,27 @@ pub const MODULES: &[NativeModuleSpec] = &[
                 c_fn: "n_timer_count",
                 doc: "返回 TIM2 当前毫秒计数（0–65535，约 65.5 秒回绕）。",
             },
+            NativeEntrySpec {
+                name: "PWM启动",
+                min_args: 3,
+                max_args: 3,
+                c_fn: "n_pwm_start",
+                doc: "PWM启动(引脚, 频率赫兹, 占空比千分比)；引脚 22–25（PB6–PB9，对应 TIM4_CH1–CH4），频率 1–10000 Hz，占空比 0–1000（千分比，0=常低，1000=常高）。板上用 TIM4，不占 TIM2 毫秒基准；PC13 没有定时器通道，不能 PWM。",
+            },
+            NativeEntrySpec {
+                name: "PWM占空比",
+                min_args: 1,
+                max_args: 1,
+                c_fn: "n_pwm_set_duty",
+                doc: "PWM占空比(千分比)，范围 0–1000；需先调用 PWM启动，未启动报 E033。改占空比不改变频率。",
+            },
+            NativeEntrySpec {
+                name: "PWM停止",
+                min_args: 0,
+                max_args: 0,
+                c_fn: "n_pwm_stop",
+                doc: "关闭 PWM 输出并把引脚拉低；需先调用 PWM启动，未启动报 E033。",
+            },
         ],
     },
     NativeModuleSpec {

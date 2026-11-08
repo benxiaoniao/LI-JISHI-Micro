@@ -447,6 +447,70 @@ static int n_timer_count(JmStateRef st, const JmValue *args, uint8_t nargs,
     return JM_NATIVE_OK;
 }
 
+/* ---- 主机端 PWM 替身 ----
+ * PC 上没有 TIM4 与引脚输出，这里只保存状态并做与板级相同的参数校验；
+ * 参数越界、未启动就改占空比/停止，都在主机上以同一套错误码暴露。
+ */
+static uint8_t g_host_pwm_on = 0u;
+
+static int n_pwm_start(JmStateRef st, const JmValue *args, uint8_t nargs,
+                       JmValue *out) {
+    int32_t pin = 0;
+    int32_t freq = 0;
+    int32_t duty = 0;
+    if (nargs != 3) {
+        return jm_native_fail(st, JM_NE_PARAM,
+                              "PWM启动需要三个参数：引脚, 频率赫兹, 占空比千分比");
+    }
+    if (jm_value_to_int(args[0], &pin) != 0 ||
+        jm_value_to_int(args[1], &freq) != 0 ||
+        jm_value_to_int(args[2], &duty) != 0) {
+        return jm_native_fail(st, JM_NE_TYPE, "PWM启动：参数必须是整数");
+    }
+    if (pin < 22 || pin > 25) {
+        return jm_native_fail(st, JM_NE_PARAM, "PWM 引脚只能是 22–25（PB6–PB9）");
+    }
+    if (freq < 1 || freq > 10000) {
+        return jm_native_fail(st, JM_NE_PARAM, "PWM 频率范围 1–10000 Hz");
+    }
+    if (duty < 0 || duty > 1000) {
+        return jm_native_fail(st, JM_NE_PARAM, "PWM 占空比范围 0–1000（千分比）");
+    }
+    g_host_pwm_on = 1u;
+    *out = jm_value_nil();
+    return JM_NATIVE_OK;
+}
+
+static int n_pwm_set_duty(JmStateRef st, const JmValue *args, uint8_t nargs,
+                          JmValue *out) {
+    int32_t duty = 0;
+    if (nargs != 1 || jm_value_to_int(args[0], &duty) != 0) {
+        return jm_native_fail(st, JM_NE_TYPE, "PWM占空比需要一个整数参数：千分比");
+    }
+    if (duty < 0 || duty > 1000) {
+        return jm_native_fail(st, JM_NE_PARAM, "PWM 占空比范围 0–1000（千分比）");
+    }
+    if (g_host_pwm_on == 0u) {
+        return jm_native_fail(st, JM_NE_STATE, "PWM 未启动，先调用 PWM启动()");
+    }
+    *out = jm_value_nil();
+    return JM_NATIVE_OK;
+}
+
+static int n_pwm_stop(JmStateRef st, const JmValue *args, uint8_t nargs,
+                      JmValue *out) {
+    (void)args;
+    if (nargs != 0) {
+        return jm_native_fail(st, JM_NE_PARAM, "PWM停止不接受参数");
+    }
+    if (g_host_pwm_on == 0u) {
+        return jm_native_fail(st, JM_NE_STATE, "PWM 未启动，先调用 PWM启动()");
+    }
+    g_host_pwm_on = 0u;
+    *out = jm_value_nil();
+    return JM_NATIVE_OK;
+}
+
 static const JmNativeEntry HOST_ADC_TABLE[] = {
     F103_ADC_TABLE_INIT
 };

@@ -29,7 +29,13 @@ try {
         @{ file = "运行故障不可捕获.jsh"; code = "E007"; stage = "运行" },
         @{ file = "尝试嵌套过深.jsh"; code = "E028"; stage = "运行" },
         @{ file = "任务超限.jsh";   code = "E038"; stage = "运行" },
-        @{ file = "任务当值.jsh";   code = "E115"; stage = "编译" }
+        @{ file = "任务当值.jsh";   code = "E115"; stage = "编译" },
+        @{ file = "PWM引脚.jsh";     code = "E030"; stage = "运行" },
+        @{ file = "PWM频率.jsh";     code = "E030"; stage = "运行" },
+        @{ file = "PWM占空比越界.jsh"; code = "E030"; stage = "运行" },
+        @{ file = "PWM类型.jsh";     code = "E031"; stage = "运行" },
+        @{ file = "PWM未启动.jsh";   code = "E033"; stage = "运行" },
+        @{ file = "PWM停止未启动.jsh"; code = "E033"; stage = "运行" }
     )
     $fail = 0
     foreach ($c in $cases) {

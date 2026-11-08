@@ -30,18 +30,21 @@
 
 #endif /* F103_ADC_TABLE_H */
 
-/* 原生表 f103_timer：3 项 */
+/* 原生表 f103_timer：6 项 */
 #ifndef F103_TIMER_TABLE_H
 #define F103_TIMER_TABLE_H
 
 #define F103_TIMER_TABLE_NAME "f103_timer"
-#define F103_TIMER_ENTRY_COUNT 3u
+#define F103_TIMER_ENTRY_COUNT 6u
 
 /* 在 JmNativeEntry 数组初始化处展开；名字、参数个数、C 函数名都来自同一份规格。 */
 #define F103_TIMER_TABLE_INIT \
     {"定时器初始化", n_timer_init, 0u, 0u, 0u, 0u}, \
     {"定时器延时", n_timer_delay, 1u, 1u, 0u, 0u}, \
-    {"定时器计数", n_timer_count, 0u, 0u, 0u, 0u}
+    {"定时器计数", n_timer_count, 0u, 0u, 0u, 0u}, \
+    {"PWM启动", n_pwm_start, 3u, 3u, 0u, 0u}, \
+    {"PWM占空比", n_pwm_set_duty, 1u, 1u, 0u, 0u}, \
+    {"PWM停止", n_pwm_stop, 0u, 0u, 0u, 0u}
 
 #endif /* F103_TIMER_TABLE_H */
 

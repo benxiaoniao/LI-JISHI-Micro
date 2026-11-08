@@ -31,6 +31,7 @@
 #define RCC_APB2ENR_AFIOEN  (1u << 0)
 
 #define RCC_APB1ENR_TIM2EN  (1u << 0)
+#define RCC_APB1ENR_TIM4EN  (1u << 2)
 
 /* ADC 预分频：时钟 / 6（72 MHz → 12 MHz，上限 14 MHz） */
 #define RCC_CFGR_ADCPRE_MASK  (3u << 14)
@@ -97,6 +98,21 @@
 #define TIM2_CNT        REG32(0x40000024u)
 #define TIM2_PSC        REG32(0x40000028u)
 #define TIM2_ARR        REG32(0x4000002Cu)
+
+/* TIM4（PB6–PB9 = CH1–CH4，默认映射，无需 AFIO 重映射）
+ * APB1 预分频 /2 时定时器时钟 = 2 × PCLK1 = 72 MHz（与 g_sysclk 一致）。 */
+#define TIM4_CR1        REG32(0x40000800u)
+#define TIM4_EGR        REG32(0x40000814u)
+#define TIM4_CCMR1      REG32(0x40000818u)
+#define TIM4_CCMR2      REG32(0x4000081Cu)
+#define TIM4_CCER       REG32(0x40000820u)
+#define TIM4_CNT        REG32(0x40000824u)
+#define TIM4_PSC        REG32(0x40000828u)
+#define TIM4_ARR        REG32(0x4000082Cu)
+#define TIM4_CCR1       REG32(0x40000834u)
+#define TIM4_CCR2       REG32(0x40000838u)
+#define TIM4_CCR3       REG32(0x4000083Cu)
+#define TIM4_CCR4       REG32(0x40000840u)
 
 /* EXTI：编码引脚 0–15 = PA0–PA15，16–31 = PB0–PB15，32–47 = PC0–PC15；
  * EXTI 线号 = 引脚 % 16，端口选择写 AFIO_EXTICR1–4。 */
@@ -428,6 +444,127 @@ int port_timer_count(uint32_t *ms)
         return -1;
     }
     *ms = TIM2_CNT & 0xFFFFu;
+    return 0;
+}
+
+/* ---------------- TIM4 PWM（PB6–PB9 = CH1–CH4） ----------------
+ * TIM2 已是 jmk_delay 的 1 kHz 毫秒基准，这里用 TIM4，互不影响。
+ * ARR 固定 999 → 一个周期正好 1000 个计数，CCR 直接写千分比（0–1000）。
+ * PC13 只有 GPIO，没有定时器通道，不能做 PWM；PB6–PB9 上板可用。
+ */
+
+#define PWM_PIN_FIRST  22u    /* PB6 = TIM4_CH1 */
+#define PWM_PIN_LAST   25u    /* PB9 = TIM4_CH4 */
+#define PWM_PERIOD     999u
+
+static uint8_t g_pwm_on = 0u;
+static uint32_t g_pwm_ch = 0u;   /* 0–3 = CH1–CH4 */
+
+static void pwm_write_ccr(uint32_t ch, uint32_t duty)
+{
+    switch (ch) {
+    case 0u: TIM4_CCR1 = duty; break;
+    case 1u: TIM4_CCR2 = duty; break;
+    case 2u: TIM4_CCR3 = duty; break;
+    default: TIM4_CCR4 = duty; break;
+    }
+}
+
+/* 引脚配成复用推挽 50 MHz（CR nibble = 0xB）；PB6/PB7 在 CRL，PB8/PB9 在 CRH */
+static void pwm_pin_af(uint32_t line)
+{
+    uint32_t shift = (line & 7u) * 4u;
+
+    RCC_APB2ENR |= RCC_APB2ENR_IOPBEN;
+    if (line < 8u) {
+        GPIOB_CRL = (GPIOB_CRL & ~(0xFu << shift)) | (0xBu << shift);
+    } else {
+        GPIOB_CRH = (GPIOB_CRH & ~(0xFu << shift)) | (0xBu << shift);
+    }
+}
+
+int port_pwm_start(uint32_t pin, uint32_t freq_hz, uint32_t duty_permille)
+{
+    uint32_t line;
+    uint32_t ch;
+    uint32_t tick;
+    uint32_t shift;
+
+    if (pin < PWM_PIN_FIRST || pin > PWM_PIN_LAST || freq_hz == 0u ||
+        freq_hz > 10000u || duty_permille > 1000u) {
+        return -1;
+    }
+
+    line = pin % 16u;
+    ch = line - 6u;   /* PB6–PB9 → CH1–CH4 */
+
+    /* 计数频率 = 时钟 / (PSC+1)，再经 ARR=999 分频 → 每周期 1000 个计数 */
+    tick = g_sysclk / (freq_hz * 1000u);
+    if (tick == 0u || tick > 65536u) {
+        return -1;
+    }
+
+    pwm_pin_af(line);
+    RCC_APB1ENR |= RCC_APB1ENR_TIM4EN;
+
+    TIM4_CR1 = 0u;
+    TIM4_PSC = tick - 1u;
+    TIM4_ARR = PWM_PERIOD;
+
+    /* CH1/CH3 用低 8 位，CH2/CH4 用高 8 位；OCxM=110（PWM 模式 1），OCxPE=1 */
+    shift = (ch & 1u) * 8u + 4u;
+    if (ch < 2u) {
+        TIM4_CCMR1 = (TIM4_CCMR1 & ~(0x7u << shift)) | (0x6u << shift)
+                   | (1u << (shift - 1u));
+    } else {
+        TIM4_CCMR2 = (TIM4_CCMR2 & ~(0x7u << shift)) | (0x6u << shift)
+                   | (1u << (shift - 1u));
+    }
+
+    TIM4_CCER |= (1u << (ch * 4u));   /* CCxE=1，CCxP=0：高电平有效 */
+    pwm_write_ccr(ch, duty_permille);
+
+    TIM4_EGR = 1u;   /* UG：立即装载 PSC/ARR */
+    TIM4_CNT = 0u;
+    TIM4_CR1 = 1u;   /* CEN=1 */
+
+    g_pwm_on = 1u;
+    g_pwm_ch = ch;
+    return 0;
+}
+
+int port_pwm_set_duty(uint32_t duty_permille)
+{
+    if (g_pwm_on == 0u || duty_permille > 1000u) {
+        return -1;
+    }
+    pwm_write_ccr(g_pwm_ch, duty_permille);
+    return 0;
+}
+
+int port_pwm_stop(void)
+{
+    uint32_t line;
+    uint32_t shift;
+
+    if (g_pwm_on == 0u) {
+        return -1;
+    }
+
+    TIM4_CCER &= ~(1u << (g_pwm_ch * 4u));
+    TIM4_CR1 = 0u;
+
+    /* 引脚从复用态改回普通推挽输出并拉低，避免停在高电平 */
+    line = (PWM_PIN_FIRST + g_pwm_ch) % 16u;
+    shift = (line & 7u) * 4u;
+    if (line < 8u) {
+        GPIOB_CRL = (GPIOB_CRL & ~(0xFu << shift)) | (0x2u << shift);
+    } else {
+        GPIOB_CRH = (GPIOB_CRH & ~(0xFu << shift)) | (0x2u << shift);
+    }
+    GPIOB_ODR &= ~(1u << line);
+
+    g_pwm_on = 0u;
     return 0;
 }
 

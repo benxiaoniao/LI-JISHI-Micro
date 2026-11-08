@@ -46,6 +46,13 @@ void port_timer_init(void);
 int  port_timer_delay_ms(uint32_t ms);
 int  port_timer_count(uint32_t *ms);
 
+/* TIM4 PWM：引脚编码 22–25 = PB6–PB9 = TIM4_CH1–CH4。
+ * 频率 1–10000 Hz，占空比 0–1000（千分比）。占用 TIM4，不影响 TIM2 毫秒基准。
+ * 返回 0 = 成功；-1 = 参数越界 / 未启动。 */
+int  port_pwm_start(uint32_t pin, uint32_t freq_hz, uint32_t duty_permille);
+int  port_pwm_set_duty(uint32_t duty_permille);
+int  port_pwm_stop(void);
+
 /* EXTI：PA0–PA4 对应 EXTI0–4，边沿 0=上升 1=下降 2=双沿。
  * 引脚会被改成下拉输入；中断里只做计数与 hook 回调，hook 不许碰 VM。 */
 void port_exti_bind(uint32_t pin, uint32_t edge);

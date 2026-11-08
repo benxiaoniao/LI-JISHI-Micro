@@ -172,6 +172,66 @@ static int n_timer_count(JmStateRef st, const JmValue *args, uint8_t nargs,
     return JM_NATIVE_OK;
 }
 
+/* PWM 并入「定时器」表：TIM4，引脚 22–25 = PB6–PB9。PC13 没有定时器通道。 */
+static int n_pwm_start(JmStateRef st, const JmValue *args, uint8_t nargs,
+                       JmValue *out) {
+    int32_t pin = 0;
+    int32_t freq = 0;
+    int32_t duty = 0;
+    if (nargs != 3) {
+        return jm_native_fail(st, JM_NE_PARAM,
+                              "PWM启动需要三个参数：引脚, 频率赫兹, 占空比千分比");
+    }
+    if (jm_value_to_int(args[0], &pin) != 0 ||
+        jm_value_to_int(args[1], &freq) != 0 ||
+        jm_value_to_int(args[2], &duty) != 0) {
+        return jm_native_fail(st, JM_NE_TYPE, "PWM启动：参数必须是整数");
+    }
+    if (pin < 22 || pin > 25) {
+        return jm_native_fail(st, JM_NE_PARAM, "PWM 引脚只能是 22–25（PB6–PB9）");
+    }
+    if (freq < 1 || freq > 10000) {
+        return jm_native_fail(st, JM_NE_PARAM, "PWM 频率范围 1–10000 Hz");
+    }
+    if (duty < 0 || duty > 1000) {
+        return jm_native_fail(st, JM_NE_PARAM, "PWM 占空比范围 0–1000（千分比）");
+    }
+    if (port_pwm_start((uint32_t)pin, (uint32_t)freq, (uint32_t)duty) != 0) {
+        return jm_native_fail(st, JM_NE_HW, "PWM 启动失败");
+    }
+    *out = jm_value_nil();
+    return JM_NATIVE_OK;
+}
+
+static int n_pwm_set_duty(JmStateRef st, const JmValue *args, uint8_t nargs,
+                          JmValue *out) {
+    int32_t duty = 0;
+    if (arg_int(st, args, nargs, &duty, "PWM占空比需要一个参数：千分比") != 0) {
+        return -1;
+    }
+    if (duty < 0 || duty > 1000) {
+        return jm_native_fail(st, JM_NE_PARAM, "PWM 占空比范围 0–1000（千分比）");
+    }
+    if (port_pwm_set_duty((uint32_t)duty) != 0) {
+        return jm_native_fail(st, JM_NE_STATE, "PWM 未启动，先调用 PWM启动()");
+    }
+    *out = jm_value_nil();
+    return JM_NATIVE_OK;
+}
+
+static int n_pwm_stop(JmStateRef st, const JmValue *args, uint8_t nargs,
+                      JmValue *out) {
+    (void)args;
+    if (nargs != 0) {
+        return jm_native_fail(st, JM_NE_PARAM, "PWM停止不接受参数");
+    }
+    if (port_pwm_stop() != 0) {
+        return jm_native_fail(st, JM_NE_STATE, "PWM 未启动，先调用 PWM启动()");
+    }
+    *out = jm_value_nil();
+    return JM_NATIVE_OK;
+}
+
 /* 语言层「任务」不再走原生表：创建/让出/延时/等待由 VM 绿色调度器实现。 */
 
 /* ---- 语言层任务间通信（JM8 续）：整数句柄 → 静态 JMK 对象槽 ----

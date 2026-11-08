@@ -56,6 +56,15 @@ else {
     Write-Host "  [PASS] 编译通过（导入 外部中断）"
 }
 
+& $micc (Join-Path $root "examples\board\PWM呼吸灯.jsh") -o (Join-Path $root "build\native-pwm-ok.jmb") | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "  [FAIL] PWM 呼吸灯示例被拒绝"
+    $script:fail++
+}
+else {
+    Write-Host "  [PASS] 编译通过（导入 定时器 + PWM）"
+}
+
 function Expect-CompileError {
     param([string]$File, [string]$Code, [string]$Title)
     Write-Host ("== " + $Title)
@@ -87,6 +96,10 @@ Expect-CompileError "tests\errors\定时器名拼错.jsh" "E115" "定时器：�
 Expect-CompileError "tests\errors\定时器参数个数.jsh" "E115" "定时器：参数个数不符应报 E115"
 Expect-CompileError "tests\errors\定时器未导入.jsh" "E113" "定时器：未导入就调用应报 E113"
 
+Expect-CompileError "tests\errors\PWM名拼错.jsh" "E115" "PWM：名字拼错应报 E115"
+Expect-CompileError "tests\errors\PWM参数个数.jsh" "E115" "PWM：参数个数不符应报 E115"
+Expect-CompileError "tests\errors\PWM未导入.jsh" "E113" "PWM：未导入就调用应报 E113"
+
 Expect-CompileError "tests\errors\任务参数个数.jsh" "E115" "任务：参数个数不符应报 E115"
 Expect-CompileError "tests\errors\任务未导入.jsh" "E113" "任务：未导入就调用应报 E113"
 
@@ -106,5 +119,5 @@ if ($script:fail -ne 0) {
     Write-Host ("原生导入回归失败：" + $script:fail + " 项")
     exit 1
 }
-Write-Host "原生导入回归：25/25 通过（引脚 / ADC / 定时器 / 队列 / 信号量 / 外部中断各 3 个错误用例，任务 2 个错误用例；5 个正确示例）"
+Write-Host "原生导入回归：29/29 通过（引脚 / ADC / 定时器 / 队列 / 信号量 / 外部中断 / PWM 各 3 个错误用例，任务 2 个错误用例；6 个正确示例）"
 exit 0
