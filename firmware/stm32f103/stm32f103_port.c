@@ -475,18 +475,28 @@ int port_timer_count(uint32_t *ms)
 
 #define PWM_PIN_FIRST  22u    /* PB6 = TIM4_CH1 */
 #define PWM_PIN_LAST   25u    /* PB9 = TIM4_CH4 */
-#define PWM_PERIOD     999u
+#define PWM_STEPS      1000u  /* 常规档位每周期 1000 个计数（千分比直写） */
 
 static uint8_t g_pwm_on = 0u;
 static uint32_t g_pwm_ch = 0u;   /* 0–3 = CH1–CH4 */
+static uint32_t g_pwm_arr1 = PWM_STEPS;   /* ARR+1：低频档会放大，占空比按它换算 */
 
-static void pwm_write_ccr(uint32_t ch, uint32_t duty)
+static void pwm_write_ccr(uint32_t ch, uint32_t duty_permille)
 {
+    /* 占空比对外始终是千分比；CCR 按当前 ARR+1 换算，1 Hz 档 ARR 不是 999 */
+    uint32_t ccr = (duty_permille * g_pwm_arr1) / PWM_STEPS;
+
+    if (ccr > g_pwm_arr1) {
+        ccr = g_pwm_arr1;      /* 1000‰ = 整周期常高（PWM 模式 1 下 CCR≥ARR+1） */
+    }
+    if (ccr > 65535u) {
+        ccr = 65535u;
+    }
     switch (ch) {
-    case 0u: TIM4_CCR1 = duty; break;
-    case 1u: TIM4_CCR2 = duty; break;
-    case 2u: TIM4_CCR3 = duty; break;
-    default: TIM4_CCR4 = duty; break;
+    case 0u: TIM4_CCR1 = ccr; break;
+    case 1u: TIM4_CCR2 = ccr; break;
+    case 2u: TIM4_CCR3 = ccr; break;
+    default: TIM4_CCR4 = ccr; break;
     }
 }
 
@@ -507,7 +517,8 @@ int port_pwm_start(uint32_t pin, uint32_t freq_hz, uint32_t duty_permille)
 {
     uint32_t line;
     uint32_t ch;
-    uint32_t tick;
+    uint32_t psc1;
+    uint32_t arr1;
     uint32_t shift;
 
     if (pin < PWM_PIN_FIRST || pin > PWM_PIN_LAST || freq_hz == 0u ||
@@ -518,18 +529,48 @@ int port_pwm_start(uint32_t pin, uint32_t freq_hz, uint32_t duty_permille)
     line = pin % 16u;
     ch = line - 6u;   /* PB6–PB9 → CH1–CH4 */
 
-    /* 计数频率 = 时钟 / (PSC+1)，再经 ARR=999 分频 → 每周期 1000 个计数 */
-    tick = g_sysclk / (freq_hz * 1000u);
-    if (tick == 0u || tick > 65536u) {
+    /* 周期 = 时钟 / 频率；PSC 粗分，ARR 细分。
+     * 常规档位（PSC+1 ≤ 65536）保持旧行为：ARR+1 = 1000，千分比直写。
+     * 低频端 1 Hz 需要 72000 个分频，PSC 装不下，才把 ARR+1 放大到
+     * 一个 ≥1000 且能整除周期的因子（1 Hz → 1125，PSC+1 = 64000）。 */
+    psc1 = g_sysclk / (freq_hz * PWM_STEPS);
+    arr1 = PWM_STEPS;
+    if (psc1 == 0u) {
+        return -1;                    /* 8 MHz 兜底时 10 kHz 无解，保持原有失败 */
+    }
+    if (psc1 > 65536u) {
+        uint32_t period = g_sysclk / freq_hz;   /* > 65 536 000，必然 > 0 */
+        uint32_t d;
+
+        arr1 = 0u;
+        for (d = PWM_STEPS; d <= 65536u; d++) {
+            if (period % d == 0u && period / d <= 65536u) {
+                arr1 = d;
+                break;
+            }
+        }
+        if (arr1 == 0u) {
+            /* 无整除解：PSC 取最大，ARR 取最近的整数细分（会有量化误差） */
+            psc1 = (period + 65535u) / 65536u;
+            arr1 = (period + psc1 / 2u) / psc1;
+            if (arr1 < PWM_STEPS) {
+                arr1 = PWM_STEPS;
+            }
+        } else {
+            psc1 = period / arr1;
+        }
+    }
+    if (psc1 == 0u || psc1 > 65536u || arr1 > 65536u) {
         return -1;
     }
 
     pwm_pin_af(line);
     RCC_APB1ENR |= RCC_APB1ENR_TIM4EN;
 
+    g_pwm_arr1 = arr1;
     TIM4_CR1 = 0u;
-    TIM4_PSC = tick - 1u;
-    TIM4_ARR = PWM_PERIOD;
+    TIM4_PSC = psc1 - 1u;
+    TIM4_ARR = arr1 - 1u;
 
     /* CH1/CH3 用低 8 位，CH2/CH4 用高 8 位；OCxM=110（PWM 模式 1），OCxPE=1 */
     shift = (ch & 1u) * 8u + 4u;
