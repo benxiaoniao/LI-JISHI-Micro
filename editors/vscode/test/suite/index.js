@@ -47,6 +47,21 @@ function assert(condition, message) {
   }
 }
 
+/** 把 provider 返回的编辑按倒序落回文本，便于验证最终结果。 */
+function applyTextEdits(document, text, edits) {
+  const list = edits.map(edit => ({
+    start: document.offsetAt(edit.range.start),
+    end: document.offsetAt(edit.range.end),
+    text: edit.newText,
+  }));
+  list.sort((a, b) => b.start - a.start);
+  let out = text;
+  for (const edit of list) {
+    out = out.slice(0, edit.start) + edit.text + out.slice(edit.end);
+  }
+  return out;
+}
+
 exports.run = async function run() {
   const extension = vscode.extensions.getExtension('jishim.li-vscode');
   await check('扩展能激活', async () => {
@@ -95,6 +110,26 @@ exports.run = async function run() {
     const list = await definitions('examples/board/点灯.jsh', 1, 4);
     assert(list.length > 0, '没有定义');
     assert(list[0].uri.fsPath.endsWith('langcard.json'), '文件不对：' + list[0].uri.fsPath);
+  });
+
+  await check('Shift+Alt+F：格式化提供者返回编辑', async () => {
+    const original = '函数 甲():\n  令 x=1+2\n';
+    const document = await vscode.workspace.openTextDocument({ language: 'li', content: original });
+    const edits = await vscode.commands.executeCommand(
+      'vscode.executeFormatDocumentProvider',
+      document.uri,
+      { tabSize: 4, insertSpaces: true }
+    );
+    assert(Array.isArray(edits) && edits.length > 0, '没有格式化编辑');
+    const once = applyTextEdits(document, original, edits);
+    assert(once === '函数 甲():\n    令 x = 1 + 2\n', '实际:\n' + once);
+    const document2 = await vscode.workspace.openTextDocument({ language: 'li', content: once });
+    const edits2 = await vscode.commands.executeCommand(
+      'vscode.executeFormatDocumentProvider',
+      document2.uri,
+      { tabSize: 4, insertSpaces: true }
+    );
+    assert(applyTextEdits(document2, once, edits2 || []) === once, '格式化不幂等');
   });
 
   await check('F5：运行期错误进问题面板并定位到第 3 行', async () => {

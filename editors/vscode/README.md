@@ -131,6 +131,19 @@ powershell -ExecutionPolicy Bypass -File tools\build.ps1 -SkipTests
 
 ---
 
+### 2.7 格式化
+
+`Shift+Alt+F`（或右键「格式化文档」）调 `core.formatSource`，规则只有三条：
+
+- 行首缩进按 4 空格归一；块层级沿用源码原有的缩进结构（不猜语义）
+- 双目运算符（`+ - * / // % ** == != < > <= >= = += -= *= /= %=`）两侧各留一个空格；一元正负号紧贴值
+- 字符串、注释原文和空行个数原样保留；行内注释前的空格也不动
+
+纯函数、可幂等：`formatSource(formatSource(x)) === formatSource(x)`。`verify.js` 里有 5 项专门测这条，
+包括「仓库里已有的示例格式化后应逐字不变」。
+
+---
+
 ## 3. 设置
 
 | 设置项 | 默认值 | 说明 |
@@ -160,8 +173,8 @@ node test\verify.js
 powershell -NoProfile -ExecutionPolicy Bypass -File test\run-it.ps1
 ```
 
-- `verify.js` 覆盖 19 项：同文件符号/类/方法、跨包 `工具.加一`、裸包名、不存在符号、原生模块语言卡、E007 定位、无调试段退回、断点命中（第 32 行）与未命中（退出码 2）。
-- `run-it.ps1` 启动真实 `Code.exe --extensionTestsPath`，覆盖 11 项：扩展激活、命令注册、`c.加`/`c.值`/`查点` 三处同文件跳转、`打印` 不跳转、跨包跳转、`导入 引脚` 跳语言卡、F5 错误进问题面板并定位第 3 行、F9 + F5 断点停第 32 行、再按 F9 清除。
+- `verify.js` 覆盖 24 项：同文件符号/类/方法、跨包 `工具.加一`、裸包名、不存在符号、原生模块语言卡、E007 定位、无调试段退回、断点命中（第 32 行）与未命中（退出码 2），以及 5 项格式化（缩进/运算符空格/幂等/注释与空行/示例零改写）。
+- `run-it.ps1` 启动真实 `Code.exe --extensionTestsPath`，覆盖 12 项：扩展激活、命令注册、`c.加`/`c.值`/`查点` 三处同文件跳转、`打印` 不跳转、跨包跳转、`导入 引脚` 跳语言卡、Shift+Alt+F 格式化提供者（含幂等）、F5 错误进问题面板并定位第 3 行、F9 + F5 断点停第 32 行、再按 F9 清除。
 - 集成测试夹具在 `build/editor-it/`（已 gitignore），由 `run-it.ps1` 自动重建。
 
 ---
@@ -169,7 +182,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File test\run-it.ps1
 ## 5. 边界
 
 - 扩展不修改 `compiler/`、`runtime/`、`firmware/`、`tools/` 的任何文件，只**调用**现有脚本
-- 跳转只覆盖 `令/函数/类/方法/字段/包/原生模块`；不做重命名、引用查找、格式化
+- 跳转只覆盖 `令/函数/类/方法/字段/包/原生模块`；不做重命名、引用查找
 - 运行是「编译 + 主机跑一遍」，不是调试器：只有单断点，没有变量、调用栈、继续/单步
 - 诊断是「编译一次、报告首条错误」，与 `micc` 命令行行为一致
 - 不上板、不碰串口；烧录只转发给 `tools\flash-firmware.ps1`

@@ -203,6 +203,66 @@ try {
     const text = core.displayPath(root, path.join(root, 'examples', '类.jsh'));
     assert.strictEqual(text, 'examples/类.jsh');
   });
+  // ---------- 7. 格式化：缩进 / 运算符空格 / 幂等 ----------
+  const messy = [
+    '函数 甲( ):',
+    '  令 x=1+2',
+    '  打印( x )   # 行内注释',
+    '',
+    '      # 缩进过深的注释',
+    '',
+    '  如果 x>3:',
+    '    打印("大于")',
+    '',
+    '  否则:',
+    '        打印("不大于")',
+    '  返回 -1',
+    '',
+  ].join('\n');
+  const golden = [
+    '函数 甲():',
+    '    令 x = 1 + 2',
+    '    打印(x)   # 行内注释',
+    '',
+    '        # 缩进过深的注释',
+    '',
+    '    如果 x > 3:',
+    '        打印("大于")',
+    '',
+    '    否则:',
+    '        打印("不大于")',
+    '    返回 -1',
+    '',
+  ].join('\n');
+  check('格式化：缩进归一、运算符两侧留空格', () => {
+    assert.strictEqual(core.formatSource(messy), golden);
+  });
+  check('格式化：幂等（二次格式化结果不变）', () => {
+    const once = core.formatSource(messy);
+    assert.strictEqual(core.formatSource(once), once);
+  });
+  check('格式化：注释原文与空行个数不丢', () => {
+    const out = core.formatSource(messy);
+    const commentLines = s => s.split('\n').filter(line => line.trim().startsWith('#')).map(line => line.trim());
+    assert.deepStrictEqual(commentLines(out), commentLines(messy));
+    const blanks = s => s.split('\n').filter(line => line.trim() === '').length;
+    assert.strictEqual(blanks(out), blanks(messy));
+  });
+  check('格式化：全部示例文件幂等', () => {
+    const dir = path.join(root, 'examples');
+    for (const name of fs.readdirSync(dir).filter(f => f.endsWith('.jsh'))) {
+      const src = fs.readFileSync(path.join(dir, name), 'utf8');
+      const once = core.formatSource(src);
+      assert.strictEqual(core.formatSource(once), once, name + ' 二次格式化发生变化');
+    }
+  });
+  check('格式化：已在仓库里的示例不被改写', () => {
+    const dir = path.join(root, 'examples');
+    for (const name of fs.readdirSync(dir).filter(f => f.endsWith('.jsh'))) {
+      const src = fs.readFileSync(path.join(dir, name), 'utf8');
+      assert.strictEqual(core.formatSource(src), src, name + ' 被格式化改写了');
+    }
+  });
 } finally {
   fs.rmSync(sandbox, { recursive: true, force: true });
 }

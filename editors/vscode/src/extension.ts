@@ -8,6 +8,7 @@ import {
   decideDefinition,
   displayPath,
   findModuleLine,
+  formatSource,
   nearestManifest,
   parsePackFiles,
   parseRunOutput,
@@ -289,6 +290,24 @@ class LiDefinitions implements vscode.DefinitionProvider {
       return undefined;
     }
     return definitionAt(document, position);
+  }
+}
+
+/** Shift+Alt+F：缩进归一 + 运算符空格；逻辑全在 core.formatSource，便于命令行测幂等。 */
+class LiFormatter implements vscode.DocumentFormattingEditProvider {
+  provideDocumentFormattingEdits(document: vscode.TextDocument): vscode.TextEdit[] {
+    if (document.languageId !== LANGUAGE_ID) {
+      return [];
+    }
+    const original = document.getText();
+    const formatted = formatSource(original);
+    if (formatted === original) {
+      return [];
+    }
+    return [vscode.TextEdit.replace(
+      new vscode.Range(document.positionAt(0), document.positionAt(original.length)),
+      formatted
+    )];
   }
 }
 
@@ -856,6 +875,8 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.languages.registerCompletionItemProvider(LANGUAGE_ID, new LangcardCompletions()),
 
     vscode.languages.registerDefinitionProvider(LANGUAGE_ID, new LiDefinitions()),
+
+    vscode.languages.registerDocumentFormattingEditProvider(LANGUAGE_ID, new LiFormatter()),
 
     vscode.window.onDidChangeActiveTextEditor(editor => {
       if (editor) {
