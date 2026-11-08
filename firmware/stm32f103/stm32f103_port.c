@@ -24,6 +24,7 @@
 #define RCC_CFGR_PLLMUL9    (7u << 18)   /* 8 MHz × 9 = 72 MHz */
 
 #define RCC_APB2ENR_IOPAEN  (1u << 2)
+#define RCC_APB2ENR_IOPBEN  (1u << 3)
 #define RCC_APB2ENR_IOPCEN  (1u << 4)
 #define RCC_APB2ENR_ADC1EN  (1u << 9)
 #define RCC_APB2ENR_USART1EN (1u << 14)
@@ -40,13 +41,18 @@
 #define FLASH_ACR_LATENCY2 (2u << 0)
 #define FLASH_ACR_PRFTBE   (1u << 4)
 
-/* GPIOA / GPIOC */
+/* GPIOA / GPIOB / GPIOC */
 #define GPIOA_CRL       REG32(0x40010800u)
 #define GPIOA_CRH       REG32(0x40010804u)
 #define GPIOA_IDR       REG32(0x40010808u)
 #define GPIOA_ODR       REG32(0x4001080Cu)
+#define GPIOB_CRL       REG32(0x40010C00u)
+#define GPIOB_CRH       REG32(0x40010C04u)
+#define GPIOB_ODR       REG32(0x40010C0Cu)
+#define GPIOC_CRL       REG32(0x40011000u)
 #define GPIOC_CRH       REG32(0x40011004u)
 #define GPIOC_IDR       REG32(0x40011008u)
+#define GPIOC_ODR       REG32(0x4001100Cu)
 #define GPIOC_BSRR      REG32(0x40011010u)
 #define GPIOC_BRR       REG32(0x40011014u)
 
@@ -92,8 +98,12 @@
 #define TIM2_PSC        REG32(0x40000028u)
 #define TIM2_ARR        REG32(0x4000002Cu)
 
-/* EXTI（PA0–PA4 → EXTI0–4，IRQ 6–10） */
+/* EXTI：编码引脚 0–15 = PA0–PA15，16–31 = PB0–PB15，32–47 = PC0–PC15；
+ * EXTI 线号 = 引脚 % 16，端口选择写 AFIO_EXTICR1–4。 */
 #define AFIO_EXTICR1    REG32(0x40010008u)
+#define AFIO_EXTICR2    REG32(0x4001000Cu)
+#define AFIO_EXTICR3    REG32(0x40010010u)
+#define AFIO_EXTICR4    REG32(0x40010014u)
 #define EXTI_IMR        REG32(0x40010400u)
 #define EXTI_EMR        REG32(0x40010404u)
 #define EXTI_RTSR       REG32(0x40010408u)
@@ -102,12 +112,17 @@
 #define EXTI_PR         REG32(0x40010414u)
 
 #define NVIC_ISER0      REG32(0xE000E100u)
+#define NVIC_ISER1      REG32(0xE000E104u)
 #define NVIC_ICER0      REG32(0xE000E100u + 0x80u)
+#define NVIC_ICER1      REG32(0xE000E100u + 0x84u)
 #define NVIC_IPR_BYTE(irq) (*(volatile uint8_t *)(0xE000E400u + (irq)))
 
-#define EXTI_LINES      5u
-#define EXTI_IRQ_FIRST  6u      /* EXTI0 的 IRQ 号；EXTI1–4 依次 +1 */
-#define EXTI_IRQ_PRIO   0x40u   /* 低于 SysTick（默认 0），不比内核 tick 更急 */
+#define EXTI_LINES          48u   /* 3 个端口 × 16 条线 */
+#define EXTI_PINS_PER_PORT  16u
+#define EXTI_IRQ_FIRST      6u    /* EXTI0 的 IRQ 号；EXTI1–4 依次 +1 */
+#define EXTI_IRQ_5_9        23u   /* EXTI9_5 */
+#define EXTI_IRQ_10_15      40u   /* EXTI15_10 */
+#define EXTI_IRQ_PRIO       0x40u /* 低于 SysTick（默认 0），不比内核 tick 更急 */
 
 #define UART_BAUD       115200u
 
@@ -122,6 +137,8 @@ static volatile uint8_t g_timer_ready = 0u;
 static volatile uint32_t g_exti_count[EXTI_LINES];
 static void (*g_exti_hook)(uint32_t line) = 0;
 static uint8_t g_exti_bound[EXTI_LINES];
+/* 每条 EXTI 线当前绑定的编码引脚 + 1；0 = 未绑定（静态零初始化即可） */
+static uint8_t g_exti_line_pin[EXTI_PINS_PER_PORT];
 
 /* ---------------- 时钟 ---------------- */
 
@@ -421,29 +438,91 @@ void port_exti_set_hook(void (*hook)(uint32_t line))
     g_exti_hook = hook;
 }
 
+static uint32_t exti_irq_of_line(uint32_t line)
+{
+    if (line <= 4u) {
+        return EXTI_IRQ_FIRST + line;
+    }
+    if (line <= 9u) {
+        return EXTI_IRQ_5_9;
+    }
+    return EXTI_IRQ_10_15;
+}
+
+/* 引脚配成输入 + 下拉（CNF=10, MODE=00 → 0x8），悬空时不会被噪声误触发 */
+static void exti_gpio_pulldown(uint32_t pin)
+{
+    uint32_t port = pin / EXTI_PINS_PER_PORT;
+    uint32_t line = pin % EXTI_PINS_PER_PORT;
+    uint32_t shift = (line & 7u) * 4u;
+
+    if (port == 0u) {
+        RCC_APB2ENR |= RCC_APB2ENR_IOPAEN;
+        if (line < 8u) {
+            GPIOA_CRL = (GPIOA_CRL & ~(0xFu << shift)) | (0x8u << shift);
+        } else {
+            GPIOA_CRH = (GPIOA_CRH & ~(0xFu << shift)) | (0x8u << shift);
+        }
+        GPIOA_ODR &= ~(1u << line);
+    } else if (port == 1u) {
+        RCC_APB2ENR |= RCC_APB2ENR_IOPBEN;
+        if (line < 8u) {
+            GPIOB_CRL = (GPIOB_CRL & ~(0xFu << shift)) | (0x8u << shift);
+        } else {
+            GPIOB_CRH = (GPIOB_CRH & ~(0xFu << shift)) | (0x8u << shift);
+        }
+        GPIOB_ODR &= ~(1u << line);
+    } else {
+        RCC_APB2ENR |= RCC_APB2ENR_IOPCEN;
+        if (line < 8u) {
+            GPIOC_CRL = (GPIOC_CRL & ~(0xFu << shift)) | (0x8u << shift);
+        } else {
+            GPIOC_CRH = (GPIOC_CRH & ~(0xFu << shift)) | (0x8u << shift);
+        }
+        GPIOC_ODR &= ~(1u << line);
+    }
+}
+
+/* AFIO 负责把 EXTI 线接到端口：每线 4 位，0=PA 1=PB 2=PC */
+static void exti_afio_select(uint32_t port, uint32_t line)
+{
+    uint32_t shift = (line & 3u) * 4u;
+    uint32_t field = port;
+
+    if (line < 4u) {
+        AFIO_EXTICR1 = (AFIO_EXTICR1 & ~(0xFu << shift)) | (field << shift);
+    } else if (line < 8u) {
+        AFIO_EXTICR2 = (AFIO_EXTICR2 & ~(0xFu << shift)) | (field << shift);
+    } else if (line < 12u) {
+        AFIO_EXTICR3 = (AFIO_EXTICR3 & ~(0xFu << shift)) | (field << shift);
+    } else {
+        AFIO_EXTICR4 = (AFIO_EXTICR4 & ~(0xFu << shift)) | (field << shift);
+    }
+}
+
 void port_exti_bind(uint32_t pin, uint32_t edge)
 {
-    uint32_t shift;
+    uint32_t line;
     uint32_t bit;
     uint32_t irq;
+    uint8_t prev;
 
     if (pin >= EXTI_LINES) {
         return;
     }
-    bit = 1u << pin;
-    irq = EXTI_IRQ_FIRST + pin;
+    line = pin % EXTI_PINS_PER_PORT;
 
-    /* AFIO 负责把 EXTI 线接到端口；EXTICR 复位值即 PA，这里显式写 0 更直观 */
-    RCC_APB2ENR |= RCC_APB2ENR_AFIOEN | RCC_APB2ENR_IOPAEN;
-
-    /* PAx = 输入 + 下拉（CNF=10, MODE=00 → 0x8），悬空时不会被噪声误触发 */
-    shift = (pin & 7u) * 4u;
-    GPIOA_CRL = (GPIOA_CRL & ~(0xFu << shift)) | (0x8u << shift);
-    GPIOA_ODR &= ~bit;
-    if (pin < 4u) {
-        AFIO_EXTICR1 &= ~(0xFu << (shift));
+    /* 一条 EXTI 线同一时刻只能选一个端口：换引脚前先解绑同线的旧引脚 */
+    prev = g_exti_line_pin[line];
+    if (prev != 0u && ((uint32_t)prev - 1u) != pin) {
+        port_exti_unbind((uint32_t)prev - 1u);
     }
 
+    RCC_APB2ENR |= RCC_APB2ENR_AFIOEN;
+    exti_gpio_pulldown(pin);
+    exti_afio_select(pin / EXTI_PINS_PER_PORT, line);
+
+    bit = 1u << line;
     if (edge == 0u || edge == 2u) {
         EXTI_RTSR |= bit;
     } else {
@@ -460,39 +539,73 @@ void port_exti_bind(uint32_t pin, uint32_t edge)
     EXTI_IMR |= bit;
     EXTI_EMR &= ~bit;
 
+    irq = exti_irq_of_line(line);
     NVIC_IPR_BYTE(irq) = EXTI_IRQ_PRIO;
-    NVIC_ISER0 = (1u << irq);
+    if (irq < 32u) {
+        NVIC_ISER0 = (1u << irq);
+    } else {
+        NVIC_ISER1 = (1u << (irq - 32u));
+    }
 
     g_exti_count[pin] = 0u;
     g_exti_bound[pin] = 1u;
+    g_exti_line_pin[line] = (uint8_t)(pin + 1u);
 }
 
 void port_exti_unbind(uint32_t pin)
 {
+    uint32_t line;
     uint32_t bit;
     uint32_t irq;
+    uint32_t first;
+    uint32_t last;
+    uint32_t i;
+    uint8_t any = 0u;
 
-    if (pin >= EXTI_LINES) {
+    if (pin >= EXTI_LINES || g_exti_bound[pin] == 0u) {
         return;
     }
-    bit = 1u << pin;
-    irq = EXTI_IRQ_FIRST + pin;
+    line = pin % EXTI_PINS_PER_PORT;
+    bit = 1u << line;
 
     EXTI_IMR &= ~bit;
     EXTI_RTSR &= ~bit;
     EXTI_FTSR &= ~bit;
     EXTI_SWIER &= ~bit;
     EXTI_PR = bit;
-    NVIC_ICER0 = (1u << irq);
     g_exti_bound[pin] = 0u;
+    if (g_exti_line_pin[line] == (uint8_t)(pin + 1u)) {
+        g_exti_line_pin[line] = 0u;
+    }
+
+    /* 同一组向量里还有别的线在用，就不要关 NVIC */
+    first = (line <= 4u) ? 0u : ((line <= 9u) ? 5u : 10u);
+    last = (line <= 4u) ? 4u : ((line <= 9u) ? 9u : 15u);
+    for (i = first; i <= last; i++) {
+        if (g_exti_line_pin[i] != 0u) {
+            any = 1u;
+            break;
+        }
+    }
+    if (any == 0u) {
+        irq = exti_irq_of_line(line);
+        if (irq < 32u) {
+            NVIC_ICER0 = (1u << irq);
+        } else {
+            NVIC_ICER1 = (1u << (irq - 32u));
+        }
+    }
 }
 
 void port_exti_sw_trigger(uint32_t pin)
 {
+    uint32_t line;
+
     if (pin >= EXTI_LINES || g_exti_bound[pin] == 0u) {
         return;
     }
-    EXTI_SWIER |= (1u << pin);   /* 置挂起位，下一指令边界进中断 */
+    line = pin % EXTI_PINS_PER_PORT;
+    EXTI_SWIER |= (1u << line);   /* 置挂起位，下一指令边界进中断 */
 }
 
 uint32_t port_exti_count(uint32_t pin)
@@ -503,23 +616,42 @@ uint32_t port_exti_count(uint32_t pin)
     return g_exti_count[pin];
 }
 
-/* EXTI0–4 共用入口：向量表 5 条线都指到这里，按挂起位逐条处理。
+/* 三组中断共用同一套处理：只处理本组的挂起位，避免误清别组事件。
  * 这里只允许「计数 + 回调」，回调由板级层实现，只做 jmk_queue_send_from_isr；
  * 任何情况下都不进 VM、不跑砾字节码。 */
-void EXTI_IRQHandler(void)
+static void exti_serve(uint32_t first, uint32_t last)
 {
     uint32_t pr = EXTI_PR;
-    uint32_t i;
+    uint32_t line;
 
-    for (i = 0u; i < EXTI_LINES; i++) {
-        if ((pr & (1u << i)) != 0u) {
-            EXTI_PR = (1u << i);    /* 写 1 清挂起，同时清掉 SWIER 对应位 */
-            g_exti_count[i]++;
-            if (g_exti_hook) {
-                g_exti_hook(i);
+    for (line = first; line <= last; line++) {
+        uint32_t bit = 1u << line;
+        if ((pr & bit) != 0u) {
+            uint8_t v = g_exti_line_pin[line];
+            EXTI_PR = bit;      /* 写 1 清挂起，同时清掉 SWIER 对应位 */
+            if (v != 0u) {
+                g_exti_count[(uint32_t)v - 1u]++;
+                if (g_exti_hook) {
+                    g_exti_hook(line);
+                }
             }
         }
     }
+}
+
+void EXTI_IRQHandler(void)
+{
+    exti_serve(0u, 4u);
+}
+
+void EXTI9_5_IRQHandler(void)
+{
+    exti_serve(5u, 9u);
+}
+
+void EXTI15_10_IRQHandler(void)
+{
+    exti_serve(10u, 15u);
 }
 
 /* ---------------- 运行时端口（jm_port.h） ---------------- */

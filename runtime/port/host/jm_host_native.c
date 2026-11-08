@@ -260,7 +260,8 @@ static const JmNativeEntry HOST_QUEUE_TABLE[] = {
  * 板上的真实路径是 EXTI_IRQHandler → jmk_queue_send_from_isr → 同一队列。
  * 两边可见结果一致：投递顺序、计数、解除后不再触发。
  */
-#define HOST_IRQ_LINES 5u
+/* 编码引脚 0–15 = PA，16–31 = PB，32–47 = PC；与板上 EXTI 线号 = 引脚 % 16 一致 */
+#define HOST_IRQ_LINES 48u
 
 static HostQueue *g_host_irq_queue[HOST_IRQ_LINES];
 static int32_t g_host_irq_count[HOST_IRQ_LINES];
@@ -281,7 +282,7 @@ static int n_irq_bind(JmStateRef st, const JmValue *args, uint8_t nargs,
         return jm_native_fail(st, JM_NE_TYPE, "中断绑定：边沿必须是整数");
     }
     if (pin < 0 || pin >= (int32_t)HOST_IRQ_LINES) {
-        return jm_native_fail(st, JM_NE_PARAM, "引脚范围 0–4（PA0–PA4）");
+        return jm_native_fail(st, JM_NE_PARAM, "引脚范围 0–47（0–15=PA，16–31=PB，32–47=PC）");
     }
     if (edge < 0 || edge > 2) {
         return jm_native_fail(st, JM_NE_PARAM, "边沿：0=上升 1=下降 2=双沿");
@@ -292,6 +293,16 @@ static int n_irq_bind(JmStateRef st, const JmValue *args, uint8_t nargs,
     }
     g_host_irq_queue[pin] = q;
     g_host_irq_count[pin] = 0;
+    {
+        /* 同一条 EXTI 线只能选一个端口，与板上 AFIO 换线语义一致 */
+        uint32_t line = (uint32_t)pin % 16u;
+        uint32_t i;
+        for (i = line; i < HOST_IRQ_LINES; i += 16u) {
+            if (i != (uint32_t)pin) {
+                g_host_irq_queue[i] = 0;
+            }
+        }
+    }
     *out = jm_value_bool(1);
     return JM_NATIVE_OK;
 }
@@ -307,7 +318,7 @@ static int n_irq_trigger(JmStateRef st, const JmValue *args, uint8_t nargs,
         return jm_native_fail(st, JM_NE_TYPE, "中断触发：引脚必须是整数");
     }
     if (pin < 0 || pin >= (int32_t)HOST_IRQ_LINES) {
-        return jm_native_fail(st, JM_NE_PARAM, "引脚范围 0–4（PA0–PA4）");
+        return jm_native_fail(st, JM_NE_PARAM, "引脚范围 0–47（0–15=PA，16–31=PB，32–47=PC）");
     }
     q = g_host_irq_queue[pin];
     if (!q) {
@@ -334,7 +345,7 @@ static int n_irq_count(JmStateRef st, const JmValue *args, uint8_t nargs,
         return jm_native_fail(st, JM_NE_TYPE, "中断计数：引脚必须是整数");
     }
     if (pin < 0 || pin >= (int32_t)HOST_IRQ_LINES) {
-        return jm_native_fail(st, JM_NE_PARAM, "引脚范围 0–4（PA0–PA4）");
+        return jm_native_fail(st, JM_NE_PARAM, "引脚范围 0–47（0–15=PA，16–31=PB，32–47=PC）");
     }
     *out = jm_value_int(g_host_irq_count[pin]);
     return JM_NATIVE_OK;
@@ -350,7 +361,7 @@ static int n_irq_unbind(JmStateRef st, const JmValue *args, uint8_t nargs,
         return jm_native_fail(st, JM_NE_TYPE, "中断解除：引脚必须是整数");
     }
     if (pin < 0 || pin >= (int32_t)HOST_IRQ_LINES) {
-        return jm_native_fail(st, JM_NE_PARAM, "引脚范围 0–4（PA0–PA4）");
+        return jm_native_fail(st, JM_NE_PARAM, "引脚范围 0–47（0–15=PA，16–31=PB，32–47=PC）");
     }
     g_host_irq_queue[pin] = 0;
     *out = jm_value_bool(1);

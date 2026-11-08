@@ -422,9 +422,11 @@ static int n_sem_post(JmStateRef st, const JmValue *args, uint8_t nargs,
  * 中断上下文里既不进 VM，也不调用任何 native 函数；ABI v1 的「ISR 不得直调 native」
  * 因此仍然成立。
  */
-#define JM_IRQ_LINES 5u
+#define JM_IRQ_LINES 16u   /* EXTI 线号 0–15 */
+#define JM_IRQ_PINS  48u   /* 编码引脚：0–15 = PA，16–31 = PB，32–47 = PC */
 
 static JmkQueue *g_irq_queue[JM_IRQ_LINES];
+static uint8_t g_irq_pin[JM_IRQ_LINES];   /* 该线当前绑定的编码引脚 + 1；0 = 未绑定 */
 
 /* 由 port 层的中断服务函数调用：只做计数与入队，不做别的事。 */
 static void irq_post_from_isr(uint32_t line)
@@ -434,7 +436,7 @@ static void irq_post_from_isr(uint32_t line)
     if (line >= JM_IRQ_LINES || g_irq_queue[line] == 0) {
         return;
     }
-    payload = line;
+    payload = (uint32_t)g_irq_pin[line] - 1u;
     (void)jmk_queue_send_from_isr(g_irq_queue[line], &payload, 0);
 }
 
@@ -443,6 +445,7 @@ static int n_irq_bind(JmStateRef st, const JmValue *args, uint8_t nargs,
     int32_t pin = 0;
     int32_t handle = 0;
     int32_t edge = 0;
+    uint32_t line;
     JmkQueue *q;
 
     if (nargs < 2) {
@@ -454,8 +457,8 @@ static int n_irq_bind(JmStateRef st, const JmValue *args, uint8_t nargs,
     if (nargs > 2 && jm_value_to_int(args[2], &edge) != 0) {
         return jm_native_fail(st, JM_NE_TYPE, "中断绑定：边沿必须是整数");
     }
-    if (pin < 0 || pin >= (int32_t)JM_IRQ_LINES) {
-        return jm_native_fail(st, JM_NE_PARAM, "引脚范围 0–4（PA0–PA4）");
+    if (pin < 0 || pin >= (int32_t)JM_IRQ_PINS) {
+        return jm_native_fail(st, JM_NE_PARAM, "引脚范围 0–47（0–15=PA，16–31=PB，32–47=PC）");
     }
     if (edge < 0 || edge > 2) {
         return jm_native_fail(st, JM_NE_PARAM, "边沿：0=上升 1=下降 2=双沿");
@@ -464,7 +467,9 @@ static int n_irq_bind(JmStateRef st, const JmValue *args, uint8_t nargs,
     if (!q) {
         return jm_native_fail(st, JM_NE_PARAM, "队列句柄无效");
     }
-    g_irq_queue[pin] = q;
+    line = (uint32_t)pin % JM_IRQ_LINES;
+    g_irq_queue[line] = q;
+    g_irq_pin[line] = (uint8_t)(pin + 1u);
     port_exti_bind((uint32_t)pin, (uint32_t)edge);
     *out = jm_value_bool(1);
     return JM_NATIVE_OK;
@@ -473,14 +478,16 @@ static int n_irq_bind(JmStateRef st, const JmValue *args, uint8_t nargs,
 static int n_irq_trigger(JmStateRef st, const JmValue *args, uint8_t nargs,
                          JmValue *out) {
     int32_t pin = 0;
+    uint32_t line;
 
     if (arg_int(st, args, nargs, &pin, "中断触发需要一个参数：引脚") != 0) {
         return -1;
     }
-    if (pin < 0 || pin >= (int32_t)JM_IRQ_LINES) {
-        return jm_native_fail(st, JM_NE_PARAM, "引脚范围 0–4（PA0–PA4）");
+    if (pin < 0 || pin >= (int32_t)JM_IRQ_PINS) {
+        return jm_native_fail(st, JM_NE_PARAM, "引脚范围 0–47（0–15=PA，16–31=PB，32–47=PC）");
     }
-    if (g_irq_queue[pin] == 0) {
+    line = (uint32_t)pin % JM_IRQ_LINES;
+    if (g_irq_queue[line] == 0) {
         *out = jm_value_bool(0);
         return JM_NATIVE_OK;
     }
@@ -496,8 +503,8 @@ static int n_irq_count(JmStateRef st, const JmValue *args, uint8_t nargs,
     if (arg_int(st, args, nargs, &pin, "中断计数需要一个参数：引脚") != 0) {
         return -1;
     }
-    if (pin < 0 || pin >= (int32_t)JM_IRQ_LINES) {
-        return jm_native_fail(st, JM_NE_PARAM, "引脚范围 0–4（PA0–PA4）");
+    if (pin < 0 || pin >= (int32_t)JM_IRQ_PINS) {
+        return jm_native_fail(st, JM_NE_PARAM, "引脚范围 0–47（0–15=PA，16–31=PB，32–47=PC）");
     }
     *out = jm_value_int((int32_t)port_exti_count((uint32_t)pin));
     return JM_NATIVE_OK;
@@ -506,14 +513,19 @@ static int n_irq_count(JmStateRef st, const JmValue *args, uint8_t nargs,
 static int n_irq_unbind(JmStateRef st, const JmValue *args, uint8_t nargs,
                         JmValue *out) {
     int32_t pin = 0;
+    uint32_t line;
 
     if (arg_int(st, args, nargs, &pin, "中断解除需要一个参数：引脚") != 0) {
         return -1;
     }
-    if (pin < 0 || pin >= (int32_t)JM_IRQ_LINES) {
-        return jm_native_fail(st, JM_NE_PARAM, "引脚范围 0–4（PA0–PA4）");
+    if (pin < 0 || pin >= (int32_t)JM_IRQ_PINS) {
+        return jm_native_fail(st, JM_NE_PARAM, "引脚范围 0–47（0–15=PA，16–31=PB，32–47=PC）");
     }
-    g_irq_queue[pin] = 0;
+    line = (uint32_t)pin % JM_IRQ_LINES;
+    if (g_irq_pin[line] == (uint8_t)(pin + 1u)) {
+        g_irq_queue[line] = 0;
+        g_irq_pin[line] = 0u;
+    }
     port_exti_unbind((uint32_t)pin);
     *out = jm_value_bool(1);
     return JM_NATIVE_OK;
