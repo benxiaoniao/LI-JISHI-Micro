@@ -1,6 +1,7 @@
 use crate::ast::*;
 use crate::error::{CompileError, Result};
 use crate::native_spec;
+use crate::vm_spec;
 use crate::opcodes::*;
 use std::collections::{HashMap, HashSet};
 
@@ -384,12 +385,12 @@ fn capture_from_parent(
 }
 
 fn store_name(fs: &mut FnState, b: &mut Builder, name: &str, line: u32, col: u32) -> Result<()> {
-    if native_spec::entry(name).is_some() {
+    if native_spec::entry(name).is_some() || vm_spec::reserved(name) {
         return Err(CompileError::new(
             "E115",
             line,
             col,
-            format!("原生函数名「{}」是保留名，不能声明或赋值", name),
+            format!("原生/任务函数名「{}」是保留名，不能声明或赋值", name),
         ));
     }
     match resolve(fs, b, name, line, col)? {
@@ -692,6 +693,12 @@ pub fn compile(
     let mut imported: HashSet<String> = HashSet::new();
     for s in stmts {
         if let StmtKind::Import(m) = &s.kind {
+            if m == vm_spec::TASK_MODULE {
+                for f in vm_spec::TASK_FNS {
+                    imported.insert(f.name.to_string());
+                }
+                continue;
+            }
             let Some(spec) = native_spec::module(m) else {
                 return Err(CompileError::new(
                     "E112",
@@ -699,7 +706,11 @@ pub fn compile(
                     1,
                     format!("不认识的导入模块「{}」", m),
                 )
-                .with_hint(format!("v0 可用：{}", native_spec::module_names())));
+                .with_hint(format!(
+                    "v0 可用：{}、{}",
+                    native_spec::module_names(),
+                    vm_spec::module_names()
+                )));
             };
             for e in spec.entries {
                 imported.insert(e.name.to_string());
@@ -934,12 +945,12 @@ fn compile_method(
     fs.slots.insert("本".to_string(), 0);
 
     for (i, p) in params.iter().enumerate() {
-        if native_spec::entry(p).is_some() {
+        if native_spec::entry(p).is_some() || vm_spec::reserved(p) {
             return Err(CompileError::new(
                 "E115",
                 line,
                 1,
-                format!("原生函数名「{}」是保留名，不能当参数", p),
+                format!("原生/任务函数名「{}」是保留名，不能当参数", p),
             ));
         }
         if fs.slots.insert(p.clone(), (i + 1) as u8).is_some() {
@@ -1022,12 +1033,12 @@ fn compile_class_init(
     fs.slots.insert("本".to_string(), 0);
 
     for (i, p) in params.iter().enumerate() {
-        if native_spec::entry(p).is_some() {
+        if native_spec::entry(p).is_some() || vm_spec::reserved(p) {
             return Err(CompileError::new(
                 "E115",
                 user.map(|m| m.line).unwrap_or(1),
                 1,
-                format!("原生函数名「{}」是保留名，不能当参数", p),
+                format!("原生/任务函数名「{}」是保留名，不能当参数", p),
             ));
         }
         if fs.slots.insert(p.clone(), (i + 1) as u8).is_some() {
@@ -1129,12 +1140,12 @@ fn compile_function(
     fs.mark(line);
 
     for (i, p) in params.iter().enumerate() {
-        if native_spec::entry(p).is_some() {
+        if native_spec::entry(p).is_some() || vm_spec::reserved(p) {
             return Err(CompileError::new(
                 "E115",
                 line,
                 col,
-                format!("原生函数名「{}」是保留名，不能当参数", p),
+                format!("原生/任务函数名「{}」是保留名，不能当参数", p),
             ));
         }
         if fs.slots.insert(p.clone(), i as u8).is_some() {
@@ -1515,6 +1526,27 @@ fn compile_expr(fs: &mut FnState, b: &mut Builder, e: &Expr) -> Result<()> {
             fs.emit_u8(OP_CONST, c);
         }
         ExprKind::Name(name) => {
+            if vm_spec::reserved(name) {
+                if fs.imported.contains(name) {
+                    return Err(CompileError::new(
+                        "E115",
+                        e.line,
+                        e.col,
+                        format!("任务函数「{}」只能直接调用，不能当值使用", name),
+                    ));
+                }
+                return Err(CompileError::new(
+                    "E113",
+                    e.line,
+                    e.col,
+                    format!(
+                        "任务函数「{}」属于模块「{}」，还没有导入",
+                        name,
+                        vm_spec::TASK_MODULE
+                    ),
+                )
+                .with_hint(format!("先写：导入 {}", vm_spec::TASK_MODULE)));
+            }
             if let Some((m, _)) = native_spec::entry(name) {
                 if fs.imported.contains(name) {
                     return Err(CompileError::new(
@@ -1608,6 +1640,36 @@ fn compile_expr(fs: &mut FnState, b: &mut Builder, e: &Expr) -> Result<()> {
         ExprKind::Call(callee, args) => {
             match &callee.kind {
                 ExprKind::Name(name) => {
+                    if let Some(tf) = vm_spec::task_entry(name) {
+                        if !fs.imported.contains(name) {
+                            return Err(CompileError::new(
+                                "E113",
+                                callee.line,
+                                callee.col,
+                                format!(
+                                    "任务函数「{}」属于模块「{}」，还没有导入",
+                                    name, vm_spec::TASK_MODULE
+                                ),
+                            )
+                            .with_hint(format!("先写：导入 {}", vm_spec::TASK_MODULE)));
+                        }
+                        if args.len() != tf.nargs as usize {
+                            return Err(CompileError::new(
+                                "E115",
+                                callee.line,
+                                callee.col,
+                                format!(
+                                    "任务函数「{}」需要 {} 个参数，这里给了 {} 个",
+                                    name, tf.nargs, args.len()
+                                ),
+                            ));
+                        }
+                        for a in args {
+                            compile_expr(fs, b, a)?;
+                        }
+                        fs.emit(tf.opcode);
+                        return Ok(());
+                    }
                     if let Some((m, ent)) = native_spec::entry(name) {
                         if !fs.imported.contains(name) {
                             return Err(CompileError::new(
@@ -1620,6 +1682,16 @@ fn compile_expr(fs: &mut FnState, b: &mut Builder, e: &Expr) -> Result<()> {
                                 ),
                             )
                             .with_hint(format!("先写：导入 {}", m.name)));
+                        }
+                        // 带超时的队列/信号量等待：降到 OP_TASK_WAIT，由 VM 挂起重试。
+                        if let Some(wf) = vm_spec::wait_entry(name) {
+                            if args.len() == wf.nargs as usize {
+                                for a in args {
+                                    compile_expr(fs, b, a)?;
+                                }
+                                fs.emit_u8(OP_TASK_WAIT, wf.kind);
+                                return Ok(());
+                            }
                         }
                         let n = args.len();
                         if n < ent.min_args as usize || n > ent.max_args as usize {

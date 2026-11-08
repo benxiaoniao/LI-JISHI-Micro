@@ -1,4 +1,5 @@
 #include "jm_internal.h"
+#include "jm_native.h"
 
 JmState jm_state;
 
@@ -930,14 +931,136 @@ int jm_iter_next(JmState *st, JmValue iter, int *done, JmValue *out) {
     }
 }
 
+/* ---------------- 绿色任务调度 ---------------- */
+
+/* 切到任务 t：把解释器在用的三个栈切片与 sp/fp/tp 换成 t 的。 */
+static void jm_green_swap_in(JmState *st, uint8_t t) {
+    JmGreenTask *g = &st->tasks[t];
+    st->current = t;
+    st->stack = g->stack;
+    st->stack_cap = g->stack_cap;
+    st->frames = g->frames;
+    st->frames_cap = g->frames_cap;
+    st->tries = g->tries;
+    st->tries_cap = g->tries_cap;
+    st->sp = (int)g->sp;
+    st->fp = (int)g->fp;
+    st->tp = (int)g->tp;
+}
+
+/* 从当前任务切走：把 sp/fp/tp 存回任务槽。 */
+static void jm_green_swap_out(JmState *st) {
+    JmGreenTask *g = &st->tasks[st->current];
+    g->sp = (uint16_t)st->sp;
+    g->fp = (uint8_t)st->fp;
+    g->tp = (uint8_t)st->tp;
+}
+
+static int jm_green_any_ready(JmState *st, uint8_t except) {
+    for (uint8_t t = 0; t < st->ntask; t++) {
+        if (t != except && st->tasks[t].state == JM_TASK_READY) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* 选下一个可运行任务：从 current+1 起按槽位轮转。没有就绪任务时，
+ * 让 vm 睡到最近一个睡眠任务的唤醒点，再重新扫描；返回 -1 表示无法推进。 */
+static int jm_green_pick(JmState *st) {
+    for (;;) {
+        if (st->tasks[0].state == JM_TASK_DEAD) {
+            return -1;
+        }
+        for (uint8_t k = 1; k <= st->ntask; k++) {
+            uint8_t t = (uint8_t)((st->current + k) % st->ntask);
+            if (st->tasks[t].state == JM_TASK_READY) {
+                st->tasks[t].state = JM_TASK_RUNNING;
+                return (int)t;
+            }
+        }
+        uint32_t now = jm_port_millis();
+        int have = 0;
+        uint32_t best = 0;
+        for (uint8_t t = 0; t < st->ntask; t++) {
+            JmGreenTask *g = &st->tasks[t];
+            if (g->state != JM_TASK_SLEEPING) {
+                continue;
+            }
+            if (!have || (int32_t)(g->wake_tick - best) < 0) {
+                best = g->wake_tick;
+                have = 1;
+            }
+        }
+        if (!have) {
+            return -1;
+        }
+        int32_t wait = (int32_t)(best - now);
+        if (wait > 0) {
+            jm_port_sleep_ms((uint32_t)wait);
+        }
+        now = jm_port_millis();
+        for (uint8_t t = 0; t < st->ntask; t++) {
+            JmGreenTask *g = &st->tasks[t];
+            if (g->state == JM_TASK_SLEEPING && (int32_t)(g->wake_tick - now) <= 0) {
+                g->state = JM_TASK_READY;
+            }
+        }
+    }
+}
+
+/* 建一帧：普通调用与任务体共用。cl 非空时填捕获槽。 */
+static int jm_green_push_frame(JmState *st, uint8_t idx, uint8_t argc,
+                               JmClosure *cl) {
+    if (idx >= st->ncodes) {
+        return jm_fail(st, E_CODE, "代码对象越界");
+    }
+    const uint8_t *nce = code_entry(st, idx);
+    uint8_t nparams = nce[5];
+    uint8_t nl = nce[6];
+    if (argc != nparams) {
+        return jm_fail(st, E_ARGC, "实参个数与形参不符");
+    }
+    if (cl) {
+        if (nce[8] != cl->ncap) {
+            return jm_fail(st, E_CODE, "闭包捕获数与代码对象不符");
+        }
+        uint32_t capoff = cap_offset(st, idx);
+        for (uint8_t k = 0; k < nce[8]; k++, capoff += 2u) {
+            uint8_t cslot = st->base[capoff + 1];
+            if (cslot < nparams || cslot >= nl) {
+                return jm_fail(st, E_CODE, "闭包捕获槽越界");
+            }
+        }
+    }
+    if (st->fp + 1 >= (int)st->frames_cap) {
+        return jm_fail(st, E_FRAMES, "调用层数太深");
+    }
+    st->fp++;
+    JmFrame *nf = &st->frames[st->fp];
+    nf->code_idx = idx;
+    nf->ip = 0;
+    nf->base = (uint16_t)(st->sp - argc);
+    for (uint8_t i = nparams; i < nl; i++) {
+        if (st->sp >= (int)st->stack_cap) {
+            return jm_fail(st, E_STACK, st->current ? "任务值栈溢出" : "值栈溢出");
+        }
+        st->stack[st->sp++] = JM_UNDEF;
+    }
+    if (cl) {
+        uint32_t capoff = cap_offset(st, idx);
+        for (uint8_t k = 0; k < cl->ncap; k++, capoff += 2u) {
+            JmValue cv = cl->caps[k];
+            jm_retain(cv);
+            st->stack[nf->base + st->base[capoff + 1]] = cv;
+        }
+    }
+    JM_HW_NOTE(st);
+    return 0;
+}
+
 int jm_execute(JmState *st) {
-    JmFrame *f = &st->frames[st->fp];
-    uint8_t cur_code = f->code_idx;
-    const uint8_t *ce = code_entry(st, cur_code);
-    const uint8_t *code = st->base + rd16(ce + 0);
-    uint16_t clen = rd16(ce + 2);
-    uint8_t cur_nlocals = ce[6];
-    uint16_t ip = f->ip;
+    uint8_t cur_code = 0;
     uint16_t cur_ip = 0;
 
 #define VM_FAIL(code_, detail_)                                                    \
@@ -949,8 +1072,8 @@ int jm_execute(JmState *st) {
     } while (0)
 #define PUSH_V(v_)                                                                 \
     do {                                                                           \
-        if (st->sp >= JM_STACK_SLOTS) {                                            \
-            VM_FAIL(E_STACK, "值栈溢出");                                           \
+        if (st->sp >= (int)st->stack_cap) {                                        \
+            VM_FAIL(E_STACK, st->current ? "任务值栈溢出" : "值栈溢出");             \
         }                                                                          \
         st->stack[st->sp++] = (v_);                                                \
         JM_HW_NOTE(st);                                                            \
@@ -964,9 +1087,28 @@ int jm_execute(JmState *st) {
     } while (0)
 
     while (1) {
+        int t = jm_green_pick(st);
+        if (t < 0) {
+            if (st->tasks[0].state == JM_TASK_DEAD) {
+                goto done;
+            }
+            VM_FAIL(E_TASK_STATE, "没有可运行的任务");
+        }
+        jm_green_swap_in(st, (uint8_t)t);
+        JmFrame *f = &st->frames[st->fp];
+        cur_code = f->code_idx;
+        const uint8_t *ce = code_entry(st, cur_code);
+        const uint8_t *code = st->base + rd16(ce + 0);
+        uint16_t clen = rd16(ce + 2);
+        uint8_t cur_nlocals = ce[6];
+        uint16_t ip = f->ip;
+        int switched = 0;
+
+    while (!switched) {
         cur_ip = ip;
 #ifdef JM_HOST_DEBUG
         if (jm_host_break_hit(cur_code, cur_ip)) {
+            st->tasks[st->current].sp = (uint16_t)st->sp;
             goto done;
         }
 #endif
@@ -976,7 +1118,13 @@ int jm_execute(JmState *st) {
         uint8_t op = code[ip++];
         switch (op) {
         case OP_HALT:
-            goto done;
+            st->tasks[st->current].sp = (uint16_t)st->sp;
+            st->tasks[st->current].state = JM_TASK_DEAD;
+            if (st->current == 0) {
+                goto done;
+            }
+            switched = 1;
+            break;
 
         case OP_CONST: {
             uint8_t a = code[ip++];
@@ -1206,31 +1354,14 @@ int jm_execute(JmState *st) {
             }
             if (JM_TAG(callee) == JM_TAG_FUNC) {
                 uint8_t idx = (uint8_t)JM_PAYLOAD(callee);
-                if (idx >= st->ncodes) {
-                    VM_FAIL(E_CODE, "代码对象越界");
-                }
-                const uint8_t *nce = code_entry(st, idx);
-                uint8_t nparams = nce[5];
-                uint8_t nl = nce[6];
-                if (argc != nparams) {
-                    VM_FAIL(E_ARGC, "实参个数与形参不符");
-                }
-                if (st->fp + 1 >= JM_MAX_FRAMES) {
-                    VM_FAIL(E_FRAMES, "调用层数太深");
-                }
                 f->ip = ip;
-                st->fp++;
-                JmFrame *nf = &st->frames[st->fp];
-                nf->code_idx = idx;
-                nf->ip = 0;
-                nf->base = (uint16_t)(st->sp - argc);
-                for (uint8_t i = nparams; i < nl; i++) {
-                    PUSH_V(JM_UNDEF);
+                if (jm_green_push_frame(st, idx, argc, 0)) {
+                    goto fault;
                 }
-                f = nf;
+                f = &st->frames[st->fp];
                 cur_code = idx;
-                cur_nlocals = nl;
-                ce = nce;
+                ce = code_entry(st, idx);
+                cur_nlocals = ce[6];
                 code = st->base + rd16(ce + 0);
                 clen = rd16(ce + 2);
                 ip = 0;
@@ -1239,46 +1370,14 @@ int jm_execute(JmState *st) {
             if (JM_TAG(callee) == JM_TAG_HEAP && jm_obj(callee)->type == JM_T_CLOSURE) {
                 JmClosure *cl = (JmClosure *)jm_obj(callee);
                 uint8_t idx = cl->code_idx;
-                if (idx >= st->ncodes) {
-                    VM_FAIL(E_CODE, "闭包代码对象越界");
-                }
-                const uint8_t *nce = code_entry(st, idx);
-                uint8_t nparams = nce[5];
-                uint8_t nl = nce[6];
-                uint8_t ncap = nce[8];
-                if (ncap != cl->ncap) {
-                    VM_FAIL(E_CODE, "闭包捕获数与代码对象不符");
-                }
-                if (argc != nparams) {
-                    VM_FAIL(E_ARGC, "实参个数与形参不符");
-                }
-                if (st->fp + 1 >= JM_MAX_FRAMES) {
-                    VM_FAIL(E_FRAMES, "调用层数太深");
-                }
                 f->ip = ip;
-                st->fp++;
-                JmFrame *nf = &st->frames[st->fp];
-                nf->code_idx = idx;
-                nf->ip = 0;
-                nf->base = (uint16_t)(st->sp - argc);
-                for (uint8_t i = nparams; i < nl; i++) {
-                    PUSH_V(JM_UNDEF);
+                if (jm_green_push_frame(st, idx, argc, cl)) {
+                    goto fault;
                 }
-                /* 捕获槽在本帧入口填值（帧自己持有一份引用）。 */
-                uint32_t capoff = cap_offset(st, idx);
-                for (uint8_t k = 0; k < ncap; k++, capoff += 2u) {
-                    uint8_t cslot = st->base[capoff + 1];
-                    if (cslot < nparams || cslot >= nl) {
-                        VM_FAIL(E_CODE, "闭包捕获槽越界");
-                    }
-                    JmValue cv = cl->caps[k];
-                    jm_retain(cv);
-                    st->stack[nf->base + cslot] = cv;
-                }
-                f = nf;
+                f = &st->frames[st->fp];
                 cur_code = idx;
-                cur_nlocals = nl;
-                ce = nce;
+                ce = code_entry(st, idx);
+                cur_nlocals = ce[6];
                 code = st->base + rd16(ce + 0);
                 clen = rd16(ce + 2);
                 ip = 0;
@@ -1295,7 +1394,26 @@ int jm_execute(JmState *st) {
             }
             if (st->fp == 0) {
                 jm_release(ret);
-                goto done;
+                JmGreenTask *g = &st->tasks[st->current];
+                if (st->current == 0) {
+                    g->sp = (uint16_t)st->sp;
+                    g->state = JM_TASK_DEAD;
+                    goto done;
+                }
+                /* 子任务退出：释放整片值栈与任务体，切走；槽位不复用。 */
+                while (st->sp > 0) {
+                    st->sp--;
+                    jm_release(st->stack[st->sp]);
+                }
+                st->tp = 0;
+                g->sp = 0;
+                g->fp = 0;
+                g->tp = 0;
+                g->state = JM_TASK_DEAD;
+                jm_release(g->body);
+                g->body = JM_UNDEF;
+                switched = 1;
+                break;
             }
             for (uint16_t i = 0; i < cur_nlocals; i++) {
                 jm_release(st->stack[f->base + i]);
@@ -1322,7 +1440,25 @@ int jm_execute(JmState *st) {
             }
             if (st->fp == 0) {
                 jm_release(ret);
-                goto done;
+                JmGreenTask *g = &st->tasks[st->current];
+                if (st->current == 0) {
+                    g->sp = (uint16_t)st->sp;
+                    g->state = JM_TASK_DEAD;
+                    goto done;
+                }
+                while (st->sp > 0) {
+                    st->sp--;
+                    jm_release(st->stack[st->sp]);
+                }
+                st->tp = 0;
+                g->sp = 0;
+                g->fp = 0;
+                g->tp = 0;
+                g->state = JM_TASK_DEAD;
+                jm_release(g->body);
+                g->body = JM_UNDEF;
+                switched = 1;
+                break;
             }
             for (uint16_t i = 1; i < cur_nlocals; i++) {
                 jm_release(st->stack[f->base + i]);
@@ -1700,19 +1836,189 @@ int jm_execute(JmState *st) {
             ip = rec.handler_ip;
             break;
         }
+        case OP_TASK_SPAWN: {
+            if (st->sp < 1) {
+                VM_FAIL(E_UNDERFLOW, "创建：缺少任务体");
+            }
+            JmValue body = st->stack[st->sp - 1];
+            uint8_t idx;
+            JmClosure *cl = 0;
+            if (JM_TAG(body) == JM_TAG_FUNC) {
+                idx = (uint8_t)JM_PAYLOAD(body);
+            } else if (JM_TAG(body) == JM_TAG_HEAP &&
+                       jm_obj(body)->type == JM_T_CLOSURE) {
+                cl = (JmClosure *)jm_obj(body);
+                idx = cl->code_idx;
+            } else {
+                VM_FAIL(E_TYPE, "任务体必须是函数");
+            }
+            if (idx >= st->ncodes) {
+                VM_FAIL(E_CODE, "代码对象越界");
+            }
+            const uint8_t *bce = code_entry(st, idx);
+            if (bce[5] != 0) {
+                VM_FAIL(E_ARGC, "任务体不能带形参");
+            }
+            uint8_t nl = bce[6];
+            if (nl > JM_CHILD_STACK_SLOTS) {
+                VM_FAIL(E_STACK, "任务局部变量过多");
+            }
+            if (cl && bce[8] != cl->ncap) {
+                VM_FAIL(E_CODE, "闭包捕获数与代码对象不符");
+            }
+            uint8_t slot = 0;
+            for (uint8_t t = 1; t < JM_MAX_GREEN_TASKS; t++) {
+                if (st->tasks[t].state == JM_TASK_FREE) {
+                    slot = t;
+                    break;
+                }
+            }
+            if (slot == 0) {
+                VM_FAIL(E_TASK_LIMIT, "任务数超过上限 4");
+            }
+            JmGreenTask *g = &st->tasks[slot];
+            memset(g, 0, sizeof(*g));
+            g->stack = &st->child_stack[slot - 1u][0];
+            g->stack_cap = JM_CHILD_STACK_SLOTS;
+            g->frames = &st->child_frames[slot - 1u][0];
+            g->frames_cap = JM_CHILD_FRAMES;
+            g->tries = &st->child_tries[slot - 1u][0];
+            g->tries_cap = JM_CHILD_TRIES;
+            g->state = JM_TASK_READY;
+            g->slot = slot;
+            g->frames[0].code_idx = idx;
+            g->frames[0].ip = 0;
+            g->frames[0].base = 0;
+            for (uint8_t i = 0; i < nl; i++) {
+                g->stack[g->sp++] = JM_UNDEF;
+            }
+            if (cl) {
+                uint32_t capoff = cap_offset(st, idx);
+                for (uint8_t k = 0; k < cl->ncap; k++, capoff += 2u) {
+                    uint8_t cslot = st->base[capoff + 1];
+                    if (cslot >= nl) {
+                        VM_FAIL(E_CODE, "闭包捕获槽越界");
+                    }
+                    JmValue cv = cl->caps[k];
+                    jm_retain(cv);
+                    g->stack[cslot] = cv;
+                }
+            }
+            g->body = body;
+            jm_retain(body);
+            if ((uint8_t)(slot + 1u) > st->ntask) {
+                st->ntask = (uint8_t)(slot + 1u);
+            }
+            st->sp--;        /* 弹出任务体 */
+            jm_release(body);/* 父任务让出这份引用 */
+            PUSH_V(jm_v_int((int32_t)slot));
+            break;
+        }
+        case OP_TASK_YIELD:
+            if (jm_green_any_ready(st, st->current)) {
+                st->tasks[st->current].state = JM_TASK_READY;
+                switched = 1;
+            } else {
+                jm_port_yield();
+            }
+            PUSH_V(JM_NIL); /* 调用结果：空（语句形式会被编译器 POP 掉） */
+            break;
+        case OP_TASK_SLEEP: {
+            JmValue mv;
+            POP_V(mv);
+            if (JM_TAG(mv) != JM_TAG_INT) {
+                VM_FAIL(JM_NE_TYPE, "延时需要一个整数毫秒值");
+            }
+            int32_t ms = jm_int(mv);
+            if (ms < 0 || ms > 60000) {
+                VM_FAIL(JM_NE_PARAM, "延时范围 0–60000");
+            }
+            JmGreenTask *g = &st->tasks[st->current];
+            g->wake_tick = jm_port_millis() + (uint32_t)ms;
+            g->state = JM_TASK_SLEEPING;
+            PUSH_V(JM_NIL); /* 调用结果：空 */
+            switched = 1;
+            break;
+        }
+        case OP_TASK_WAIT: {
+            uint8_t kind = code[ip++];
+            if (kind > 2) {
+                VM_FAIL(E_TASK_STATE, "未知的等待种类");
+            }
+            uint8_t nargs = (kind == 1) ? 3u : 2u;
+            if (st->sp < (int)nargs) {
+                VM_FAIL(E_UNDERFLOW, "等待时值栈不足");
+            }
+            JmValue h = st->stack[st->sp - nargs];
+            JmValue tv = st->stack[st->sp - 1];
+            if (JM_TAG(h) != JM_TAG_INT) {
+                VM_FAIL(JM_NE_TYPE, "队列/信号量句柄必须是整数");
+            }
+            if (JM_TAG(tv) != JM_TAG_INT) {
+                VM_FAIL(JM_NE_TYPE, "超时参数必须是整数");
+            }
+            int32_t tms = jm_int(tv);
+            if (tms < 0 || tms > 60000) {
+                VM_FAIL(JM_NE_PARAM, "超时范围 0–60000");
+            }
+            JmGreenTask *g = &st->tasks[st->current];
+            if (g->wait_kind == 0) {
+                g->deadline_tick = jm_port_millis() + (uint32_t)tms;
+                g->wait_kind = (uint8_t)(kind + 1u);
+            }
+            uint8_t id = st->wait_native[kind];
+            if (id == 0) {
+                VM_FAIL(E_NOT_CALLABLE, "未知原生函数");
+            }
+            JmValue args[3];
+            for (uint8_t i = 0; i < nargs; i++) {
+                args[i] = st->stack[st->sp - nargs + i];
+            }
+            args[nargs - 1] = jm_v_int(0); /* 只探测一次，不阻塞 */
+            JmValue out;
+            if (jm_native_call(st, id, args, nargs, &out)) {
+                goto fault;
+            }
+            int timed_out = (kind == 0) ? (out == JM_NIL) : (out == JM_FALSE);
+            if (!timed_out ||
+                (int32_t)(jm_port_millis() - g->deadline_tick) >= 0) {
+                for (uint8_t i = 0; i < nargs; i++) {
+                    jm_release(st->stack[st->sp - nargs + i]);
+                }
+                st->sp -= nargs;
+                g->wait_kind = 0;
+                PUSH_V(out);
+                break;
+            }
+            g->wake_tick = jm_port_millis() + 1u;
+            g->state = JM_TASK_SLEEPING;
+            ip = cur_ip; /* 回退到本条指令起点，醒来重探 */
+            switched = 1;
+            break;
+        }
         case OP_IMPORT:
             VM_FAIL(E_IMPORT, "模块导入尚未支持");
         default:
             VM_FAIL(E_OPCODE, "未知指令");
         }
     }
+        f->ip = ip;
+        jm_green_swap_out(st);
+    }
 
 done:
-    st->tp = 0;
-    while (st->sp > 0) {
-        st->sp--;
-        jm_release(st->stack[st->sp]);
+    /* root 结束即整程序结束：子任务切片里的引用一并释放（堆随下一次 jm_run 重置）。 */
+    for (uint8_t t = 0; t < st->ntask; t++) {
+        JmGreenTask *g = &st->tasks[t];
+        while (g->sp > 0) {
+            g->sp--;
+            jm_release(g->stack[g->sp]);
+        }
+        jm_release(g->body);
+        g->body = JM_UNDEF;
     }
+    st->sp = 0;
+    st->tp = 0;
     return 0;
 
 fault:

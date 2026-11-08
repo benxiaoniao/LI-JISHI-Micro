@@ -12,6 +12,7 @@
 use crate::lexer;
 use crate::native_spec;
 use crate::opcodes::{self, Operand};
+use crate::vm_spec;
 use crate::writer::{MAGIC, VERSION};
 use std::path::{Path, PathBuf};
 
@@ -134,6 +135,22 @@ pub const RUNTIME_ERROR_DOCS: &[RuntimeErrorDoc] = &[
     RuntimeErrorDoc { name: "E_FIELD", meaning: "实例没有这个字段（E035）" },
     RuntimeErrorDoc { name: "E_NOT_INSTANCE", meaning: "对非实例取字段或调方法（E036）" },
     RuntimeErrorDoc { name: "E_METHOD", meaning: "实例没有这个方法（E037）" },
+    RuntimeErrorDoc { name: "E_TASK_LIMIT", meaning: "子任务数超过上限（根任务 + 最多 3 个子任务）" },
+    RuntimeErrorDoc { name: "E_TASK_STATE", meaning: "任务状态不允许此操作，或没有可运行的任务（调度器内部错误）" },
+];
+
+/// `任务` 模块函数的说明（名字必须与 vm_spec::TASK_FNS 对齐）。
+const TASK_FN_DOCS: &[(&str, &str)] = &[
+    ("创建", "创建一个无参子任务，返回任务句柄；最多 3 个子任务"),
+    ("让出", "主动让出，交给下一个就绪任务；没有就绪任务时立即返回"),
+    ("延时", "睡够指定毫秒（0..60000）再继续，不占用 VM"),
+];
+
+/// 带超时等待函数的说明（名字必须与 vm_spec::WAIT_FNS 对齐）。
+const WAIT_FN_DOCS: &[(&str, &str)] = &[
+    ("队列接收", "带超时：队列空就挂起，到期返回 空"),
+    ("队列发送", "带超时：队列满就挂起，到期返回 假"),
+    ("信号量等待", "带超时：拿不到就挂起，到期返回 假"),
 ];
 
 struct SyntaxRow {
@@ -299,6 +316,8 @@ const SEMANTICS: &[SemanticRow] = &[
     SemanticRow { topic: "真值", rule: "假：0、0.0、空、假、未定义、空文本、空列表、空字典、空范围；其余为真（含函数与内建）。" },
     SemanticRow { topic: "下标", rule: "列表/文本支持负下标（-1 是最后一个）；字典按键查找，键不存在报 E_INDEX；文本下标按字符而不是字节。" },
     SemanticRow { topic: "原生模块", rule: "`导入 模块` 只能写在模块顶层；导入后模块里的原生函数名才能调用，名字与参数个数在编译期校验（E112/E113/E115）；`.jmb` 仍只带名字，运行期由 native 表绑定。" },
+    SemanticRow { topic: "绿色任务", rule: "`导入 任务` 后用 `创建(函数)` 起一个无参子任务（根任务之外最多 3 个），`让出()` 主动换出，`延时(毫秒)` 睡到指定时刻；调度是协作式、按槽轮转，不抢占、无优先级。子任务值栈 96 槽、调用帧 24、`尝试` 只有 1 层（第 2 层报 E028）；根任务仍是 512 槽 / 32 帧 / 8 层。" },
+    SemanticRow { topic: "任务等待", rule: "带超时的 `队列接收(队, 毫秒)`、`队列发送(队, 值, 毫秒)`、`信号量等待(信号量, 毫秒)` 会先探测一次，失败就只睡 1 tick 再重试，其他任务照常运行；到期仍不成功返回 `空`（接收）或 `假`（发送/信号量）。不带超时的形式仍是普通原生调用。" },
     SemanticRow { topic: "作用域", rule: "函数内的 `令` 是局部槽；内层函数读取外层局部变量时会按值捕获（定义时快照、只读）；未在函数内声明而同名的读取会落到模块级全局。" },
     SemanticRow { topic: "函数", rule: "模块级函数与闭包都是一等值：可以赋值、传参、作为返回值；实参按值传递；形参与实参个数必须一致；调用层数上限 32。" },
     SemanticRow { topic: "闭包", rule: "内层函数读取外层局部变量即按值捕获（定义那一刻的快照，之后外层再改也不影响）；捕获变量只读（赋值报 E117），不能在函数里捕获自己的名字（E117）；单个函数捕获上限 255（E116）。" },
@@ -329,6 +348,8 @@ const LIMITS: &[LimitRow] = &[
     LimitRow { item: "列表元素/字典项", value: "各 255 个（字面量编译期）" },
     LimitRow { item: "调用层数", value: "32 层（JM_MAX_FRAMES）" },
     LimitRow { item: "尝试嵌套", value: "8 层（JM_MAX_TRY_DEPTH，超过报 E028）" },
+    LimitRow { item: "绿色任务", value: "根任务 + 最多 3 个子任务（`创建` 第 4 次报 E038）" },
+    LimitRow { item: "子任务限制", value: "值栈 96 槽、调用帧 24、`尝试` 只有 1 层（超过报 E028）" },
     LimitRow { item: "未捕获异常显示", value: "固定 64 B 缓冲（60 B 正文 + 3 B「…」 + NUL）；正文放不下就截断并以「…」结尾，不会静默丢弃" },
     LimitRow { item: "类", value: "255 个；每类字段 255 个、方法 255 个" },
     LimitRow { item: "值栈", value: "512 槽（JM_STACK_SLOTS）" },
@@ -880,9 +901,49 @@ pub fn render_json() -> Result<String, String> {
     }
     j.push_str("  ],\n");
 
+    // 语言层绿色任务：不走 native 表，单独给出
+    j.push_str("  \"task_module\": {\n");
+    j.push_str(&format!("    \"module\": \"{}\",\n", esc(vm_spec::TASK_MODULE)));
+    j.push_str("    \"note\": \"根任务 + 最多 3 个子任务，协作式按槽轮转；子任务值栈 96 槽、调用帧 24、尝试 1 层\",\n");
+    j.push_str("    \"functions\": [\n");
+    for (i, f) in vm_spec::TASK_FNS.iter().enumerate() {
+        let doc = TASK_FN_DOCS
+            .iter()
+            .find(|(n, _)| *n == f.name)
+            .map(|(_, d)| *d)
+            .ok_or_else(|| format!("任务函数 {} 缺少说明，请补 TASK_FN_DOCS", f.name))?;
+        j.push_str(&format!(
+            "      {{\"name\": \"{}\", \"nargs\": {}, \"opcode\": {}, \"doc\": \"{}\"}}{}\n",
+            esc(f.name),
+            f.nargs,
+            f.opcode,
+            esc(doc),
+            if i + 1 < vm_spec::TASK_FNS.len() { "," } else { "" }
+        ));
+    }
+    j.push_str("    ],\n");
+    j.push_str("    \"wait_functions\": [\n");
+    for (i, w) in vm_spec::WAIT_FNS.iter().enumerate() {
+        let doc = WAIT_FN_DOCS
+            .iter()
+            .find(|(n, _)| *n == w.name)
+            .map(|(_, d)| *d)
+            .ok_or_else(|| format!("等待函数 {} 缺少说明，请补 WAIT_FN_DOCS", w.name))?;
+        j.push_str(&format!(
+            "      {{\"name\": \"{}\", \"kind\": {}, \"timeout_args\": {}, \"doc\": \"{}\"}}{}\n",
+            esc(w.name),
+            w.kind,
+            w.nargs,
+            esc(doc),
+            if i + 1 < vm_spec::WAIT_FNS.len() { "," } else { "" }
+        ));
+    }
+    j.push_str("    ]\n");
+    j.push_str("  },\n");
+
     // 操作码
     j.push_str("  \"opcodes\": [\n");
-    let all_ops: Vec<u8> = (0..=opcodes::OP_THROW).collect();
+    let all_ops: Vec<u8> = (0..=opcodes::OP_TASK_WAIT).collect();
     for (i, op) in all_ops.iter().enumerate() {
         j.push_str(&format!(
             "    {{\"value\": {}, \"name\": \"{}\", \"operand\": \"{}\"}}{}\n",
@@ -1116,10 +1177,35 @@ pub fn render_markdown() -> Result<String, String> {
     }
     m.push_str("单一事实来源：`compiler/src/native_spec.rs`。`micc --emit-native-header` 生成 `runtime/include/jm_native_table.h`，板级与主机端口都展开同一份头；`micc --check-native` 在构建里比对，防止只改一侧。运行期仍由 `jm_native_register` 按名字绑定。\n\n");
 
+    m.push_str("## 语言层任务（绿色）\n\n");
+    m.push_str("`导入 任务` 后启动的是 VM 内部的协作式子任务，不走原生表：根任务之外最多 3 个子任务，按槽轮转，不抢占、无优先级。子任务值栈 96 槽、调用帧 24，**`尝试` 只有 1 层**（第 2 层报 E028）；根任务仍是 512 槽 / 32 帧 / 8 层。子任务退出后句柄不回收，`创建` 第 4 次报 E038。\n\n");
+    m.push_str("| 函数 | 参数个数 | 说明 |\n|---|---|---|\n");
+    for f in vm_spec::TASK_FNS {
+        let doc = TASK_FN_DOCS
+            .iter()
+            .find(|(n, _)| *n == f.name)
+            .map(|(_, d)| *d)
+            .ok_or_else(|| format!("任务函数 {} 缺少说明，请补 TASK_FN_DOCS", f.name))?;
+        m.push_str(&format!("| `{}` | {} | {} |\n", f.name, f.nargs, doc));
+    }
+    m.push('\n');
+    m.push_str("带超时的等待会先探测一次，失败就只睡 1 tick 再重试，其他任务照常运行；到期仍不成功返回 `空`（接收）或 `假`（发送/信号量）。不带超时的形式仍是普通原生调用。\n\n");
+    m.push_str("| 等待函数 | 带超时的实参个数 | 说明 |\n|---|---|---|\n");
+    for w in vm_spec::WAIT_FNS {
+        let doc = WAIT_FN_DOCS
+            .iter()
+            .find(|(n, _)| *n == w.name)
+            .map(|(_, d)| *d)
+            .ok_or_else(|| format!("等待函数 {} 缺少说明，请补 WAIT_FN_DOCS", w.name))?;
+        m.push_str(&format!("| `{}` | {} | {} |\n", w.name, w.nargs, doc));
+    }
+    m.push('\n');
+    m.push_str("单一事实来源：`compiler/src/vm_spec.rs`（名字与参数个数）和 `runtime/src/jm_vm.c`（语义）。\n\n");
+
     m.push_str("## 操作码\n\n");
     m.push_str("字节码由 `micc` 生成，运行时要与 `runtime/include/jm_opcodes.h` 逐条对齐。\n\n");
     m.push_str("| 值 | 名字 | 操作数 |\n|---|---|---|\n");
-    for op in 0..=opcodes::OP_THROW {
+    for op in 0..=opcodes::OP_TASK_WAIT {
         m.push_str(&format!(
             "| {} | `{}` | {} |\n",
             op,

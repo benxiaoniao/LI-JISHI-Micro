@@ -27,7 +27,9 @@ try {
         @{ file = "类运行期方法.jsh"; code = "E037"; stage = "运行" },
         @{ file = "未捕获异常.jsh"; code = "E027"; stage = "运行" },
         @{ file = "运行故障不可捕获.jsh"; code = "E007"; stage = "运行" },
-        @{ file = "尝试嵌套过深.jsh"; code = "E028"; stage = "运行" }
+        @{ file = "尝试嵌套过深.jsh"; code = "E028"; stage = "运行" },
+        @{ file = "任务超限.jsh";   code = "E038"; stage = "运行" },
+        @{ file = "任务当值.jsh";   code = "E115"; stage = "编译" }
     )
     $fail = 0
     foreach ($c in $cases) {

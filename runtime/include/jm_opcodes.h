@@ -40,6 +40,10 @@
 #define OP_CALL_METHOD 35
 #define OP_CALL_INIT 36
 #define OP_RETURN_METHOD 37
+#define OP_TASK_SPAWN 38
+#define OP_TASK_YIELD 39
+#define OP_TASK_SLEEP 40
+#define OP_TASK_WAIT 41
 
 #define BIN_ADD 0
 #define BIN_SUB 1

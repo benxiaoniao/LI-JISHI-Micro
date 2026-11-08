@@ -46,6 +46,14 @@ pub const OP_CALL_METHOD: u8 = 35;
 pub const OP_CALL_INIT: u8 = 36;
 /// 方法帧返回（无操作数）
 pub const OP_RETURN_METHOD: u8 = 37;
+/// 创建绿色任务：任务体在栈顶，形参必须为 0，压回任务句柄（无操作数）
+pub const OP_TASK_SPAWN: u8 = 38;
+/// 让出：有别的就绪任务就切走（无操作数）
+pub const OP_TASK_YIELD: u8 = 39;
+/// 延时：弹栈取毫秒（无操作数）
+pub const OP_TASK_SLEEP: u8 = 40;
+/// 绿色等待（U8 种类：0 队列接收 / 1 队列发送 / 2 信号量等待）
+pub const OP_TASK_WAIT: u8 = 41;
 
 /// 运算子码
 pub const BIN_ADD: u8 = 0;
@@ -86,7 +94,8 @@ pub enum Operand {
 pub fn operand(op: u8) -> Operand {
     match op {
         OP_HALT | OP_POP | OP_DUP | OP_SWAP | OP_NEG | OP_NOT | OP_RETURN | OP_GET_ITEM
-        | OP_SET_ITEM | OP_GET_ITER | OP_TRY_END | OP_THROW | OP_RETURN_METHOD => Operand::None,
+        | OP_SET_ITEM | OP_GET_ITER | OP_TRY_END | OP_THROW | OP_RETURN_METHOD
+        | OP_TASK_SPAWN | OP_TASK_YIELD | OP_TASK_SLEEP => Operand::None,
         OP_JUMP | OP_JUMP_IF_FALSE | OP_JUMP_IF_TRUE | OP_JUMP_IF_FALSE_OR_POP
         | OP_JUMP_IF_TRUE_OR_POP | OP_FOR_ITER | OP_TRY => Operand::U16,
         OP_CALL_METHOD | OP_CALL_INIT => Operand::U8U8,
@@ -134,6 +143,10 @@ pub fn op_name(op: u8) -> &'static str {
         OP_CALL_METHOD => "CALL_METHOD",
         OP_CALL_INIT => "CALL_INIT",
         OP_RETURN_METHOD => "RETURN_METHOD",
+        OP_TASK_SPAWN => "TASK_SPAWN",
+        OP_TASK_YIELD => "TASK_YIELD",
+        OP_TASK_SLEEP => "TASK_SLEEP",
+        OP_TASK_WAIT => "TASK_WAIT",
         _ => "?",
     }
 }
@@ -168,7 +181,7 @@ pub fn emit_c_header() -> String {
     let mut s = String::new();
     s.push_str("/* 由 micc --emit-header 生成，请勿手改。 */\n");
     s.push_str("#ifndef JM_OPCODES_H\n#define JM_OPCODES_H\n\n");
-    let ops: [(u8, &str); 38] = [
+    let ops: [(u8, &str); 42] = [
         (OP_HALT, "OP_HALT"),
         (OP_CONST, "OP_CONST"),
         (OP_LOAD_LOCAL, "OP_LOAD_LOCAL"),
@@ -207,6 +220,10 @@ pub fn emit_c_header() -> String {
         (OP_CALL_METHOD, "OP_CALL_METHOD"),
         (OP_CALL_INIT, "OP_CALL_INIT"),
         (OP_RETURN_METHOD, "OP_RETURN_METHOD"),
+        (OP_TASK_SPAWN, "OP_TASK_SPAWN"),
+        (OP_TASK_YIELD, "OP_TASK_YIELD"),
+        (OP_TASK_SLEEP, "OP_TASK_SLEEP"),
+        (OP_TASK_WAIT, "OP_TASK_WAIT"),
     ];
     for (v, n) in ops {
         s.push_str(&format!("#define {n} {v}\n"));

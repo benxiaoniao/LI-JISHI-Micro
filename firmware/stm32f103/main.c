@@ -330,8 +330,6 @@ int main(void)
         port_log(", ");
         port_log(F103_TIMER_TABLE_NAME);
         port_log(", ");
-        port_log(JM_TASK_TABLE_NAME);
-        port_log(", ");
         port_log(JM_QUEUE_TABLE_NAME);
         port_log(", ");
         port_log(JM_SEM_TABLE_NAME);

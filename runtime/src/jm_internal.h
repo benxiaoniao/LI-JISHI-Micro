@@ -190,6 +190,8 @@ static inline int32_t jm_dec_raw(JmValue v) {
 #define E_FIELD 35
 #define E_NOT_INSTANCE 36
 #define E_METHOD 37
+#define E_TASK_LIMIT 38
+#define E_TASK_STATE 39
 
 typedef struct {
     int code;
@@ -213,6 +215,40 @@ typedef struct {
     uint16_t handler_ip;
 } JmTry;
 
+/* ---------------- 绿色任务（VM 内协作调度） ----------------
+ * root（槽位 0）沿用原来的 512 槽 / 32 帧 / 8 层 try；子任务各有一片
+ * 96 槽值栈、24 帧帧栈、1 层 try。尺寸变化时 static_assert 会挡住，
+ * 因为 RAM 预算按 6 B/帧、36 B/任务 算过。 */
+#define JM_MAX_GREEN_TASKS 4u   /* root + 最多 3 个子任务 */
+#define JM_CHILD_STACK_SLOTS 96u
+#define JM_CHILD_FRAMES 24u
+#define JM_CHILD_TRIES 1u
+
+#define JM_TASK_FREE 0u
+#define JM_TASK_READY 1u
+#define JM_TASK_RUNNING 2u
+#define JM_TASK_SLEEPING 3u
+#define JM_TASK_DEAD 4u
+
+typedef struct {
+    JmValue *stack;        /* 自己的值栈切片 */
+    JmFrame *frames;       /* 自己的帧栈切片 */
+    JmTry *tries;          /* 自己的 try 栈切片 */
+    uint16_t stack_cap;    /* 槽数 */
+    uint16_t sp;
+    uint8_t frames_cap;
+    uint8_t fp;
+    uint8_t tries_cap;
+    uint8_t tp;
+    uint8_t state;         /* JM_TASK_* */
+    uint8_t slot;          /* 1..3；root 为 0（不对外暴露） */
+    uint8_t wait_kind;     /* 0 无 / 1 队列接收 / 2 队列发送 / 3 信号量等待 */
+    uint8_t wait_native;   /* 保留字段（等待的 native id 在 JmState.wait_native 里） */
+    uint32_t wake_tick;    /* 延时到期 / 等待重试的下一个 tick */
+    uint32_t deadline_tick;/* 绿色等待的截止 tick */
+    JmValue body;          /* 任务体闭包；root 为 UNDEF */
+} JmGreenTask;
+
 typedef struct {
     const uint8_t *base;
     uint32_t len;
@@ -231,22 +267,50 @@ typedef struct {
     uint32_t class_start;
 
     JmValue globals[JM_MAX_GLOBALS];
-    JmValue stack[JM_STACK_SLOTS];
+
+    /* 当前任务的三个栈切片。root 指向下面的 root_* 静态数组。 */
+    JmValue *stack;
+    uint16_t stack_cap;
     int sp;
 
-    JmFrame frames[JM_MAX_FRAMES];
+    JmFrame *frames;
+    uint8_t frames_cap;
     int fp;
 
-    JmTry tries[JM_MAX_TRY_DEPTH];
+    JmTry *tries;
+    uint8_t tries_cap;
     int tp;
     /// 未捕获异常的显示缓冲（`jm_last_error` 会引用它）。
     char uncaught[64];
 
     JmValue const_cache[JM_MAX_GLOBALS];
 
+    /* ---- 绿色任务：静态切片与本状态 ---- */
+    JmValue root_stack[JM_STACK_SLOTS];
+    JmFrame root_frames[JM_MAX_FRAMES];
+    JmTry root_tries[JM_MAX_TRY_DEPTH];
+    JmValue child_stack[JM_MAX_GREEN_TASKS - 1u][JM_CHILD_STACK_SLOTS];
+    JmFrame child_frames[JM_MAX_GREEN_TASKS - 1u][JM_CHILD_FRAMES];
+    JmTry child_tries[JM_MAX_GREEN_TASKS - 1u][JM_CHILD_TRIES];
+    JmGreenTask tasks[JM_MAX_GREEN_TASKS];
+    uint8_t ntask;
+    uint8_t current;
+    uint8_t wait_native[3];  /* 队列接收 / 队列发送 / 信号量等待 的 native id */
+
     JmError err;
     int has_err;
 } JmState;
+
+/* RAM 预算锁：6 B/帧、36 B/任务（见 docs/设计-语言层任务.md §2）。
+ * 结构体一动，这两个断言就会在编译期挡住，避免悄悄超预算。 */
+#if defined(__cplusplus) || defined(__GNUC__)
+_Static_assert(sizeof(JmFrame) == 6u, "JmFrame 必须是 6 B（RAM 预算按 6 B/帧）");
+_Static_assert(sizeof(JmTry) == 6u, "JmTry 必须是 6 B（RAM 预算按此计算）");
+#if defined(__SIZEOF_POINTER__) && __SIZEOF_POINTER__ == 4
+/* 36 B 是 MCU（32 位指针）上的尺寸；主机是 64 位指针，不能拿它锁预算。 */
+_Static_assert(sizeof(JmGreenTask) == 36u, "JmGreenTask 必须是 36 B/任务");
+#endif
+#endif
 
 extern JmState jm_state;
 
@@ -316,6 +380,7 @@ int jm_type_name(JmValue v, const char **name);
 /* ---------------- 原生函数表（Native ABI v1，公开头见 jm_native.h） ---------------- */
 #define JM_NATIVE_ID_BASE 64u   /* 内建 id 0..63；原生函数从 64 起，最多 64 个 */
 int jm_native_bind_name(JmState *st, uint8_t name_idx, const char *name);
+uint8_t jm_native_find(const char *name);
 int jm_native_call(JmState *st, uint8_t id, JmValue *args, uint8_t nargs,
                    JmValue *out);
 

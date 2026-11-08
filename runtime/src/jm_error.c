@@ -30,11 +30,13 @@ static const char *msg_for(int code) {
     case E_IMPORT: return "模块导入尚未支持";
     case E_FILE: return "字节码文件有误";
     case E_UNCAUGHT: return "未捕获的异常";
-    case E_TRY_DEPTH: return "尝试嵌套超过 8 层";
+    case E_TRY_DEPTH: return "尝试嵌套层数超过上限";
     case E_TRY_STATE: return "尝试栈与帧不匹配（编译器 bug）";
     case E_FIELD: return "实例没有这个字段";
     case E_NOT_INSTANCE: return "只能对实例取字段或调方法";
     case E_METHOD: return "实例没有这个方法";
+    case E_TASK_LIMIT: return "任务数超过上限 4";
+    case E_TASK_STATE: return "任务状态不允许新建或继续";
     case JM_NE_PARAM: return "原生函数参数非法";
     case JM_NE_TYPE: return "原生函数参数类型不符";
     case JM_NE_HW: return "硬件操作失败";

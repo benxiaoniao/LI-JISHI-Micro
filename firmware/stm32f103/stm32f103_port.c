@@ -544,3 +544,8 @@ void jm_port_sleep_ms(uint32_t ms)
     }
     jmk_delay(ms);
 }
+
+void jm_port_yield(void)
+{
+    jmk_yield();
+}

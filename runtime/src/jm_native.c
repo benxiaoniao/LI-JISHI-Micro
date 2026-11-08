@@ -75,6 +75,16 @@ int jm_native_bind_name(JmState *st, uint8_t name_idx, const char *name) {
 
 /* ---------------- 分派 ---------------- */
 
+/* 按名字查 native id；找不到返回 0（native id 从 64 起，0 可当「无」）。 */
+uint8_t jm_native_find(const char *name) {
+    for (uint8_t i = 0; i < g_nentries; i++) {
+        if (strcmp(g_entries[i]->name, name) == 0) {
+            return (uint8_t)(JM_NATIVE_ID_BASE + i);
+        }
+    }
+    return 0;
+}
+
 int jm_native_call(JmState *st, uint8_t id, JmValue *args, uint8_t nargs,
                    JmValue *out) {
     uint8_t idx = (uint8_t)(id - JM_NATIVE_ID_BASE);

@@ -45,20 +45,6 @@
 
 #endif /* F103_TIMER_TABLE_H */
 
-/* 原生表 task：2 项 */
-#ifndef JM_TASK_TABLE_H
-#define JM_TASK_TABLE_H
-
-#define JM_TASK_TABLE_NAME "task"
-#define JM_TASK_ENTRY_COUNT 2u
-
-/* 在 JmNativeEntry 数组初始化处展开；名字、参数个数、C 函数名都来自同一份规格。 */
-#define JM_TASK_TABLE_INIT \
-    {"让出", n_task_yield, 0u, 0u, 0u, 0u}, \
-    {"延时", n_task_delay, 1u, 1u, 0u, 0u}
-
-#endif /* JM_TASK_TABLE_H */
-
 /* 原生表 ipc_queue：4 项 */
 #ifndef JM_QUEUE_TABLE_H
 #define JM_QUEUE_TABLE_H

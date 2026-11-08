@@ -128,27 +128,6 @@ pub const MODULES: &[NativeModuleSpec] = &[
         ],
     },
     NativeModuleSpec {
-        name: "任务",
-        table: "task",
-        c_prefix: "JM_TASK",
-        entries: &[
-            NativeEntrySpec {
-                name: "让出",
-                min_args: 0,
-                max_args: 0,
-                c_fn: "n_task_yield",
-                doc: "主动让出 CPU 一次；板上交给 JMK 调度（同优先级轮转），主机是空操作。",
-            },
-            NativeEntrySpec {
-                name: "延时",
-                min_args: 1,
-                max_args: 1,
-                c_fn: "n_task_delay",
-                doc: "延时 0–60000 毫秒；板上阻塞当前任务并把 CPU 让给其他 JMK 任务，主机睡眠同样时长。",
-            },
-        ],
-    },
-    NativeModuleSpec {
         name: "队列",
         table: "ipc_queue",
         c_prefix: "JM_QUEUE",

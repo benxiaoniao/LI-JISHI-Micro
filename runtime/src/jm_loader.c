@@ -133,6 +133,16 @@ int jm_loader_init(JmState *st, const void *data, size_t len) {
     return 0;
 }
 
+/* 载入后把三种绿色等待的 native id 先查好，运行期不再按名字查表。
+ * 注意不能扫 .jmb 名字表：等待调用编译成 OP_TASK_WAIT（立即数带种类），
+ * 名字表里根本没有这三个名字，只能直接问 native 表。 */
+static void jm_resolve_wait_native(JmState *st) {
+    static const char *const names[3] = {"队列接收", "队列发送", "信号量等待"};
+    for (uint8_t k = 0; k < 3; k++) {
+        st->wait_native[k] = jm_native_find(names[k]);
+    }
+}
+
 int jm_run(const void *jmb, size_t len) {
     JmState *st = &jm_state;
     memset(st, 0, sizeof(*st));
@@ -145,11 +155,30 @@ int jm_run(const void *jmb, size_t len) {
     }
     jm_heap_init();
 
+    /* 绿色任务：root 用原有的静态数组，子任务用各自切片。 */
+    st->stack = st->root_stack;
+    st->stack_cap = JM_STACK_SLOTS;
+    st->frames = st->root_frames;
+    st->frames_cap = JM_MAX_FRAMES;
+    st->tries = st->root_tries;
+    st->tries_cap = JM_MAX_TRY_DEPTH;
+    st->tasks[0].stack = st->root_stack;
+    st->tasks[0].stack_cap = JM_STACK_SLOTS;
+    st->tasks[0].frames = st->root_frames;
+    st->tasks[0].frames_cap = JM_MAX_FRAMES;
+    st->tasks[0].tries = st->root_tries;
+    st->tasks[0].tries_cap = JM_MAX_TRY_DEPTH;
+    st->tasks[0].state = JM_TASK_READY;
+    st->tasks[0].body = JM_UNDEF;
+    st->current = 0;
+    st->ntask = 1;
+
     if (jm_loader_init(st, jmb, len)) {
         st->has_err = 1;
         return -1;
     }
     jm_builtin_install(st);
+    jm_resolve_wait_native(st);
 
     const uint8_t *ce = st->base + st->code_start + (uint32_t)st->entry * 10u;
     uint8_t nlocals = ce[6];
@@ -159,7 +188,7 @@ int jm_run(const void *jmb, size_t len) {
     st->fp = 0;
     st->sp = 0;
     for (uint8_t i = 0; i < nlocals; i++) {
-        if (st->sp >= JM_STACK_SLOTS) {
+        if (st->sp >= (int)st->stack_cap) {
             jm_fail(st, E_STACK, "值栈溢出");
             st->has_err = 1;
             return -1;
@@ -167,6 +196,7 @@ int jm_run(const void *jmb, size_t len) {
         st->stack[st->sp++] = JM_UNDEF;
     }
     JM_HW_NOTE(st);
+    st->tasks[0].sp = (uint16_t)st->sp; /* root 的局部槽已铺好，交给调度器 */
 
     if (jm_execute(st)) {
         return -1;

@@ -4,6 +4,7 @@
 #ifdef _WIN32
 #include <windows.h>
 #else
+#include <sched.h>
 #include <time.h>
 #endif
 
@@ -35,5 +36,13 @@ void jm_port_sleep_ms(uint32_t ms) {
     req.tv_sec = (time_t)(ms / 1000u);
     req.tv_nsec = (long)((ms % 1000u) * 1000000u);
     nanosleep(&req, NULL);
+#endif
+}
+
+void jm_port_yield(void) {
+#ifdef _WIN32
+    SwitchToThread();
+#else
+    sched_yield();
 #endif
 }

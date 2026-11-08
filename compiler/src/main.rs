@@ -12,6 +12,7 @@ mod pack_merge;
 mod pack_resolve;
 mod parser;
 mod symbols;
+mod vm_spec;
 mod writer;
 
 use std::path::PathBuf;
