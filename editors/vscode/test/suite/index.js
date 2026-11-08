@@ -2,6 +2,8 @@
 // 由 test/run-it.ps1 通过 `code --extensionDevelopmentPath --extensionTestsPath` 启动。
 const vscode = require('vscode');
 const path = require('path');
+const pkg = require('../../package.json');
+const extensionId = `${pkg.publisher}.${pkg.name}`;
 
 const results = [];
 
@@ -63,9 +65,9 @@ function applyTextEdits(document, text, edits) {
 }
 
 exports.run = async function run() {
-  const extension = vscode.extensions.getExtension('jishim.li-vscode');
+  const extension = vscode.extensions.getExtension(extensionId);
   await check('扩展能激活', async () => {
-    assert(extension, '找不到 jishim.li-vscode');
+    assert(extension, `找不到 ${extensionId}`);
     await extension.activate();
   });
 

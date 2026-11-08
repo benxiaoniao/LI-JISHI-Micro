@@ -3,8 +3,17 @@
   "displayName": "砾（LI）",
   "description": "砾语言（.jsh）的编辑器支持：语法高亮、编译诊断、运行/断点、跳转到定义与语言卡补全。",
   "version": "0.1.0",
-  "publisher": "jishim",
+  "publisher": "jishi-micro-li",
   "license": "MIT-0",
+  "keywords": [
+    "砾",
+    "li",
+    "jsh",
+    "中文编程",
+    "单片机",
+    "stm32",
+    "嵌入式"
+  ],
   "repository": {
     "type": "git",
     "url": "https://github.com/benxiaoniao/LI-JISHI-Micro.git",
