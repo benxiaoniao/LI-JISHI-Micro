@@ -5,16 +5,19 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import {
+  buildDebugArgs,
   decideDefinition,
   displayPath,
   findModuleLine,
   formatSource,
   nearestManifest,
+  parseDebugEvent,
   parsePackFiles,
   parseRunOutput,
   parseSymbols,
+  toggleBreak,
 } from './core';
-import type { PackInfo, Site, SymbolInfo } from './core';
+import type { BreakSpec, PackInfo, Site, SymbolInfo } from './core';
 
 const LANGUAGE_ID = 'li';
 const OUTPUT_NAME = '砾';
@@ -29,8 +32,11 @@ let breakpointDecoration: vscode.TextEditorDecorationType;
 let runningChild: ChildProcess | undefined;
 let cardCache: { file: string; mtimeMs: number; card: Langcard } | undefined;
 
-/** 每个文档最多一个断点：文档 URI → 1 起行号。 */
-const breakpoints = new Map<string, number>();
+/** 每个文档一个断点集合（多个行号）：文档 URI → 1 起行号数组。 */
+const breakpoints = new Map<string, number[]>();
+let debugChild: ChildProcess | undefined;
+let debugPaused = false;
+let debugPrompting = false;
 const runUris = new Map<string, vscode.Uri>();
 const symbolCache = new Map<string, { mtimeMs: number; symbols: SymbolInfo[] }>();
 const packCache = new Map<string, { mtimeMs: number; packs: PackInfo[] }>();
@@ -440,8 +446,8 @@ function refreshBreakpointDecorations(editor: vscode.TextEditor): void {
   if (!breakpointDecoration || editor.document.languageId !== LANGUAGE_ID) {
     return;
   }
-  const line = breakpoints.get(editor.document.uri.toString());
-  const ranges = line ? [new vscode.Range(line - 1, 0, line - 1, 0)] : [];
+  const lines = breakpoints.get(editor.document.uri.toString()) ?? [];
+  const ranges = lines.map(line => new vscode.Range(line - 1, 0, line - 1, 0));
   editor.setDecorations(breakpointDecoration, ranges);
 }
 
@@ -453,12 +459,20 @@ function toggleBreakpoint(): void {
   }
   const key = editor.document.uri.toString();
   const line = editor.selection.active.line + 1;
-  if (breakpoints.get(key) === line) {
-    breakpoints.delete(key);
-    vscode.window.setStatusBarMessage(`砾：已清除第 ${line} 行断点`, 2000);
+  const next = toggleBreak(breakpoints.get(key) ?? [], line);
+  if (next.length > 8) {
+    vscode.window.showWarningMessage('砾：最多 8 个断点（jmrun 的上限）；本次未添加。');
+    return;
+  }
+  if (next.includes(line)) {
+    vscode.window.setStatusBarMessage(`砾：断点设在第 ${line} 行（共 ${next.length} 个）`, 3000);
   } else {
-    breakpoints.set(key, line);
-    vscode.window.setStatusBarMessage(`砾：断点设在第 ${line} 行（再次 F9 取消）`, 3000);
+    vscode.window.setStatusBarMessage(`砾：已清除第 ${line} 行断点（剩 ${next.length} 个）`, 2500);
+  }
+  if (next.length === 0) {
+    breakpoints.delete(key);
+  } else {
+    breakpoints.set(key, next);
   }
   refreshBreakpointDecorations(editor);
 }
@@ -547,12 +561,14 @@ async function runCurrent(): Promise<void> {
     return;
   }
 
-  const breakLine = breakpoints.get(document.uri.toString());
-  const args = [target];
-  if (breakLine) {
-    args.push('--break', `${displayPath(root, document.uri.fsPath)}:${breakLine}`);
+  const lines = breakpoints.get(document.uri.toString()) ?? [];
+  if (lines.length > 0) {
+    const spec: BreakSpec[] = lines.map(line => ({ file: displayPath(root, document.uri.fsPath), line }));
+    await startDebugSession(root, document, jmrun, target, spec);
+    return;
   }
-  output.appendLine(`== 运行 ${path.basename(document.uri.fsPath)}${breakLine ? `（断点第 ${breakLine} 行）` : ''}`);
+  const args = [target];
+  output.appendLine(`== 运行 ${path.basename(document.uri.fsPath)}`);
   output.appendLine(`> jmrun ${args.map(a => (a.includes(' ') ? `"${a}"` : a)).join(' ')}`);
 
   const result = await runText(jmrun, args, root);
@@ -573,6 +589,153 @@ async function runCurrent(): Promise<void> {
   const site = publishRunDiagnostics(document, root, result.out + result.err);
   if (site && !parseRunOutput(result.out + result.err).hit) {
     output.appendLine(`源码位置：${site.file}:${site.line}`);
+  }
+}
+
+function setDebugPaused(paused: boolean, label?: string): void {
+  debugPaused = paused;
+  if (paused) {
+    statusItem.text = `$(debug-pause) 砾：${label ?? '已暂停'}`;
+    statusItem.tooltip = '已暂停：F10 下一行 / Ctrl+F10 步过 / F5 继续 / Shift+F5 停止';
+    statusItem.show();
+  } else {
+    statusItem.hide();
+  }
+}
+
+function sendDebug(cmd: string): void {
+  if (!debugChild || !debugChild.stdin) {
+    vscode.window.showInformationMessage('砾：当前没有调试会话（F5 且有断点时才会进入调试）。');
+    return;
+  }
+  if (!debugPaused && (cmd === 'c' || cmd === 'n' || cmd === 'o' || cmd === 's')) {
+    vscode.window.showInformationMessage('砾：程序未暂停，无需继续/步进。');
+    return;
+  }
+  debugChild.stdin.write(cmd + '\n');
+  if (cmd !== 'bl' && cmd !== 'v' && cmd !== 'bt') {
+    setDebugPaused(false);
+  }
+}
+
+async function promptDebugAction(): Promise<void> {
+  if (debugPrompting || !debugChild) {
+    return;
+  }
+  if (!config<boolean>('debugPrompt', true)) {
+    return;
+  }
+  debugPrompting = true;
+  try {
+    const options = [
+      { label: '$(play) 继续', description: 'c', cmd: 'c' },
+      { label: '$(arrow-right) 下一行', description: 'n', cmd: 'n' },
+      { label: '$(debug-step-over) 步过', description: 'o', cmd: 'o' },
+      { label: '$(debug-step-into) 单步指令', description: 's', cmd: 's' },
+      { label: '$(list-unordered) 断点列表', description: 'bl', cmd: 'bl' },
+      { label: '$(stop) 退出', description: 'q', cmd: 'q' },
+    ];
+    const pick = await vscode.window.showQuickPick(options, {
+      placeHolder: '砾调试：选择动作（Esc 保持暂停，之后可用 F10 / F5）',
+      ignoreFocusOut: true,
+    });
+    if (pick) {
+      sendDebug(pick.cmd);
+    }
+  } finally {
+    debugPrompting = false;
+  }
+}
+
+/** 事件行 → 输出通道 / 状态栏 / 编辑器定位；非事件行原样显示。 */
+function handleDebugLine(root: string, raw: string, onPause?: () => void): void {
+  const ev = parseDebugEvent(raw);
+  if (!ev) {
+    output.appendLine(raw);
+    return;
+  }
+  if (ev.event === 'pause') {
+    const where = ev.file ? `${ev.file}:${ev.line}` : '（无行表）';
+    output.appendLine(`== 暂停（${ev.reason}）任务 ${ev.task}「${ev.func}」 ${where}`);
+    setDebugPaused(true, `暂停 ${ev.func} ${where}`);
+    if (ev.file && ev.line > 0) {
+      const uri = siteUri(root, ev.file);
+      const row = Math.max(0, ev.line - 1);
+      void vscode.window.showTextDocument(uri, {
+        selection: new vscode.Range(row, 0, row, 0),
+        preserveFocus: true,
+        preview: true,
+      });
+    }
+    void promptDebugAction();
+    onPause?.();
+    return;
+  }
+  output.appendLine(`== 结束（码 ${ev.code}${ev.quit ? '，用户退出' : ''}）`);
+  setDebugPaused(false);
+}
+
+/** 有断点时走完整调试：`--dbg --事件流`，交互命令走 stdin。首次暂停（或结束）后 resolve。 */
+function startDebugSession(
+  root: string,
+  document: vscode.TextDocument,
+  jmrun: string,
+  target: string,
+  spec: BreakSpec[]
+): Promise<void> {
+  return new Promise(resolve => {
+    let settled = false;
+    const settle = (): void => {
+      if (!settled) {
+        settled = true;
+        resolve();
+      }
+    };
+    const args = buildDebugArgs({ jmb: target, breaks: spec });
+    output.appendLine(`== 调试 ${path.basename(document.uri.fsPath)}（断点 ${spec.length} 个）`);
+    output.appendLine(`> jmrun ${args.map(a => (a.includes(' ') ? `"${a}"` : a)).join(' ')}`);
+    const child = spawn(jmrun, args, { cwd: root, windowsHide: true });
+    debugChild = child;
+    child.stdout?.setEncoding('utf8');
+    child.stderr?.setEncoding('utf8');
+    child.stdout?.on('data', (chunk: string | Buffer) => output.append(String(chunk)));
+
+    let buf = '';
+    child.stderr?.on('data', (chunk: string | Buffer) => {
+      buf += String(chunk);
+      let idx = buf.indexOf('\n');
+      while (idx >= 0) {
+        const line = buf.slice(0, idx).replace(/\r$/, '');
+        buf = buf.slice(idx + 1);
+        handleDebugLine(root, line, settle);
+        idx = buf.indexOf('\n');
+      }
+    });
+    child.on('error', err => {
+      output.appendLine(`无法启动 jmrun：${err.message}`);
+      vscode.window.showErrorMessage(`砾：无法启动 jmrun（${err.message}）。`);
+      debugChild = undefined;
+      setDebugPaused(false);
+      removeQuietly(target);
+      settle();
+    });
+    child.on('close', code => {
+      if (buf) {
+        handleDebugLine(root, buf.replace(/\r$/, ''));
+        buf = '';
+      }
+      output.appendLine(`== 退出码 ${code ?? -1}`);
+      debugChild = undefined;
+      setDebugPaused(false);
+      removeQuietly(target);
+      settle();
+    });
+  });
+}
+
+function stopDebug(): void {
+  if (debugChild) {
+    debugChild.kill();
   }
 }
 
@@ -828,9 +991,22 @@ export function activate(context: vscode.ExtensionContext): void {
 
     vscode.commands.registerCommand('li.build', () => runScript('tools/build.ps1', [], '构建')),
 
-    vscode.commands.registerCommand('li.run', () => runCurrent()),
+    vscode.commands.registerCommand('li.run', () => {
+      if (debugChild) {
+        sendDebug('c');
+        return;
+      }
+      return runCurrent();
+    }),
 
     vscode.commands.registerCommand('li.toggleBreakpoint', () => toggleBreakpoint()),
+
+    vscode.commands.registerCommand('li.debug.continue', () => sendDebug('c')),
+    vscode.commands.registerCommand('li.debug.next', () => sendDebug('n')),
+    vscode.commands.registerCommand('li.debug.step', () => sendDebug('s')),
+    vscode.commands.registerCommand('li.debug.stepOut', () => sendDebug('o')),
+    vscode.commands.registerCommand('li.debug.breaks', () => sendDebug('bl')),
+    vscode.commands.registerCommand('li.debug.stop', () => stopDebug()),
 
     vscode.commands.registerCommand('li.buildFirmware', () => {
       const root = workspaceRoot(vscode.window.activeTextEditor?.document.uri);
@@ -935,6 +1111,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
 export function deactivate(): void {
   stopRunning();
+  stopDebug();
   if (output) {
     output.dispose();
   }

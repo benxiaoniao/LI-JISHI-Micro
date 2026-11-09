@@ -265,6 +265,80 @@ try {
       assert.strictEqual(core.formatSource(src), src, name + ' 被格式化改写了');
     }
   });
+  // ---------- 8. 调试事件流（jmrun --dbg --事件流） ----------
+  check('buildDebugArgs：--dbg --事件流 + 断点 + task + jmb', () => {
+    const args = core.buildDebugArgs({
+      jmb: 'x.jmb',
+      breaks: [{ file: 'a.jsh', line: 2 }, { file: 'a.jsh', line: 5 }],
+      task: 1,
+    });
+    assert.deepStrictEqual(args, ['--dbg', '--事件流', '--break', 'a.jsh:2', '--break', 'a.jsh:5', '--task', '1', 'x.jmb']);
+  });
+  check('buildDebugArgs：stream=false 时只带 --dbg', () => {
+    const args = core.buildDebugArgs({ jmb: 'x.jmb', stream: false });
+    assert.deepStrictEqual(args, ['--dbg', 'x.jmb']);
+  });
+  check('toggleBreak：加、删、排序且不改入参', () => {
+    const base = [5, 2];
+    const added = core.toggleBreak(base, 9);
+    assert.deepStrictEqual(added, [2, 5, 9]);
+    assert.deepStrictEqual(core.toggleBreak(added, 5), [2, 9]);
+    assert.deepStrictEqual(base, [5, 2]);
+  });
+  check('parseDebugEvent：暂停（断点/单步）', () => {
+    const pause = core.parseDebugEvent('{"事件":"暂停","任务":0,"函数":"跑","文件":"a.jsh","行":5,"原因":"断点"}');
+    assert(pause && pause.event === 'pause' && pause.task === 0 && pause.func === '跑' &&
+      pause.file === 'a.jsh' && pause.line === 5 && pause.reason === '断点');
+    const step = core.parseDebugEvent('{"事件":"暂停","任务":1,"函数":"甲","文件":"a.jsh","行":7,"原因":"单步"}');
+    assert(step && step.event === 'pause' && step.reason === '单步');
+  });
+  check('parseDebugEvent：结束（正常 / 用户退出）', () => {
+    const done = core.parseDebugEvent('{"事件":"结束","码":0}');
+    assert(done && done.event === 'finish' && done.code === 0 && done.quit === false);
+    const quit = core.parseDebugEvent('{"事件":"结束","码":0,"用户退出":true}');
+    assert(quit && quit.event === 'finish' && quit.quit === true);
+  });
+  check('parseDebugEvent：非 JSON / 坏 JSON / 未知事件都返回 undefined', () => {
+    assert.strictEqual(core.parseDebugEvent('暂停：任务 0 「跑」 a.jsh:5'), undefined);
+    assert.strictEqual(core.parseDebugEvent('{"事件":'), undefined);
+    assert.strictEqual(core.parseDebugEvent('{"事件":"别的"}'), undefined);
+    assert.strictEqual(core.parseDebugEvent(''), undefined);
+  });
+
+  const dbgSrc = path.join(sandbox, '调试.jsh');
+  writeUtf8(dbgSrc, '令 甲 = 1\n令 乙 = 2\n打印(甲 + 乙)\n');
+  const dbgJmb = path.join(sandbox, '调试.jmb');
+  run(micc, [dbgSrc, '-o', dbgJmb]);
+  const dbgFile = dbgSrc.split(path.sep).join('/');
+  const dbgArgs = core.buildDebugArgs({
+    jmb: dbgJmb,
+    breaks: [{ file: dbgFile, line: 2 }, { file: dbgFile, line: 3 }],
+  });
+  const dbgRun = spawnSync(jmrun, dbgArgs, {
+    cwd: root, encoding: 'utf8', windowsHide: true, input: 'c\nq\n',
+  });
+  const events = (dbgRun.stderr || '').split(/\r?\n/).map(line => core.parseDebugEvent(line)).filter(Boolean);
+  const pauses = events.filter(e => e.event === 'pause');
+  const finishes = events.filter(e => e.event === 'finish');
+  check('事件流：两个断点各暂停一次（行 2 → 3）', () => {
+    assert.strictEqual(pauses.length, 2, '实际事件：' + JSON.stringify(events));
+    assert.deepStrictEqual(pauses.map(p => p.line), [2, 3]);
+    assert.strictEqual(pauses[0].reason, '断点');
+    assert(pauses[0].func.length > 0);
+  });
+  check('事件流：结束事件为「用户退出、码 0」', () => {
+    assert.strictEqual(finishes.length, 1, '实际事件：' + JSON.stringify(events) + '\nstderr：' + JSON.stringify(dbgRun.stderr));
+    assert.strictEqual(finishes[0].code, 0);
+    assert.strictEqual(finishes[0].quit, true);
+  });
+  check('事件流：人读文本仍在（调试输出未丢失）', () => {
+    assert((dbgRun.stderr || '').includes('暂停：'));
+  });
+  const noDbg = run(jmrun, ['--事件流', dbgJmb]);
+  check('事件流只能与 --dbg 一起用（退出码 2）', () => {
+    assert.strictEqual(noDbg.code, 2);
+    assert((noDbg.out + noDbg.err).includes('只能与 --dbg 一起用'));
+  });
 } finally {
   fs.rmSync(sandbox, { recursive: true, force: true });
 }

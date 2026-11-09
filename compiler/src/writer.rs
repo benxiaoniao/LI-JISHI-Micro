@@ -17,6 +17,31 @@ const CAP_ENTRY: usize = 2;
 /// JMB v4：类记录每项 8 字节。
 const CLASS_REC: usize = 8;
 
+/// 把 `.jmb` 字节生成 `jm_blob.c`（C 数组）。
+///
+/// 格式与 `tools/build-firmware.ps1` 的内联生成**逐字节一致**：每行 12 字节、4 空格缩进、
+/// 十六进制大写两位、最后一个字节后不加逗号；固定符号名 `jm_app_jmb` / `jm_app_jmb_len`。
+pub fn emit_blob(bytes: &[u8]) -> String {
+    let mut s = String::new();
+    s.push_str("#include <stdint.h>\n");
+    s.push_str("const unsigned char jm_app_jmb[] = {\n");
+    for (i, b) in bytes.iter().enumerate() {
+        if i % 12 == 0 {
+            s.push_str("    ");
+        }
+        s.push_str(&format!("0x{:02X}", b));
+        if i + 1 < bytes.len() {
+            s.push(',');
+        }
+        if i % 12 == 11 {
+            s.push('\n');
+        }
+    }
+    s.push_str("\n};\n");
+    s.push_str(&format!("const uint32_t jm_app_jmb_len = {}u;\n", bytes.len()));
+    s
+}
+
 /// 编码结果：`bytes` 是最终文件（可能含调试段），
 /// `base_len` 是剥离调试段后的长度（体积上限按它算），`debug_len` 是调试段字节数。
 pub struct Encoded {

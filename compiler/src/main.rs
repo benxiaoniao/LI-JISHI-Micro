@@ -10,6 +10,7 @@ mod pack;
 mod pack_index;
 mod pack_manifest;
 mod pack_merge;
+mod pack_registry;
 mod pack_resolve;
 mod parser;
 mod symbols;
@@ -27,6 +28,8 @@ fn usage() {
     eprintln!("      micc hash [--目录 <包目录>]                # 算目录内容哈希（填索引的 校验）");
     eprintln!("      micc verify <包目录|归档.zip>              # 校验归档/二进制包（清单 + 产物 + 哈希）");
     eprintln!("      micc interface --目录 <包目录> [-o 接口.toml]  # 生成导出函数接口清单");
+    eprintln!("      micc search [关键词...] [--索引 <索引文件|URL>]  # 检索静态索引");
+    eprintln!("      micc publish [--目录 <包目录>] [--索引 <索引文件>] [--仓库 <目录>]  # 发布源码包并写索引");
     eprintln!("      micc --line-of <x.jmb> <代码下标> <偏移>   # 指令位置 → 源文件:行");
     eprintln!("      micc --lines-of <x.jmb> <文件|*> <行号>    # 源码行 → 指令范围");
     eprintln!("      micc --locals-of <x.jmb> <代码下标>        # 代码对象 → 局部槽符号");
@@ -34,6 +37,7 @@ fn usage() {
     eprintln!("      micc --debug-dump <x.jmb>                  # 打印调试表");
     eprintln!("      micc --symbols <x.jsh>                     # 列出定义：种类 名字 行 列");
     eprintln!("      micc --pack-files <包目录>                 # 包与依赖的入口文件（给编辑器跳转）");
+    eprintln!("      micc --emit-blob <x.jmb> [-o jm_blob.c]     # 生成内嵌字节数组（固件用）");
     eprintln!("      micc --emit-header        # 导出 jm_opcodes.h");
     eprintln!("      micc --emit-native-header # 导出运行时原生表头 runtime/include/jm_native_table.h");
     eprintln!("      micc --check-native       # CI 校验原生表头没漂移（不一致则退出码 1）");
@@ -234,6 +238,52 @@ fn cmd_debug_dump(args: &[String]) -> i32 {
     }
 }
 
+/// `--emit-blob`：把 `.jmb` 生成 C 数组源文件（固件内嵌用，build-firmware.ps1 调用）。
+fn cmd_emit_blob(args: &[String]) -> i32 {
+    let mut input: Option<PathBuf> = None;
+    let mut output: Option<PathBuf> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-o" | "--out" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("-o 后面要跟输出文件");
+                    return 2;
+                }
+                output = Some(PathBuf::from(&args[i]));
+            }
+            other => {
+                if input.is_none() {
+                    input = Some(PathBuf::from(other));
+                } else {
+                    eprintln!("多余的参数：{}", other);
+                    return 2;
+                }
+            }
+        }
+        i += 1;
+    }
+    let Some(input) = input else {
+        eprintln!("用法：micc --emit-blob <文件.jmb> [-o jm_blob.c]");
+        return 2;
+    };
+    let bytes = match std::fs::read(&input) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("读不了文件 {}：{}", input.display(), e);
+            return 2;
+        }
+    };
+    let out = output.unwrap_or_else(|| input.with_file_name("jm_blob.c"));
+    if let Err(e) = std::fs::write(&out, writer::emit_blob(&bytes)) {
+        eprintln!("写不了文件 {}：{}", out.display(), e);
+        return 2;
+    }
+    println!("已生成 {}（内嵌 {} 字节）", out.display(), bytes.len());
+    0
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {
@@ -340,6 +390,15 @@ fn main() {
     }
     if args[0] == "interface" {
         exit(pack::cmd_interface(&args[1..]));
+    }
+    if args[0] == "search" {
+        exit(pack_registry::cmd_search(&args[1..]));
+    }
+    if args[0] == "publish" {
+        exit(pack_registry::cmd_publish(&args[1..]));
+    }
+    if args[0] == "--emit-blob" {
+        exit(cmd_emit_blob(&args[1..]));
     }
 
     let mut input: Option<PathBuf> = None;

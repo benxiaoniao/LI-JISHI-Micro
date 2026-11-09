@@ -99,6 +99,110 @@ export function parseRunOutput(text: string): { error?: RunError; hit?: Site } {
   return result;
 }
 
+/* ---------------- 调试会话（jmrun --dbg --事件流） ---------------- */
+
+export interface BreakSpec {
+  file: string;
+  line: number;
+}
+
+export type PauseReason = '断点' | '单步' | '行级' | '步过';
+
+export interface DebugPause {
+  event: 'pause';
+  task: number;
+  func: string;
+  file: string;
+  line: number;
+  reason: PauseReason;
+}
+
+export interface DebugFinish {
+  event: 'finish';
+  code: number;
+  quit: boolean;
+}
+
+export type DebugEvent = DebugPause | DebugFinish;
+
+const PAUSE_REASONS: PauseReason[] = ['断点', '单步', '行级', '步过'];
+
+/**
+ * 解析 `jmrun --dbg --事件流` 的一行 NDJSON。
+ * 不是事件行（人读文本、空行、新引擎之外的行）一律返回 undefined，调用方按原样显示。
+ */
+export function parseDebugEvent(line: string): DebugEvent | undefined {
+  const text = line.replace(/^\uFEFF/, '').trim();
+  // 容忍行首的提示符（`(砾调试) `），从第一个 `{` 开始解析；不是 JSON 行就放弃。
+  const start = text.indexOf('{');
+  if (start < 0) {
+    return undefined;
+  }
+  let raw: Record<string, unknown>;
+  try {
+    raw = JSON.parse(text.slice(start)) as Record<string, unknown>;
+  } catch {
+    return undefined;
+  }
+  if (!raw || typeof raw !== 'object') {
+    return undefined;
+  }
+  if (raw['事件'] === '暂停') {
+    const task = Number(raw['任务']);
+    const lineNo = Number(raw['行']);
+    if (!Number.isFinite(task) || !Number.isFinite(lineNo)) {
+      return undefined;
+    }
+    const reason = String(raw['原因'] ?? '断点') as PauseReason;
+    return {
+      event: 'pause',
+      task,
+      func: String(raw['函数'] ?? '?'),
+      file: String(raw['文件'] ?? ''),
+      line: lineNo,
+      reason: PAUSE_REASONS.includes(reason) ? reason : '断点',
+    };
+  }
+  if (raw['事件'] === '结束') {
+    const code = Number(raw['码']);
+    return {
+      event: 'finish',
+      code: Number.isFinite(code) ? code : 0,
+      quit: raw['用户退出'] === true,
+    };
+  }
+  return undefined;
+}
+
+/** 组装 `--dbg --事件流` 的 argv（不含可执行文件路径，`.jmb` 放在最后）。 */
+export function buildDebugArgs(opts: {
+  jmb: string;
+  breaks?: BreakSpec[];
+  task?: number;
+  stream?: boolean;
+}): string[] {
+  const args: string[] = opts.stream === false ? ['--dbg'] : ['--dbg', '--事件流'];
+  for (const b of opts.breaks ?? []) {
+    args.push('--break', `${b.file}:${b.line}`);
+  }
+  if (opts.task !== undefined) {
+    args.push('--task', String(opts.task));
+  }
+  args.push(opts.jmb);
+  return args;
+}
+
+/** F9 的多断点集合：已有该行就删，否则加；返回排序后的新数组（不改入参）。 */
+export function toggleBreak(list: number[], line: number): number[] {
+  const set = new Set(list);
+  if (set.has(line)) {
+    set.delete(line);
+  } else {
+    set.add(line);
+  }
+  return [...set].sort((a, b) => a - b);
+}
+
 /** 在定义表里按名字找；同名的优先取靠前的定义。 */
 export function findSymbol(symbols: SymbolInfo[], name: string, kinds?: string[]): SymbolInfo | undefined {
   const allowed = kinds ? new Set(kinds) : undefined;

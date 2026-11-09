@@ -75,8 +75,38 @@
       },
       {
         "command": "li.toggleBreakpoint",
-        "title": "砾：行断点开/关（F9，单断点）",
+        "title": "砾：行断点开/关（F9，多断点）",
         "icon": "$(circle-filled)"
+      },
+      {
+        "command": "li.debug.continue",
+        "title": "砾：调试继续（F5）",
+        "icon": "$(play)"
+      },
+      {
+        "command": "li.debug.next",
+        "title": "砾：调试下一行（F10）",
+        "icon": "$(arrow-right)"
+      },
+      {
+        "command": "li.debug.step",
+        "title": "砾：调试单步指令",
+        "icon": "$(debug-step-into)"
+      },
+      {
+        "command": "li.debug.stepOut",
+        "title": "砾：调试步过（Ctrl+F10）",
+        "icon": "$(debug-step-over)"
+      },
+      {
+        "command": "li.debug.breaks",
+        "title": "砾：调试断点列表",
+        "icon": "$(list-unordered)"
+      },
+      {
+        "command": "li.debug.stop",
+        "title": "砾：停止调试（Shift+F5）",
+        "icon": "$(stop)"
       },
       {
         "command": "li.flash",
@@ -127,6 +157,21 @@
         "when": "editorLangId == li"
       },
       {
+        "command": "li.debug.next",
+        "key": "f10",
+        "when": "editorLangId == li"
+      },
+      {
+        "command": "li.debug.stepOut",
+        "key": "ctrl+f10",
+        "when": "editorLangId == li"
+      },
+      {
+        "command": "li.debug.stop",
+        "key": "shift+f5",
+        "when": "editorLangId == li"
+      },
+      {
         "command": "li.build",
         "key": "ctrl+shift+b",
         "when": "editorLangId == li"
@@ -164,6 +209,11 @@
           "type": "boolean",
           "default": true,
           "markdownDescription": "输入时（防抖 700 ms）调用 `micc` 刷新诊断。保存与打开文件时始终刷新。"
+        },
+        "li.debugPrompt": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "调试暂停时弹出动作选择（继续 / 下一行 / 步过 / 退出）。集成测试会关掉它。"
         },
         "li.langcardPath": {
           "type": "string",

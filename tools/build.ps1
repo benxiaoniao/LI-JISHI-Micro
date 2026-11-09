@@ -7,8 +7,17 @@ $root = Split-Path -Parent $PSScriptRoot
 Push-Location $root
 try {
     Write-Host "== 1/5 构建 micc（Rust）"
-    & cargo build --release --manifest-path "compiler\Cargo.toml"
-    if ($LASTEXITCODE -ne 0) { throw "micc 构建失败" }
+    # cargo 把进度（含 Finished）写到 stderr；Stop 会把任意 stderr 当成致命错误。
+    # 这里只看退出码：成功时不打印噪声，失败时才把 cargo 输出带出来。
+    $savedEap = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    $cargoLog = & cargo build --release --manifest-path "compiler\Cargo.toml" 2>&1
+    $cargoExit = $LASTEXITCODE
+    $ErrorActionPreference = $savedEap
+    if ($cargoExit -ne 0) {
+        $cargoLog | Out-Host
+        throw "micc 构建失败"
+    }
     $micc = "compiler\target\release\micc.exe"
 
     Write-Host "== 2/5 校验原生表头（与 compiler/src/native_spec.rs 同源）"

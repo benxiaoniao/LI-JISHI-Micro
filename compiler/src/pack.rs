@@ -749,8 +749,13 @@ fn read_optional(dir: &Path, name: &str) -> Option<Vec<u8>> {
 
 /// 源码归档（`pack --源码`）：只收 `砾包.toml` 与本包的 `.jsh`，供 `micc install` 解包后按目录哈希校验。
 /// 不含 `.jmb`、`清单.toml`、`.zip` 等生成物，保证归档内容与 `micc hash --目录` 的口径一致。
-fn pack_source_archive(opts: &Opts, tree: &Tree) -> Result<()> {
-    let m = &tree.root.manifest;
+///
+/// 这是归档格式的唯一实现，`pack --源码` 与 `micc publish` 都调它。返回归档里的 `.jsh` 名（已排序）。
+pub fn build_source_archive(
+    dir: &Path,
+    m: &pack_manifest::Manifest,
+    out_path: &Path,
+) -> Result<Vec<String>> {
     if m.product.is_some() {
         return Err(usage_err(format!(
             "「{}」是二进制包，没有源码可归档；用 pack --归档 分发产物",
@@ -758,8 +763,8 @@ fn pack_source_archive(opts: &Opts, tree: &Tree) -> Result<()> {
         )));
     }
     let mut names: Vec<String> = Vec::new();
-    let rd = std::fs::read_dir(&opts.dir)
-        .map_err(|e| usage_err(format!("读不了目录 {}：{}", opts.dir.display(), e)))?;
+    let rd = std::fs::read_dir(dir)
+        .map_err(|e| usage_err(format!("读不了目录 {}：{}", dir.display(), e)))?;
     for ent in rd.flatten() {
         let p = ent.path();
         if p.is_file() && p.extension().map(|x| x == "jsh").unwrap_or(false) {
@@ -776,14 +781,14 @@ fn pack_source_archive(opts: &Opts, tree: &Tree) -> Result<()> {
         )));
     }
 
-    let pkg_toml = std::fs::read(opts.dir.join(MANIFEST_NAME_LOCAL))
+    let pkg_toml = std::fs::read(dir.join(MANIFEST_NAME_LOCAL))
         .map_err(|e| usage_err(format!("读不了 {}：{}", MANIFEST_NAME_LOCAL, e)))?;
     let mut entries = vec![zip::Entry {
         name: MANIFEST_NAME_LOCAL.to_string(),
         data: pkg_toml,
     }];
     for n in &names {
-        let data = std::fs::read(opts.dir.join(n))
+        let data = std::fs::read(dir.join(n))
             .map_err(|e| usage_err(format!("读不了 {}：{}", n, e)))?;
         entries.push(zip::Entry {
             name: n.clone(),
@@ -791,6 +796,19 @@ fn pack_source_archive(opts: &Opts, tree: &Tree) -> Result<()> {
         });
     }
 
+    if let Some(parent) = out_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| usage_err(format!("建不了目录 {}：{}", parent.display(), e)))?;
+        }
+    }
+    std::fs::write(out_path, zip::write(&entries))
+        .map_err(|e| usage_err(format!("写不了 {}：{}", out_path.display(), e)))?;
+    Ok(names)
+}
+
+fn pack_source_archive(opts: &Opts, tree: &Tree) -> Result<()> {
+    let m = &tree.root.manifest;
     let out_path = opts.out.clone().unwrap_or_else(|| {
         opts.dir.join(format!(
             "{}-{}-源码.zip",
@@ -798,14 +816,7 @@ fn pack_source_archive(opts: &Opts, tree: &Tree) -> Result<()> {
             ver_text(&m.version)
         ))
     });
-    if let Some(parent) = out_path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| usage_err(format!("建不了目录 {}：{}", parent.display(), e)))?;
-        }
-    }
-    std::fs::write(&out_path, zip::write(&entries))
-        .map_err(|e| usage_err(format!("写不了 {}：{}", out_path.display(), e)))?;
+    let names = build_source_archive(&opts.dir, m, &out_path)?;
     println!(
         "源码归档完成：{} {} → {}（{} + {} 个 .jsh）",
         m.name,

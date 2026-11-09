@@ -53,22 +53,9 @@ try {
     if ($LASTEXITCODE -ne 0) { throw ("编译失败：" + $Example + ".jsh") }
 
     Write-Host "== 4/6 生成内嵌字节数组"
-    $bytes = [System.IO.File]::ReadAllBytes((Join-Path $root "$out\app.jmb"))
-    $sb = New-Object System.Text.StringBuilder
-    [void]$sb.Append("#include <stdint.h>`n")
-    [void]$sb.Append("const unsigned char jm_app_jmb[] = {`n")
-    for ($i = 0; $i -lt $bytes.Length; $i++) {
-        if ($i % 12 -eq 0) { [void]$sb.Append("    ") }
-        [void]$sb.Append(("0x{0:X2}" -f $bytes[$i]))
-        if ($i -lt $bytes.Length - 1) { [void]$sb.Append(",") }
-        if ($i % 12 -eq 11) { [void]$sb.Append("`n") }
-    }
-    [void]$sb.Append("`n};`n")
-    [void]$sb.Append("const uint32_t jm_app_jmb_len = $($bytes.Length)u;`n")
-    [System.IO.File]::WriteAllText(
-        (Join-Path $root "$out\jm_blob.c"),
-        $sb.ToString(),
-        (New-Object System.Text.UTF8Encoding($false)))
+    # 格式的唯一来源是 `micc --emit-blob`；这里不再内联拼 C 数组，避免两份实现漂移。
+    & $micc --emit-blob "$out\app.jmb" -o "$out\jm_blob.c"
+    if ($LASTEXITCODE -ne 0) { throw "生成 jm_blob.c 失败" }
 
     Write-Host "== 5/6 交叉编译并链接"
     $src = @(

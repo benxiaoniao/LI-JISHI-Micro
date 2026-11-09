@@ -143,15 +143,38 @@ exports.run = async function run() {
     assert(runDiag.range.start.line === 2, '实际行 ' + (runDiag.range.start.line + 1));
   });
 
-  await check('F9 + F5：断点命中并停在第 32 行', async () => {
+  await check('F9 + F5：断点命中并停在第 32 行（完整调试）', async () => {
+    await vscode.workspace
+      .getConfiguration('li')
+      .update('debugPrompt', false, vscode.ConfigurationTarget.Workspace);
     const document = await open('examples/类.jsh');
     const editor = vscode.window.activeTextEditor;
     editor.selection = new vscode.Selection(31, 0, 31, 0);
     await vscode.commands.executeCommand('li.toggleBreakpoint');
     await vscode.commands.executeCommand('li.run');
-    const active = vscode.window.activeTextEditor;
-    assert(active.document.uri.fsPath.endsWith('类.jsh'), '命中的文件不对');
-    assert(active.selection.active.line === 31, '停在第 ' + (active.selection.active.line + 1) + ' 行');
+    // 调试是异步会话：等首次暂停把编辑器定位到断点行（最多 8 秒）
+    const deadline = Date.now() + 8000;
+    let hit = false;
+    while (Date.now() < deadline) {
+      const active = vscode.window.activeTextEditor;
+      if (active && active.document.uri.fsPath.endsWith('类.jsh') &&
+          active.selection.active.line === 31) {
+        hit = true;
+        break;
+      }
+      await new Promise(r => setTimeout(r, 100));
+    }
+    assert(hit, '没有停在类.jsh 第 32 行');
+  });
+
+  await check('调试会话：li.debug.stop 停止（Shift+F5 语义）', async () => {
+    await vscode.commands.executeCommand('li.debug.stop');
+  });
+
+  await check('集成测试收尾：恢复 li.debugPrompt 配置', async () => {
+    await vscode.workspace
+      .getConfiguration('li')
+      .update('debugPrompt', undefined, vscode.ConfigurationTarget.Workspace);
   });
 
   await check('F9 再按一次可清除断点', async () => {

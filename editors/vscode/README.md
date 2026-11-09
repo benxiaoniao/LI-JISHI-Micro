@@ -90,18 +90,26 @@ powershell -ExecutionPolicy Bypass -File tools\build.ps1 -SkipTests
 - 定义表按文件 `mtime` 缓存，保存后自动失效
 - 找不到 `micc` 时静默不跳转，不影响编辑
 
-### 2.4 运行与单断点
+### 2.4 运行与调试
 
 | 操作 | 实际调用 |
 |---|---|
-| `F5` / 「砾：运行当前文件」 | `micc <当前文件> -o <临时.jmb>` → `jmrun <临时.jmb>` |
-| `F9` / 「砾：行断点开/关」 | 在当前行设置或取消**单断点**（每个文档最多一个，整行淡红底 + 左侧红线） |
+| `F5` / 「砾：运行当前文件」 | 无断点：`micc <当前文件> -o <临时.jmb>` → `jmrun <临时.jmb>`；有断点：`jmrun --dbg --事件流 --break ... <临时.jmb>` |
+| `F9` / 「砾：行断点开/关」 | 在当前行切换断点；**每个文档可设多个（合计 ≤8）**，整行淡红底 + 左侧红线 |
+| `F10` / 「调试下一行」 | 暂停时发送 `n`（行级单步） |
+| `Ctrl+F10` / 「调试步过」 | 暂停时发送 `o`（步过，不进入被调函数） |
+| `F5`（调试会话中） | 发送 `c`（继续到下一个断点） |
+| `Shift+F5` / 「停止调试」 | 结束当前 `jmrun` 调试会话 |
 
 - 运行前自动保存当前文件；`micc` 失败时直接走编译诊断，不会调 `jmrun`
 - 输出流式进「输出」面板的 **砾** 频道；运行期错误同时进**问题**面板
-- 有断点时，`F5` 会附加 `--break <文件>:<行>`；命中后自动打开该文件并定位到停下的行，输出里也会打印 `断点：文件:行`
+- 有断点时进入调试会话：`jmrun --dbg --事件流` 在 stderr 上发 NDJSON 事件，扩展解析后
+  自动打开暂停位置并高亮该行；暂停时默认弹出动作选择（继续 / 下一行 / 步过 / 单步指令 /
+  断点列表 / 退出），可用设置 `li.debugPrompt: false` 关掉弹窗、只用快捷键
+- 调试会话支持 M1–M3 的全部能力：继续、单步指令、行级单步、步过、多断点、`--task` 过滤
+  （`--task` 目前需在命令行使用；编辑器侧未暴露入口）、条件断点（在命令行的 `--break`
+  规格里写 `if ...`，编辑器 F9 只设位置断点）
 - 没有调试段（`--strip-debug`、旧文件、损坏段）时，错误只按错误码定位到当前文件首行，不弹错
-- 这是**最小验证**：不做变量查看、多断点、继续/单步、调用栈
 
 ### 2.5 命令
 
@@ -111,8 +119,14 @@ powershell -ExecutionPolicy Bypass -File tools\build.ps1 -SkipTests
 | 砾：构建固件（STM32） | `li.buildFirmware` | `Ctrl+Alt+B`（仅 `.jsh`） | `tools\build-firmware.ps1 -Example <示例名>` |
 | 砾：烧录固件（需确认） | `li.flash` | — | `tools\flash-firmware.ps1 -Apply` |
 | 砾：诊断当前文件 | `li.check` | — | `micc <当前文件> -o <临时.jmb>` |
-| 砾：运行当前文件 | `li.run` | `F5`（仅 `.jsh`） | `micc` → `jmrun`（有断点时带 `--break`） |
-| 砾：行断点开/关（单断点） | `li.toggleBreakpoint` | `F9`（仅 `.jsh`） | 编辑器内状态，不调外部命令 |
+| 砾：运行当前文件 | `li.run` | `F5`（仅 `.jsh`） | `micc` → `jmrun`；有断点时 `--dbg --事件流` |
+| 砾：行断点开/关（多断点） | `li.toggleBreakpoint` | `F9`（仅 `.jsh`） | 编辑器内状态，不调外部命令 |
+| 砾：调试下一行 | `li.debug.next` | `F10`（仅 `.jsh`） | 向调试会话 stdin 写 `n` |
+| 砾：调试步过 | `li.debug.stepOut` | `Ctrl+F10`（仅 `.jsh`） | 写 `o` |
+| 砾：调试继续 | `li.debug.continue` | — | 写 `c` |
+| 砾：调试单步指令 | `li.debug.step` | — | 写 `s` |
+| 砾：调试断点列表 | `li.debug.breaks` | — | 写 `bl` |
+| 砾：停止调试 | `li.debug.stop` | `Shift+F5`（仅 `.jsh`） | 结束 `jmrun` 子进程 |
 | 砾：重新加载语言卡补全 | `li.reloadLangcard` | — | 重新读取 `spec/langcard.json` |
 | 砾：取消当前任务 | `li.cancel` | 点状态栏 | 结束当前 PowerShell 子进程 |
 

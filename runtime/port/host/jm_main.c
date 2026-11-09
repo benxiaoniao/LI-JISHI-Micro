@@ -211,6 +211,10 @@ static int g_nlines = 0;
 
 static int g_dbg_on = 0;
 static int g_mode = 0;      /* 0=继续到断点 1=单步指令 2=行级 3=步过 */
+/* 1 = 每次暂停向 stderr 追加一行 NDJSON（编辑器读，人读文本照旧保留）。 */
+static int g_stream = 0;
+/* 本次暂停的原因：0=断点 1=单步指令 2=行级 3=步过。 */
+static int g_pause_reason = 0;
 static int g_step_task = -1;/* 被单步的任务（暂停时的当前任务） */
 static int g_step_fp = 0;   /* 起始帧深（0=最外层） */
 static int g_step_file = -1;
@@ -605,6 +609,7 @@ int jm_host_dbg_tick(uint8_t code, uint16_t ip, uint8_t fp) {
                     continue;
                 }
             }
+            g_pause_reason = 0;
             g_last_code = (int)code;
             g_last_ip = (int)ip;
             return 1;
@@ -612,6 +617,7 @@ int jm_host_dbg_tick(uint8_t code, uint16_t ip, uint8_t fp) {
     }
 
     if (g_mode == 1 && task_ok && task == g_step_task) {
+        g_pause_reason = 1;
         g_mode = 0;
         g_last_code = (int)code;
         g_last_ip = (int)ip;
@@ -624,6 +630,7 @@ int jm_host_dbg_tick(uint8_t code, uint16_t ip, uint8_t fp) {
             int changed = file != g_step_file || line != g_step_line;
             int depth_ok = g_mode == 2 || (int)fp <= g_step_fp;
             if (changed && depth_ok) {
+                g_pause_reason = g_mode;
                 g_mode = 0;
                 g_last_code = (int)code;
                 g_last_ip = (int)ip;
@@ -638,6 +645,84 @@ static int cur_frames(JmDbgFrame *fs, int max) {
     return jm_dbg_frames(jm_dbg_current_task(), fs, max);
 }
 
+/* ---- 事件流（NDJSON，写给编辑器；人读文本照旧留在 stderr） ---- */
+
+/** JSON 字符串转义：只处理会破坏单行 JSON 的字符。 */
+static void json_escape(const char *s, char *out, size_t cap) {
+    size_t o = 0;
+    for (; s && *s && o + 2 < cap; s++) {
+        unsigned char c = (unsigned char)*s;
+        if (c == '"' || c == '\\') {
+            out[o++] = '\\';
+            out[o++] = (char)c;
+        } else if (c == '\n') {
+            out[o++] = '\\';
+            out[o++] = 'n';
+        } else if (c == '\r') {
+            out[o++] = '\\';
+            out[o++] = 'r';
+        } else if (c == '\t') {
+            out[o++] = '\\';
+            out[o++] = 't';
+        } else if (c < 0x20) {
+            out[o++] = ' ';
+        } else {
+            out[o++] = (char)c;
+        }
+    }
+    out[o] = '\0';
+}
+
+static const char *pause_reason_text(void) {
+    switch (g_pause_reason) {
+    case 1:
+        return "单步";
+    case 2:
+        return "行级";
+    case 3:
+        return "步过";
+    default:
+        return "断点";
+    }
+}
+
+static void stream_pause(int task, const char *func, const char *file, int line, int has_line) {
+    if (!g_stream) {
+        return;
+    }
+    char fn[256];
+    char fl[640];
+    json_escape(func ? func : "?", fn, sizeof fn);
+    json_escape(file ? file : "", fl, sizeof fl);
+    if (has_line) {
+        fprintf(stderr,
+                "{\"事件\":\"暂停\",\"任务\":%d,\"函数\":\"%s\",\"文件\":\"%s\",\"行\":%d,"
+                "\"原因\":\"%s\"}\n",
+                task, fn, fl, line, pause_reason_text());
+    } else {
+        fprintf(stderr,
+                "{\"事件\":\"暂停\",\"任务\":%d,\"函数\":\"%s\",\"文件\":\"\",\"行\":0,"
+                "\"原因\":\"%s\"}\n",
+                task, fn, pause_reason_text());
+    }
+    fflush(stderr);
+}
+
+/** 程序结束（正常 / 故障 / 用户退出）统一发一条结束事件。 */
+static void stream_finish(int code, int quit) {
+    if (!g_stream) {
+        return;
+    }
+    /* REPL 的提示符 `(砾调试) ` 不换行，先补一个换行让事件独占一行。 */
+    fputc('\n', stderr);
+    if (quit) {
+        fprintf(stderr, "{\"事件\":\"结束\",\"码\":%d,\"用户退出\":true}\n", code);
+    } else {
+        fprintf(stderr, "{\"事件\":\"结束\",\"码\":%d}\n", code);
+    }
+    fflush(stderr);
+}
+
 static void dbg_where(void) {
     JmDbgFrame fs[16];
     int n = cur_frames(fs, 16);
@@ -649,9 +734,22 @@ static void dbg_where(void) {
     char loc[512];
     if (lookup_line((int)fs[0].code, (int)fs[0].ip, loc, sizeof loc)) {
         fprintf(stderr, "暂停：任务 %d 「%s」 %s\n", jm_dbg_current_task(), name, loc);
+        char file[640] = "";
+        int line = 0;
+        const char *colon = strrchr(loc, ':');
+        if (colon && colon != loc) {
+            size_t len = (size_t)(colon - loc);
+            if (len < sizeof file) {
+                memcpy(file, loc, len);
+                file[len] = '\0';
+                line = atoi(colon + 1);
+            }
+        }
+        stream_pause(jm_dbg_current_task(), name, file, line, line > 0);
     } else {
         fprintf(stderr, "暂停：任务 %d 「%s」 代码 %u 偏移 %u\n", jm_dbg_current_task(), name,
                 (unsigned)fs[0].code, (unsigned)fs[0].ip);
+        stream_pause(jm_dbg_current_task(), name, "", 0, 0);
     }
 }
 
@@ -878,6 +976,7 @@ int main(int argc, char **argv) {
     int nbrks = 0;
     int task = -1;
     int dbg = 0;
+    int stream = 0;
     const char *bpfile = NULL;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--break") == 0 && i + 1 < argc) {
@@ -899,6 +998,8 @@ int main(int argc, char **argv) {
             }
         } else if (strcmp(argv[i], "--dbg") == 0) {
             dbg = 1;
+        } else if (strcmp(u8arg(argv[i]), "--事件流") == 0 || strcmp(argv[i], "--ndjson") == 0) {
+            stream = 1;
         } else if (!path) {
             path = argv[i];
         } else {
@@ -916,6 +1017,10 @@ int main(int argc, char **argv) {
     }
     if (task >= 0 && !dbg) {
         fprintf(stderr, "--task 只能与 --dbg 一起用\n");
+        return 2;
+    }
+    if (stream && !dbg) {
+        fprintf(stderr, "--事件流 只能与 --dbg 一起用\n");
         return 2;
     }
 #if !(defined(JM_HOST_DEBUG) && JM_DEBUG_HOOKS)
@@ -1044,6 +1149,7 @@ int main(int argc, char **argv) {
 #if defined(JM_HOST_DEBUG) && JM_DEBUG_HOOKS
     if (dbg) {
         g_dbg_on = 1;
+        g_stream = stream;
         g_task_filter = task;
         load_line_table();
         if (g_nbps == 0 && n >= 12) {
@@ -1073,6 +1179,7 @@ int main(int argc, char **argv) {
         int d = dbg_repl();
         if (d == 1) {
             /* 用户在暂停点退出：程序未跑完，按正常退出处理 */
+            stream_finish(0, 1);
             free(buf);
             return 0;
         }
@@ -1091,8 +1198,14 @@ int main(int argc, char **argv) {
         }
 #endif
         free(buf);
+#if defined(JM_HOST_DEBUG) && JM_DEBUG_HOOKS
+        stream_finish(1, 0);
+#endif
         return 1;
     }
+#if defined(JM_HOST_DEBUG) && JM_DEBUG_HOOKS
+    stream_finish(0, 0);
+#endif
     free(buf);
     return 0;
 }

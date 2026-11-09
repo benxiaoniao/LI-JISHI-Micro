@@ -925,6 +925,109 @@ try {
     $code = $LASTEXITCODE
     Check-Error "本地归档损坏：install 报 E135 解包失败" @{ code = $code; out = $o } "E135" "解包"
 
+    # ---------- 22. P2/N7：publish 写目录式仓库 + 静态索引 ----------
+    $p2Root = Join-Path $sandbox "P2发布"
+    $p2lib = Join-Path $p2Root "源包"
+    $toml = @"
+[包]
+名字 = "工具"
+版本 = "1.2.0"
+
+[导出]
+名字 = ["版本"]
+"@
+    New-Pkg $p2lib $toml @"
+函数 版本()：
+    返回 "1.2.0"
+"@
+    $p2repo = Join-Path $p2Root "仓库"
+    $o = (& $micc publish --目录 $p2lib --仓库 $p2repo 2>&1 | Out-String)
+    $code = $LASTEXITCODE
+    $p2idx = Join-Path $p2repo "砾索引.toml"
+    $p2zip = Join-Path $p2repo "工具\工具-1.2.0.zip"
+    $idxText = if (Test-Path $p2idx) { [IO.File]::ReadAllText($p2idx, [Text.Encoding]::UTF8) } else { "" }
+    $hPub = Get-PkgHash $p2lib
+    Check "publish：产出归档与索引条目" (($code -eq 0) -and (Test-Path $p2zip) -and $idxText.Contains('"工具@1.2.0"') -and $idxText.Contains($hPub) -and $idxText.Contains('来源 = "工具/工具-1.2.0.zip"')) $o
+
+    $o = (& $micc search 工具 --索引 $p2idx 2>&1 | Out-String)
+    $code = $LASTEXITCODE
+    Check "search：按名字命中并打印版本/来源/校验" (($code -eq 0) -and $o.Contains("工具") -and $o.Contains("1.2.0") -and $o.Contains("工具/工具-1.2.0.zip") -and $o.Contains("fnv1a64:")) $o
+
+    $o = (& $micc search 查无此包 --索引 $p2idx 2>&1 | Out-String)
+    $code = $LASTEXITCODE
+    Check "search：无匹配退出码 1" (($code -eq 1) -and $o.Contains("没有匹配的包")) ("退出码 " + $code + "：`n" + $o)
+
+    # publish 的条目能被现有 install 直接消费
+    $p2app = Join-Path $p2Root "引用方"
+    $toml = @"
+[包]
+名字 = "引用方"
+版本 = "1.0.0"
+
+[依赖]
+工具 = { 版本 = "^1.0.0" }
+"@
+    New-Pkg $p2app $toml '打印(工具.版本())'
+    $io = (& $micc install --目录 $p2app --索引 $p2idx 2>&1 | Out-String)
+    $r = Invoke-Pack $p2app -Offline
+    $out = Run-Jmb (Join-Path $p2app "引用方.jmb")
+    Check "publish 的条目：install --索引 后离线打包运行" (($r.code -eq 0) -and ($out -eq "1.2.0")) ($io + $r.out + "`n实际输出：" + $out)
+
+    # 同版本重复发布：幂等（归档覆盖，索引仍 1 条）
+    $o = (& $micc publish --目录 $p2lib --仓库 $p2repo 2>&1 | Out-String)
+    $code = $LASTEXITCODE
+    $idxText = [IO.File]::ReadAllText($p2idx, [Text.Encoding]::UTF8)
+    $n = ($idxText -split "`n" | Where-Object { $_ -match '^\s*"' }).Count
+    Check "publish：同版本重复发布幂等（索引仍 1 条）" (($code -eq 0) -and ($n -eq 1)) ("条目数 " + $n + "：`n" + $o)
+
+    # 第二个版本：索引累计 2 条，检索按版本从高到低
+    $p2lib2 = Join-Path $p2Root "源包14"
+    $toml = @"
+[包]
+名字 = "工具"
+版本 = "1.4.0"
+
+[导出]
+名字 = ["版本"]
+"@
+    New-Pkg $p2lib2 $toml @"
+函数 版本()：
+    返回 "1.4.0"
+"@
+    $o = (& $micc publish --目录 $p2lib2 --仓库 $p2repo 2>&1 | Out-String)
+    $o2 = (& $micc search 工具 --索引 $p2idx 2>&1 | Out-String)
+    $idxText = [IO.File]::ReadAllText($p2idx, [Text.Encoding]::UTF8)
+    $n = ($idxText -split "`n" | Where-Object { $_ -match '^\s*"' }).Count
+    $i14 = $o2.IndexOf("1.4.0")
+    $i12 = $o2.IndexOf("1.2.0")
+    Check "publish：第二版本累加，检索高版本在前" (($n -eq 2) -and $o2.Contains("命中 2 条") -and ($i14 -ge 0) -and ($i14 -lt $i12)) ("条目数 " + $n + "：`n" + $o + $o2)
+
+    # 二进制包不能进索引（install 消费不了）
+    $p2bin = Join-Path $p2Root "二进制包"
+    $toml = @"
+[包]
+名字 = "二进制包"
+版本 = "1.0.0"
+产物 = "二进制包.jmb"
+"@
+    New-Pkg $p2bin $toml '打印("x")'
+    $o = (& $micc publish --目录 $p2bin --仓库 $p2repo 2>&1 | Out-String)
+    $code = $LASTEXITCODE
+    Check-Error "publish：二进制包明确拒绝（E138）" @{ code = $code; out = $o } "E138" "二进制包"
+
+    # HTTP 索引只读：发布必须拒绝
+    $o = (& $micc publish --目录 $p2lib --索引 "https://example.com/li/砾索引.toml" 2>&1 | Out-String)
+    $code = $LASTEXITCODE
+    Check-Error "publish：HTTP 索引拒绝（E138）" @{ code = $code; out = $o } "E138" "HTTP"
+
+    # 只给 --索引（不给 --仓库）：仓库取索引所在目录
+    $p2repo2 = Join-Path $p2Root "仓库2"
+    New-Item -ItemType Directory -Path $p2repo2 -Force | Out-Null
+    $p2idx2 = Join-Path $p2repo2 "砾索引.toml"
+    $o = (& $micc publish --目录 $p2lib --索引 $p2idx2 2>&1 | Out-String)
+    $code = $LASTEXITCODE
+    Check "publish：只给 --索引 时仓库取索引所在目录" (($code -eq 0) -and (Test-Path (Join-Path $p2repo2 "工具\工具-1.2.0.zip"))) $o
+
     Write-Host ("包用例：共 " + $script:total + " 个，失败 " + $script:fail + " 个，跳过 " + $script:skip + " 个")
     if ($script:fail -gt 0) { exit 1 }
     exit 0
