@@ -17,8 +17,16 @@
 
 $ToolchainDir  = Join-Path $PSScriptRoot "toolchains"
 $ToolchainLock = Join-Path $ToolchainDir "toolchain.lock.json"
+# 可执行文件后缀：Windows 是 .exe，其它平台为空（Dockerfile 在 Linux 上跑同一套脚本）
+$ExeSuffix = if ($env:OS -eq "Windows_NT") { ".exe" } else { "" }
 # 外部缓存目录：必须放在纯 ASCII 路径下（MinGW 版 gcc/ld 用 ANSI 文件 API，中文目录会找不到 crt/lib）
-$ToolchainCache = if ($env:JM_TOOLCHAIN_ROOT) { $env:JM_TOOLCHAIN_ROOT } else { Join-Path $env:LOCALAPPDATA "jishi\toolchains" }
+$ToolchainCache = if ($env:JM_TOOLCHAIN_ROOT) {
+    $env:JM_TOOLCHAIN_ROOT
+} elseif ($env:LOCALAPPDATA) {
+    Join-Path $env:LOCALAPPDATA "jishi/toolchains"
+} else {
+    Join-Path (Join-Path $HOME ".cache") "jishi/toolchains"
+}
 $script:ToolchainIssues = @()
 $script:ToolchainInfo   = @()
 
@@ -30,18 +38,19 @@ function Read-ToolchainLock {
 function Find-Tool {
     param(
         [string]$EnvName,
-        [string]$ExeName,
+        [string]$BaseName,
         [string]$BundleName
     )
 
+    $exe = $BaseName + $ExeSuffix
     if ($BundleName) {
-        $candidate = Join-Path $ToolchainDir (Join-Path $BundleName ("bin\" + $ExeName))
+        $candidate = Join-Path $ToolchainDir (Join-Path (Join-Path $BundleName "bin") $exe)
         if (Test-Path $candidate) {
             return @{ Path = $candidate; Origin = ("包内 tools/toolchains/" + $BundleName) }
         }
-        $cached = Join-Path $ToolchainCache (Join-Path $BundleName ("bin\" + $ExeName))
+        $cached = Join-Path $ToolchainCache (Join-Path (Join-Path $BundleName "bin") $exe)
         if (Test-Path $cached) {
-            return @{ Path = $cached; Origin = ("缓存 " + $ToolchainCache + "\" + $BundleName) }
+            return @{ Path = $cached; Origin = ("缓存 " + $ToolchainCache + "/" + $BundleName) }
         }
     }
 
@@ -50,7 +59,7 @@ function Find-Tool {
         return @{ Path = $envValue; Origin = ("环境变量 " + $EnvName) }
     }
 
-    $cmd = Get-Command $ExeName -ErrorAction SilentlyContinue
+    $cmd = Get-Command $exe -ErrorAction SilentlyContinue
     if ($cmd) {
         return @{ Path = $cmd.Source; Origin = "PATH" }
     }
@@ -101,9 +110,9 @@ if ($lock) {
     $hostLock = $lock.toolchains.$hostName
 }
 
-$hostTool     = Find-Tool "JM_HOST_GCC" "gcc.exe" $hostName
-$armTool      = Find-Tool "JM_ARM_GCC"  "arm-none-eabi-gcc.exe" $armName
-$armSizeTool  = Find-Tool "JM_ARM_SIZE" "arm-none-eabi-size.exe" $armName
+$hostTool     = Find-Tool "JM_HOST_GCC" "gcc" $hostName
+$armTool      = Find-Tool "JM_ARM_GCC"  "arm-none-eabi-gcc" $armName
+$armSizeTool  = Find-Tool "JM_ARM_SIZE" "arm-none-eabi-size" $armName
 
 $HostGcc = if ($hostTool) { $hostTool.Path } else { $null }
 $ArmGcc  = if ($armTool)  { $armTool.Path }  else { $null }
@@ -130,10 +139,10 @@ if (-not $env:JM_SKIP_TOOLCHAIN_CHECK) {
 }
 
 if (-not $HostGcc) {
-    $script:ToolchainIssues += ("找不到主机 C 编译器 gcc：放到 " + $ToolchainCache + "\host-gcc\bin，或设置 JM_HOST_GCC")
+    $script:ToolchainIssues += ("找不到主机 C 编译器 gcc：放到 " + $ToolchainCache + "/host-gcc/bin，或设置 JM_HOST_GCC")
 }
 if (-not $ArmGcc) {
-    $script:ToolchainIssues += ("找不到 arm-none-eabi-gcc：放到 " + $ToolchainCache + "\arm-none-eabi\bin，或设置 JM_ARM_GCC")
+    $script:ToolchainIssues += ("找不到 arm-none-eabi-gcc：放到 " + $ToolchainCache + "/arm-none-eabi/bin，或设置 JM_ARM_GCC")
 }
 
 # 被其它脚本引用时只给变量，不输出；直接运行时打印自检报告

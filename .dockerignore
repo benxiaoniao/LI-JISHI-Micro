@@ -1,0 +1,12 @@
+# 构建上下文只需要源码：产物、本地工具链与编辑器依赖不进镜像
+build/
+compiler/target/
+.git/
+.vscode/
+.screenshots/
+editors/vscode/node_modules/
+editors/vscode/out/
+editors/vscode/dist/
+tools/toolchains/arm-none-eabi/
+tools/toolchains/host-gcc/
+*.jmb
