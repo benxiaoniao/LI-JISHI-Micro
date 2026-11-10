@@ -132,6 +132,46 @@ try {
         $fail++
     }
 
+    # ---------- N11：枚举跨包隔离（依赖包枚举改名，根包不可直接引用） ----------
+    $pkgRoot = Join-Path $root "build\n11pkg"
+    foreach ($d in @("甲", "乙", "应用", "坏应用")) {
+        New-Item -ItemType Directory -Force -Path (Join-Path $pkgRoot $d) | Out-Null
+    }
+    [IO.File]::WriteAllText((Join-Path $pkgRoot "甲\砾包.toml"), "[包]`n名字 = ""甲""`n版本 = ""1.0.0""`n入口 = ""主.jsh""`n`n[导出]`n名字 = [""颜色名""]`n", $enc)
+    [IO.File]::WriteAllText((Join-Path $pkgRoot "甲\主.jsh"), "枚举 颜色:`n    红`n    绿`n`n函数 颜色名(k):`n    匹配 k:`n        情形 颜色.绿:`n            返回 ""绿""`n        情形 其他:`n            返回 ""其他""`n", $enc)
+    [IO.File]::WriteAllText((Join-Path $pkgRoot "乙\砾包.toml"), "[包]`n名字 = ""乙""`n版本 = ""1.0.0""`n入口 = ""主.jsh""`n", $enc)
+    [IO.File]::WriteAllText((Join-Path $pkgRoot "乙\主.jsh"), "枚举 颜色:`n    绿`n    蓝`n", $enc)
+    [IO.File]::WriteAllText((Join-Path $pkgRoot "应用\砾包.toml"), "[包]`n名字 = ""应用""`n版本 = ""1.0.0""`n入口 = ""主.jsh""`n`n[依赖]`n甲 = { 路径 = ""../甲"", 版本 = ""^1.0.0"" }`n乙 = { 路径 = ""../乙"", 版本 = ""^1.0.0"" }`n", $enc)
+    [IO.File]::WriteAllText((Join-Path $pkgRoot "应用\主.jsh"), "枚举 颜色:`n    蓝`n`n打印(颜色.蓝)`n打印(甲.颜色名(1))`n", $enc)
+    [IO.File]::WriteAllText((Join-Path $pkgRoot "坏应用\砾包.toml"), "[包]`n名字 = ""坏应用""`n版本 = ""1.0.0""`n入口 = ""主.jsh""`n`n[依赖]`n甲 = { 路径 = ""../甲"", 版本 = ""^1.0.0"" }`n", $enc)
+    [IO.File]::WriteAllText((Join-Path $pkgRoot "坏应用\主.jsh"), "打印(颜色.红)`n", $enc)
+
+    & $micc pack --目录 "build\n11pkg\应用" -o "build\n11pkg\应用.jmb" | Out-Null
+    $packCode = $LASTEXITCODE
+    $pkgOut = ""
+    if ($packCode -eq 0) {
+        $pkgOut = ((& $jmrun "build\n11pkg\应用.jmb" 2>&1 | Out-String).TrimEnd() -replace "`r`n", "`n")
+    }
+    $total++
+    if (($packCode -eq 0) -and ($pkgOut -eq "0`n绿")) {
+        Write-Host "[通过] 跨包同名枚举隔离：依赖包内匹配仍正确"
+    } else {
+        Write-Host "[不通过] 跨包同名枚举隔离：依赖包内匹配仍正确"
+        Write-Host $pkgOut
+        $fail++
+    }
+
+    $o = (& $micc pack --目录 "build\n11pkg\坏应用" -o "build\n11pkg\坏应用.jmb" 2>&1 | Out-String)
+    $code = $LASTEXITCODE
+    $total++
+    if (($code -ne 0) -and $o.Contains("E128")) {
+        Write-Host "[通过] 根包直接引用依赖包枚举 报 E128"
+    } else {
+        Write-Host "[不通过] 根包直接引用依赖包枚举 报 E128"
+        Write-Host $o
+        $fail++
+    }
+
     Write-Host ("共 " + $total + " 个用例，失败 " + $fail + " 个")
     if ($fail -gt 0) { exit 1 }
     exit 0

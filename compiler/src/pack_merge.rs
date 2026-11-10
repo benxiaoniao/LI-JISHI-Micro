@@ -13,6 +13,8 @@ use std::collections::{HashMap, HashSet};
 pub struct DepView {
     pub exports: Option<HashSet<String>>,
     pub classes: HashSet<String>,
+    /// 依赖包定义的枚举名（包内私有，跨包不可见）。
+    pub enums: HashSet<String>,
 }
 
 pub struct Unit {
@@ -21,6 +23,7 @@ pub struct Unit {
     pub stmts: Vec<Stmt>,
     pub globals: HashSet<String>,
     pub classes: HashSet<String>,
+    pub enums: HashSet<String>,
     pub exports: Option<HashSet<String>>,
     /// 入口源文件（调试表的显示名）。
     pub file: String,
@@ -36,13 +39,15 @@ impl Unit {
     ) -> Unit {
         let mut globals = HashSet::new();
         let mut classes = HashSet::new();
-        collect_top(&stmts, &mut globals, &mut classes);
+        let mut enums = HashSet::new();
+        collect_top(&stmts, &mut globals, &mut classes, &mut enums);
         Unit {
             name,
             is_root,
             stmts,
             globals,
             classes,
+            enums,
             exports: exports.map(|v| v.into_iter().collect()),
             file,
         }
@@ -52,11 +57,17 @@ impl Unit {
         DepView {
             exports: self.exports.clone(),
             classes: self.classes.clone(),
+            enums: self.enums.clone(),
         }
     }
 }
 
-fn collect_top(stmts: &[Stmt], globals: &mut HashSet<String>, classes: &mut HashSet<String>) {
+fn collect_top(
+    stmts: &[Stmt],
+    globals: &mut HashSet<String>,
+    classes: &mut HashSet<String>,
+    enums: &mut HashSet<String>,
+) {
     for s in stmts {
         match &s.kind {
             StmtKind::Let(n, _) | StmtKind::FuncDef { name: n, .. } => {
@@ -66,6 +77,11 @@ fn collect_top(stmts: &[Stmt], globals: &mut HashSet<String>, classes: &mut Hash
                 globals.insert(c.name.clone());
                 classes.insert(c.name.clone());
             }
+            StmtKind::Enum(e) => {
+                // 枚举名按模块级名字处理：依赖包里会随其他顶层名字一起改名。
+                globals.insert(e.name.clone());
+                enums.insert(e.name.clone());
+            }
             StmtKind::ForEach(n, _, _) => {
                 globals.insert(n.clone());
             }
@@ -74,7 +90,7 @@ fn collect_top(stmts: &[Stmt], globals: &mut HashSet<String>, classes: &mut Hash
     }
 }
 
-/// 依赖包的顶层只允许声明：`导入` / `令` / `函数` / `类`。
+/// 依赖包的顶层只允许声明：`导入` / `令` / `函数` / `类` / `枚举`。
 pub fn check_dependency_top_level(unit: &Unit) -> Result<()> {
     for s in &unit.stmts {
         let ok = matches!(
@@ -91,7 +107,7 @@ pub fn check_dependency_top_level(unit: &Unit) -> Result<()> {
                 s.line,
                 1,
                 format!(
-                    "依赖包「{}」的顶层只允许声明（导入/令/函数/类），不能出现{}；\
+                    "依赖包「{}」的顶层只允许声明（导入/令/函数/类/枚举），不能出现{}；\
                      可执行的初始化请写进根包，或放进导出函数里",
                     unit.name,
                     stmt_label(&s.kind)
@@ -147,6 +163,17 @@ impl<'a> Renamer<'a> {
         self.deps.contains_key(n) && !self.shadowed(n) && !self.globals.contains(n)
     }
 
+    /// 这个名字是不是某个依赖包的枚举（依赖包自己的枚举已改名，根包不该再看到）。
+    fn dep_enum_owner(&self, n: &str) -> Option<&str> {
+        if self.shadowed(n) || self.globals.contains(n) {
+            return None;
+        }
+        self.deps
+            .iter()
+            .find(|(_, v)| v.enums.contains(n))
+            .map(|(k, _)| k.as_str())
+    }
+
     fn global_ref(&self, n: &str) -> Option<String> {
         if !self.is_root && !self.shadowed(n) && self.globals.contains(n) {
             Some(self.mangle(n))
@@ -192,6 +219,7 @@ impl<'a> Renamer<'a> {
     }
 
     fn stmt(&mut self, s: &mut Stmt, module: bool) -> Result<()> {
+        let line = s.line;
         match &mut s.kind {
             StmtKind::Import(_) | StmtKind::Break | StmtKind::Continue => Ok(()),
             StmtKind::Let(n, e) => {
@@ -292,14 +320,39 @@ impl<'a> Renamer<'a> {
                 }
                 Ok(())
             }
-            StmtKind::Enum(_) => Ok(()),
+            StmtKind::Enum(e) => {
+                if module {
+                    if let Some(m) = self.global_ref(&e.name) {
+                        e.name = m;
+                    }
+                }
+                Ok(())
+            }
             StmtKind::Match {
                 subject,
                 arms,
                 else_body,
             } => {
                 self.expr(subject)?;
-                for (_, body) in arms {
+                for (pat, body) in arms.iter_mut() {
+                    if let MatchPattern::EnumMember(n, _) = pat {
+                        if let Some(m) = self.global_ref(n) {
+                            *n = m;
+                        } else if self.is_root {
+                            if let Some(owner) = self.dep_enum_owner(n) {
+                                return Err(CompileError::new(
+                                    "E128",
+                                    line,
+                                    1,
+                                    format!(
+                                        "枚举「{}.{}」是包内私有的，不能跨包直接使用",
+                                        owner, n
+                                    ),
+                                )
+                                .with_hint("把需要跨包的行为封成依赖包的导出函数；枚举只在定义它的包内可见"));
+                            }
+                        }
+                    }
                     self.stmts(body, false)?;
                 }
                 if let Some(body) = else_body {
@@ -356,6 +409,47 @@ impl<'a> Renamer<'a> {
                         args,
                     );
                     return Ok(());
+                }
+            }
+        }
+
+        // 根包不能直接引用依赖包的枚举：依赖包里的枚举在合并时已改名为 `包名::枚举名`。
+        if self.is_root {
+            if let ExprKind::Member(base, _) = &e.kind {
+                if let ExprKind::Name(n) = &base.kind {
+                    if let Some(owner) = self.dep_enum_owner(n) {
+                        return Err(CompileError::new(
+                            "E128",
+                            e.line,
+                            e.col,
+                            format!(
+                                "枚举「{}.{}」是包内私有的，不能跨包直接使用",
+                                owner, n
+                            ),
+                        )
+                        .with_hint(
+                            "把需要跨包的行为封成依赖包的导出函数；枚举只在定义它的包内可见",
+                        ));
+                    }
+                }
+                // `包名.枚举名.成员`：同样拒绝，避免误以为支持跨包枚举。
+                if let ExprKind::Member(inner, en) = &base.kind {
+                    if let ExprKind::Name(p) = &inner.kind {
+                        if self.is_dep_pkg(p) && self.deps[p].enums.contains(en.as_str()) {
+                            return Err(CompileError::new(
+                                "E128",
+                                e.line,
+                                e.col,
+                                format!(
+                                    "枚举「{}.{}」是包内私有的，不能跨包直接使用",
+                                    p, en
+                                ),
+                            )
+                            .with_hint(
+                                "把需要跨包的行为封成依赖包的导出函数；枚举只在定义它的包内可见",
+                            ));
+                        }
+                    }
                 }
             }
         }

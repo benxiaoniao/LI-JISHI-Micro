@@ -43,7 +43,11 @@ try {
         @{ file = "I2C数据越界.jsh"; code = "E030"; stage = "运行" },
         @{ file = "I2C类型.jsh";     code = "E031"; stage = "运行" },
         @{ file = "I2C设备未应答.jsh"; code = "E032"; stage = "运行" },
-        @{ file = "I2C探测未初始化.jsh"; code = "E033"; stage = "运行" }
+        @{ file = "I2C探测未初始化.jsh"; code = "E033"; stage = "运行" },
+        @{ file = "枚举局部重名.jsh"; code = "E139"; stage = "编译" },
+        @{ file = "枚举参数重名.jsh"; code = "E139"; stage = "编译" },
+        @{ file = "枚举内建重名.jsh"; code = "E139"; stage = "编译" },
+        @{ file = "枚举原生重名.jsh"; code = "E139"; stage = "编译" }
     )
     $fail = 0
     foreach ($c in $cases) {

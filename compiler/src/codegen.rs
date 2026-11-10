@@ -407,7 +407,25 @@ fn capture_from_parent(
     Ok(Res::Capture(slot))
 }
 
+/// 变量/参数名不能与枚举重名：枚举名只能用 `枚举名.成员` 的形式读。
+fn reject_enum_name(b: &Builder, name: &str, line: u32, col: u32) -> Result<()> {
+    if b.enums.contains_key(name) {
+        return Err(CompileError::new(
+            "E139",
+            line,
+            col,
+            format!(
+                "名字「{}」与枚举重名；枚举名不能用作变量或参数",
+                name
+            ),
+        )
+        .with_hint("改一个名字，或把枚举名写成 枚举名.成员 来取值"));
+    }
+    Ok(())
+}
+
 fn store_name(fs: &mut FnState, b: &mut Builder, name: &str, line: u32, col: u32) -> Result<()> {
+    reject_enum_name(b, name, line, col)?;
     if native_spec::entry(name).is_some() || vm_spec::reserved(name) {
         return Err(CompileError::new(
             "E115",
@@ -852,6 +870,22 @@ fn collect_enums(b: &mut Builder, stmts: &[Stmt]) -> Result<()> {
         let StmtKind::Enum(e) = &s.kind else {
             continue;
         };
+        if native_spec::entry(&e.name).is_some() || vm_spec::reserved(&e.name) {
+            return Err(CompileError::new(
+                "E139",
+                s.line,
+                1,
+                format!("枚举名「{}」与内建/任务函数重名", e.name),
+            ));
+        }
+        if crate::langcard::BUILTIN_DOCS.iter().any(|d| d.name == e.name) {
+            return Err(CompileError::new(
+                "E139",
+                s.line,
+                1,
+                format!("枚举名「{}」与内建函数重名", e.name),
+            ));
+        }
         if top.contains(&e.name) || b.enums.contains_key(&e.name) {
             return Err(CompileError::new(
                 "E139",
@@ -1043,6 +1077,7 @@ fn compile_method(
     fs.slots.insert("本".to_string(), 0);
 
     for (i, p) in params.iter().enumerate() {
+        reject_enum_name(b, p, line, 1)?;
         if native_spec::entry(p).is_some() || vm_spec::reserved(p) {
             return Err(CompileError::new(
                 "E115",
@@ -1133,6 +1168,7 @@ fn compile_class_init(
     fs.slots.insert("本".to_string(), 0);
 
     for (i, p) in params.iter().enumerate() {
+        reject_enum_name(b, p, user.map(|m| m.line).unwrap_or(1), 1)?;
         if native_spec::entry(p).is_some() || vm_spec::reserved(p) {
             return Err(CompileError::new(
                 "E115",
@@ -1242,6 +1278,7 @@ fn compile_function(
     fs.mark(line);
 
     for (i, p) in params.iter().enumerate() {
+        reject_enum_name(b, p, line, col)?;
         if native_spec::entry(p).is_some() || vm_spec::reserved(p) {
             return Err(CompileError::new(
                 "E115",
