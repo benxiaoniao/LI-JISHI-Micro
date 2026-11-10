@@ -74,6 +74,15 @@ else {
     Write-Host "  [PASS] 编译通过（导入 总线 + I2C）"
 }
 
+& $micc (Join-Path $root "examples\SPI回环.jsh") -o (Join-Path $root "build\native-spi-ok.jmb") | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "  [FAIL] SPI 回环示例被拒绝"
+    $script:fail++
+}
+else {
+    Write-Host "  [PASS] 编译通过（导入 总线 + SPI）"
+}
+
 function Expect-CompileError {
     param([string]$File, [string]$Code, [string]$Title)
     Write-Host ("== " + $Title)
@@ -113,6 +122,10 @@ Expect-CompileError "tests\errors\I2C名拼错.jsh" "E115" "总线：名字拼�
 Expect-CompileError "tests\errors\I2C参数个数.jsh" "E115" "总线：参数个数不符应报 E115"
 Expect-CompileError "tests\errors\I2C未导入.jsh" "E113" "总线：未导入就调用应报 E113"
 
+Expect-CompileError "tests\errors\SPI名拼错.jsh" "E115" "SPI：名字拼错应报 E115"
+Expect-CompileError "tests\errors\SPI参数个数.jsh" "E115" "SPI：参数个数不符应报 E115"
+Expect-CompileError "tests\errors\SPI未导入.jsh" "E113" "SPI：未导入就调用应报 E113"
+
 Expect-CompileError "tests\errors\任务参数个数.jsh" "E115" "任务：参数个数不符应报 E115"
 Expect-CompileError "tests\errors\任务未导入.jsh" "E113" "任务：未导入就调用应报 E113"
 
@@ -132,5 +145,5 @@ if ($script:fail -ne 0) {
     Write-Host ("原生导入回归失败：" + $script:fail + " 项")
     exit 1
 }
-Write-Host "原生导入回归：33/33 通过（引脚 / ADC / 定时器 / 队列 / 信号量 / 外部中断 / PWM / 总线各 3 个错误用例，任务 2 个错误用例；7 个正确示例）"
+Write-Host "原生导入回归：37/37 通过（引脚 / ADC / 定时器 / 队列 / 信号量 / 外部中断 / PWM / 总线 / SPI 各 3 个错误用例，任务 2 个错误用例；8 个正确示例）"
 exit 0

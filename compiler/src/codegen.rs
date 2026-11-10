@@ -94,6 +94,8 @@ struct Builder {
     classes: Vec<ClassObj>,
     /// 类名 → 类表下标（`新建` 用）。
     class_map: HashMap<String, u8>,
+    /// 枚举名 → (成员名 → 编译期整数常量)。
+    enums: HashMap<String, HashMap<String, i32>>,
 }
 
 impl Builder {
@@ -105,6 +107,7 @@ impl Builder {
             codes: Vec::new(),
             classes: Vec::new(),
             class_map: HashMap::new(),
+            enums: HashMap::new(),
         }
     }
 
@@ -552,6 +555,16 @@ fn collect_decls(stmts: &[Stmt], out: &mut Vec<String>) {
                 }
             }
             StmtKind::While(_, body) | StmtKind::Repeat(_, body) => collect_decls(body, out),
+            StmtKind::Match {
+                arms, else_body, ..
+            } => {
+                for (_, body) in arms {
+                    collect_decls(body, out);
+                }
+                if let Some(body) = else_body {
+                    collect_decls(body, out);
+                }
+            }
             StmtKind::Try {
                 body,
                 catch_name,
@@ -647,6 +660,20 @@ fn collect_free_stmts(stmts: &[Stmt], bound: &HashSet<String>, out: &mut Vec<Str
                 collect_free_expr(val, bound, out);
             }
             StmtKind::Class(_) => {}
+            StmtKind::Enum(_) => {}
+            StmtKind::Match {
+                subject,
+                arms,
+                else_body,
+            } => {
+                collect_free_expr(subject, bound, out);
+                for (_, body) in arms {
+                    collect_free_stmts(body, bound, out);
+                }
+                if let Some(body) = else_body {
+                    collect_free_stmts(body, bound, out);
+                }
+            }
             StmtKind::Expr(e) => collect_free_expr(e, bound, out),
             StmtKind::Return(Some(e)) => collect_free_expr(e, bound, out),
             StmtKind::Return(None) => {}
@@ -751,6 +778,9 @@ pub fn compile(
         locals: Vec::new(),
     });
 
+    // 枚举是纯编译期常量，先在类之前收集好，供类字段与方法体引用。
+    collect_enums(&mut b, stmts)?;
+
     // 类先于模块代码编译：类表要在 `新建` 之前完整，方法体也独立成代码对象。
     compile_classes(&mut b, stmts, &imported, spans)?;
 
@@ -799,6 +829,51 @@ pub fn compile(
         entry: 0,
         files,
     })
+}
+
+fn collect_enums(b: &mut Builder, stmts: &[Stmt]) -> Result<()> {
+    // 顶层名字：枚举名不能与变量、函数、类重名。
+    let mut top: HashSet<String> = HashSet::new();
+    for s in stmts {
+        match &s.kind {
+            StmtKind::Let(n, _) | StmtKind::ForEach(n, ..) => {
+                top.insert(n.clone());
+            }
+            StmtKind::FuncDef { name, .. } => {
+                top.insert(name.clone());
+            }
+            StmtKind::Class(c) => {
+                top.insert(c.name.clone());
+            }
+            _ => {}
+        }
+    }
+    for s in stmts {
+        let StmtKind::Enum(e) = &s.kind else {
+            continue;
+        };
+        if top.contains(&e.name) || b.enums.contains_key(&e.name) {
+            return Err(CompileError::new(
+                "E139",
+                s.line,
+                1,
+                format!("枚举名「{}」与顶层名字（变量/函数/类/枚举）重复", e.name),
+            ));
+        }
+        let mut map: HashMap<String, i32> = HashMap::new();
+        for (i, m) in e.members.iter().enumerate() {
+            if map.insert(m.clone(), i as i32).is_some() {
+                return Err(CompileError::new(
+                    "E139",
+                    s.line,
+                    1,
+                    format!("枚举「{}」里重复的成员「{}」", e.name, m),
+                ));
+            }
+        }
+        b.enums.insert(e.name.clone(), map);
+    }
+    Ok(())
 }
 
 fn compile_classes(
@@ -1237,6 +1312,24 @@ fn compile_stmt(fs: &mut FnState, b: &mut Builder, s: &Stmt) -> Result<()> {
             }
             // 顶层类已由 compile_classes 预编译，这里不生成模块字节码。
         }
+        StmtKind::Enum(_) => {
+            if !fs.is_module {
+                return Err(CompileError::new(
+                    "E139",
+                    s.line,
+                    1,
+                    "「枚举」只能写在模块顶层",
+                ));
+            }
+            // 顶层枚举已由 collect_enums 收集，这里不生成模块字节码。
+        }
+        StmtKind::Match {
+            subject,
+            arms,
+            else_body,
+        } => {
+            compile_match(fs, b, subject, arms, else_body.as_deref(), s.line)?;
+        }
         StmtKind::Let(name, e) => {
             compile_expr(fs, b, e)?;
             store_name(fs, b, name, s.line, e.col)?;
@@ -1477,6 +1570,87 @@ fn compile_stmt(fs: &mut FnState, b: &mut Builder, s: &Stmt) -> Result<()> {
     Ok(())
 }
 
+fn compile_match(
+    fs: &mut FnState,
+    b: &mut Builder,
+    subject: &Expr,
+    arms: &[(MatchPattern, Vec<Stmt>)],
+    else_body: Option<&[Stmt]>,
+    line: u32,
+) -> Result<()> {
+    // 先把分支模式解析成常量，顺带检查未知枚举成员与重复分支值。
+    let mut vals: Vec<i64> = Vec::new();
+    for (pat, _) in arms {
+        let v = match pat {
+            MatchPattern::Int(v) => *v,
+            MatchPattern::EnumMember(en, member) => {
+                let Some(map) = b.enums.get(en) else {
+                    return Err(CompileError::new(
+                        "E139",
+                        line,
+                        1,
+                        format!("「情形」里的「{}」不是枚举", en),
+                    ));
+                };
+                match map.get(member) {
+                    Some(&v) => v as i64,
+                    None => {
+                        return Err(CompileError::new(
+                            "E139",
+                            line,
+                            1,
+                            format!("枚举「{}」里没有成员「{}」", en, member),
+                        ))
+                    }
+                }
+            }
+            MatchPattern::Else => {
+                return Err(CompileError::new(
+                    "E139",
+                    line,
+                    1,
+                    "「其他」不能出现在普通分支里",
+                ))
+            }
+        };
+        if vals.contains(&v) {
+            return Err(CompileError::new(
+                "E139",
+                line,
+                1,
+                format!("「匹配」里重复的情形值 {}", v),
+            ));
+        }
+        vals.push(v);
+    }
+
+    // 主体只求值一次，放进临时槽，再逐支 `==` 比较。
+    compile_expr(fs, b, subject)?;
+    let t = fs.alloc_temp(line, 1)?;
+    fs.emit_u8(OP_STORE_LOCAL, t);
+    let mut ends: Vec<usize> = Vec::new();
+    for (i, (_, body)) in arms.iter().enumerate() {
+        fs.emit_u8(OP_LOAD_LOCAL, t);
+        let c = b.const_int(vals[i], line, 1)?;
+        fs.emit_u8(OP_CONST, c);
+        fs.emit_u8(OP_CMP, CMP_EQ);
+        let jf = fs.jump(OP_JUMP_IF_FALSE);
+        compile_stmts(fs, b, body)?;
+        ends.push(fs.jump(OP_JUMP));
+        let next = fs.here();
+        fs.patch(jf, next);
+    }
+    if let Some(body) = else_body {
+        compile_stmts(fs, b, body)?;
+    }
+    let end = fs.here();
+    for p in ends {
+        fs.patch(p, end);
+    }
+    fs.free_temp(t);
+    Ok(())
+}
+
 fn compile_if(
     fs: &mut FnState,
     b: &mut Builder,
@@ -1554,6 +1728,14 @@ fn compile_expr(fs: &mut FnState, b: &mut Builder, e: &Expr) -> Result<()> {
             fs.emit_u8(OP_CONST, c);
         }
         ExprKind::Name(name) => {
+            if b.enums.contains_key(name) {
+                return Err(CompileError::new(
+                    "E139",
+                    e.line,
+                    e.col,
+                    format!("枚举名「{}」不能当值使用，请写 {}.成员", name, name),
+                ));
+            }
             if vm_spec::reserved(name) {
                 if fs.imported.contains(name) {
                     return Err(CompileError::new(
@@ -1782,6 +1964,26 @@ fn compile_expr(fs: &mut FnState, b: &mut Builder, e: &Expr) -> Result<()> {
             fs.emit_u8u8(OP_CALL_INIT, ci, args.len() as u8);
         }
         ExprKind::Member(obj, name) => {
+            // `枚举名.成员`：编译期直接折成整数常量，不产生对象访问。
+            let enum_hit = match &obj.kind {
+                ExprKind::Name(en) if b.enums.contains_key(en) => {
+                    Some((en.clone(), b.enums[en].get(name).copied()))
+                }
+                _ => None,
+            };
+            if let Some((en, found)) = enum_hit {
+                let Some(v) = found else {
+                    return Err(CompileError::new(
+                        "E139",
+                        e.line,
+                        e.col,
+                        format!("枚举「{}」里没有成员「{}」", en, name),
+                    ));
+                };
+                let c = b.const_int(v as i64, e.line, e.col)?;
+                fs.emit_u8(OP_CONST, c);
+                return Ok(());
+            }
             let ni = field_name_idx(fs, b, obj, name, e.line, e.col)?;
             compile_expr(fs, b, obj)?;
             fs.emit_u8(OP_GET_FIELD, ni);

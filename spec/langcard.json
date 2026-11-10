@@ -26,6 +26,7 @@
     {"word": "令", "supported": true},
     {"word": "假", "supported": true},
     {"word": "函数", "supported": true},
+    {"word": "匹配", "supported": true},
     {"word": "否则", "supported": true},
     {"word": "否则如果", "supported": true},
     {"word": "在", "supported": true},
@@ -34,11 +35,13 @@
     {"word": "尝试", "supported": true},
     {"word": "当", "supported": true},
     {"word": "循环", "supported": true},
+    {"word": "情形", "supported": true},
     {"word": "或", "supported": true},
     {"word": "抛出", "supported": true},
     {"word": "捕获", "supported": true},
     {"word": "新建", "supported": true},
     {"word": "本", "supported": true},
+    {"word": "枚举", "supported": true},
     {"word": "次", "supported": true},
     {"word": "真", "supported": true},
     {"word": "空", "supported": true},
@@ -49,11 +52,8 @@
     {"word": "非", "supported": true}
   ],
   "unsupported_keywords": [
-    "匹配",
-    "情形",
     "断言",
     "最终",
-    "枚举",
     "用",
     "继承",
     "超"
@@ -86,15 +86,20 @@
     {"construct": "调用", "form": "被调用者(实参, ...)", "example": "打印(长度(列表))"},
     {"construct": "类", "form": "类 名字:\n    令 字段 = 默认值\n    函数 初始化(参数): ...\n    函数 方法(参数): ...", "example": "类 计数器:\n    令 值 = 0\n    函数 初始化(起点):\n        本.值 = 起点\n    函数 加(n):\n        本.值 += n"},
     {"construct": "新建 / 成员", "form": "新建 类名(实参...)；对象.字段；对象.方法(...)；本（方法内）", "example": "令 c = 新建 计数器(5)\nc.加(3)\n打印(c.值)"},
+    {"construct": "枚举", "form": "枚举 名字:\n    成员\n    成员", "example": "枚举 颜色:\n    红\n    绿\n    蓝"},
+    {"construct": "匹配", "form": "匹配 表达式:\n    情形 整数字面量 / 枚举.成员: ...\n    情形 其他: ...", "example": "匹配 颜色.绿:\n    情形 颜色.红:\n        打印(\"红\")\n    情形 其他:\n        打印(\"其他\")"},
     {"construct": "下标", "form": "容器[下标]", "example": "列表[0]"},
     {"construct": "列表", "form": "[元素, ...]", "example": "[1, 2, 3]"},
     {"construct": "字典", "form": "{键: 值, ...}", "example": "{\"a\": 1, \"b\": 2}"}
   ],
   "grammar": [
     "program := { statement }",
-    "statement := import | class | let | assign | if | while | repeat | foreach | funcdef | return | break | continue | throw | try | expr_stmt",
+    "statement := import | class | enum | let | assign | if | while | repeat | foreach | match | funcdef | return | break | continue | throw | try | expr_stmt",
     "class := '类' IDENT ':' NEWLINE INDENT { class_member } DEDENT",
     "class_member := '令' IDENT '=' expr NEWLINE | funcdef",
+    "enum := '枚举' IDENT ':' NEWLINE INDENT { IDENT NEWLINE } DEDENT",
+    "match := '匹配' expr ':' NEWLINE INDENT { '情形' pattern block } DEDENT",
+    "pattern := INT | IDENT '.' IDENT | '其他'",
     "import := '导入' IDENT",
     "let := '令' IDENT '=' expr",
     "assign := lvalue '=' expr | lvalue AUGOP expr",
@@ -147,6 +152,8 @@
     {"topic": "字符串", "rule": "单引号、双引号、中文引号都可定界；反斜杠转义支持 \\n \\t \\\\ \\\" \\'；文本按 UTF-8 存。"},
     {"topic": "字典键", "rule": "键必须是整数/文本/空/真/假这类不可变值；列表、字典、函数、实例不能当键。"},
     {"topic": "类", "rule": "`类` 只能写在模块顶层，类名全局唯一；类体只允许字段（`令 名 = 默认值`，默认值必填且不能引用 `本`）与方法。`新建 C(...)` 调用构造：有 `初始化` 时实参个数必须与它一致，否则只能零实参；`初始化` 里禁止 `返回`，构造结果固定是实例本身。方法内 `本` 是只读绑定（不能 `本 = ...`），`本.字段` 读写与 `对象.字段` 相同。没有继承、没有虚分派：字段和方法都在运行期按名字在类的单层表里查找（结构化多态）。未声明字段/方法报 E035/E037，对非实例取成员报 E036；`本.未知` 与 `本.方法` 当值取是编译期 E122/E123。"},
+    {"topic": "枚举", "rule": "`枚举 名字:` 下每行一个成员，按声明顺序取 0..n-1 的编译期整数常量；成员写作 `枚举名.成员`，编译期直接折成整数，不产生运行期对象、不进名字表。枚举名只能写在模块顶层，不能与顶层变量/函数/类重名，成员不能重复（E139）。"},
+    {"topic": "匹配", "rule": "`匹配 表达式:` 后跟若干 `情形 整数字面量` 或 `情形 枚举.成员:` 分支，以及可选的 `情形 其他:`（必须最后）；主体只求值一次，按 `==` 顺序比较，命中即执行该分支再跳出。只做语句、无返回值、不要求覆盖所有取值；分支值不能重复（E139）。"},
     {"topic": "实例", "rule": "实例是普通堆对象：可进列表/字典值、可 `抛出` 并被 `捕获`、可被闭包捕获（含捕获 `本`）；相等比较按身份；`长度`/下标/遍历不适用；native 只能把实例当入参透传，不能构造或返回。"},
     {"topic": "迭代", "rule": "可遍历：列表、文本（按字符）、字典（按键）、范围。"},
     {"topic": "异常", "rule": "`抛出 表达式` 抛任意值；`尝试: ... 捕获 名字: ...`（或匿名 `捕获:`）在同一函数内捕获。只有显式 `抛出` 可捕获：除零（E007）、堆耗尽（E017）等 VM 故障与原生错误（E030/E031/E033）一律终止，不能被 `捕获` 拦下。没有 `最后`，一个 `尝试` 只能跟一个 `捕获`。"},
@@ -191,9 +198,9 @@
       "module": "引脚",
       "table": "f103_board",
       "entries": [
-        {"name": "引脚写", "min_args": 2, "max_args": 2, "doc": "向指定引脚写电平；v0 只支持引脚 13（PC13），电平 0/1。PC13 低电平点亮。"},
-        {"name": "引脚读", "min_args": 1, "max_args": 1, "doc": "读指定引脚的输入寄存器值（0/1）；v0 只支持引脚 13（PC13）。"},
-        {"name": "引脚翻转", "min_args": 1, "max_args": 1, "doc": "读当前电平再取反；v0 只支持引脚 13（PC13）。"},
+        {"name": "引脚写", "min_args": 2, "max_args": 2, "doc": "向指定引脚写电平；引脚 0–47（0–15=PA0–PA15，16–31=PB0–PB15，32–47=PC0–PC15），电平 0/1。首次写会把该脚配成推挽输出 2 MHz。PC13 是板载 LED，低电平点亮。"},
+        {"name": "引脚读", "min_args": 1, "max_args": 1, "doc": "读指定引脚的输入寄存器值（0/1）；引脚编码 0–47。不改变引脚模式：脚被本程序写成输出时读到的是驱动电平，未配置时读到的是悬空/外部电平。"},
+        {"name": "引脚翻转", "min_args": 1, "max_args": 1, "doc": "把该脚按「最后一次写入的电平」取反（从未写过按 0 处理），并配成推挽输出；引脚编码 0–47。PC13 翻转即板载 LED 亮灭切换。"},
         {"name": "串口写", "min_args": 1, "max_args": 1, "doc": "直接写 USART1（115200 8N1），不换行、不加前缀。"},
         {"name": "等待毫秒", "min_args": 1, "max_args": 1, "doc": "忙等 0–60000 毫秒；SysTick 中断仍在跑，调度器不参与。"}
       ]
@@ -255,7 +262,10 @@
         {"name": "I2C初始化", "min_args": 3, "max_args": 3, "doc": "I2C初始化(SCL引脚, SDA引脚, 速率千赫兹)；引脚编码 0–47（0–15=PA0–PA15，16–31=PB0–PB15，32–47=PC0–PC15）。SCL=26 / SDA=27（PB10/PB11）走硬件 I2C2；其它组合退回软件位翻转（开漏输出，依赖外部上拉）。速率 10–400 kHz，硬件按 APB1 时钟算 CCR/TRISE。返回 真=硬件通道，假=软件模拟。"},
         {"name": "I2C写", "min_args": 3, "max_args": 3, "doc": "I2C写(设备地址, 控制字节, 数据字节)；一次完整写事务：START + 地址(写) + 控制 + 数据 + STOP。地址 0–127，控制/数据 0–255。SSD1306 用 控制 0x00 发命令、0x40 发显存数据。"},
         {"name": "I2C写块", "min_args": 3, "max_args": 8, "doc": "I2C写块(设备地址, 控制字节, 数据1[, 数据2 … 数据5])；在同一次事务里连续写 1–5 个数据字节（参数上限 8 个），适合初始化命令段与成段显存写入。参数语义同 I2C写。"},
-        {"name": "I2C探测", "min_args": 1, "max_args": 1, "doc": "I2C探测(设备地址)：只发地址并等应答，返回 真/假，用于扫描 0x00–0x7F 找设备。主机端口对 0x3C 返回 真（模拟 SSD1306）。"}
+        {"name": "I2C探测", "min_args": 1, "max_args": 1, "doc": "I2C探测(设备地址)：只发地址并等应答，返回 真/假，用于扫描 0x00–0x7F 找设备。主机端口对 0x3C 返回 真（模拟 SSD1306）。"},
+        {"name": "SPI初始化", "min_args": 4, "max_args": 4, "doc": "SPI初始化(SCK引脚, MISO引脚, MOSI引脚, 分频)；引脚编码 0–47（0–15=PA0–PA15，16–31=PB0–PB15，32–47=PC0–PC15），三个引脚不能重复。SCK=5 / MISO=6 / MOSI=7（PA5/PA6/PA7）走硬件 SPI1（主机模式 0、MSB 先行、NSS 软件），分频只能是 2/4/8/16/32/64/128/256；其它引脚组合退回软件位翻转（模式 0）。返回 真=硬件通道，假=软件模拟。"},
+        {"name": "SPI收发", "min_args": 1, "max_args": 1, "doc": "SPI收发(数据字节)：一次全双工交换，发出 0–255 并返回同时收到的字节。需先 SPI初始化，未初始化报 E033。主机端口做回环模拟（返回发出的字节）。"},
+        {"name": "SPI写块", "min_args": 1, "max_args": 5, "doc": "SPI写块(数据1[, 数据2 … 数据5])：连续发送 1–5 个字节并丢弃收回的数据，适合初始化命令段与成段写入。数据范围 0–255；未初始化报 E033。"}
       ]
     }
   ],
@@ -320,7 +330,7 @@
   ],
   "compile_errors": [
     {"code": "E102", "meaning": "数字字面量格式错误：不支持指数形式，小数点后必须有数字"},
-    {"code": "E103", "meaning": "使用了 v0 不支持的关键字（继承/最终/匹配等）"},
+    {"code": "E103", "meaning": "使用了 v0 不支持的关键字（继承/最终等）"},
     {"code": "E104", "meaning": "局部变量超过 255 个"},
     {"code": "E105", "meaning": "常量/列表元素/字典项超过 255 个"},
     {"code": "E106", "meaning": "函数超过 255 个"},
@@ -355,7 +365,8 @@
     {"code": "E135", "meaning": "下载/解包失败：系统 curl 或 tar 不可用、HTTP 失败、来源格式不支持"},
     {"code": "E136", "meaning": "下载内容与索引不一致：内容哈希不符，或包名/版本与索引条目不符"},
     {"code": "E137", "meaning": "归档/二进制包校验失败：缺清单、缺产物、大小或哈希不符、JMB 魔数/版本不符、接口不符"},
-    {"code": "E138", "meaning": "发布失败：目标是 HTTP 索引、二进制包不能进索引，或仓库/索引写不了"}
+    {"code": "E138", "meaning": "发布失败：目标是 HTTP 索引、二进制包不能进索引，或仓库/索引写不了"},
+    {"code": "E139", "meaning": "枚举/匹配用法错误：枚举成员重复或未知、枚举名与顶层名字冲突、分支值重复或「其他」位置不对"}
   ],
   "runtime_errors": [
     {"code": 1, "name": "E_STACK", "meaning": "值栈溢出（调用层数或表达式嵌套太深）"},
@@ -423,6 +434,7 @@
     {"id": "decimal", "title": "小数与定点除法", "source": "打印(1.5 + 2.25)\n打印(10.0 / 4)\n打印(4094 / 4095.0 * 3300)", "prints": "3.75\n2.5\n3299.1943"},
     {"id": "closure", "title": "闭包（按值捕获，只读）", "source": "函数 计数器(起点):\n    令 n = 起点\n    函数 取():\n        返回 n\n    返回 取\n\n令 f = 计数器(10)\n打印(f())", "prints": "10"},
     {"id": "exception", "title": "抛出与捕获", "source": "函数 取数(n):\n    如果 n < 0:\n        抛出 \"负数\"\n    返回 n\n\n尝试:\n    打印(取数(-1))\n捕获 原因:\n    打印(\"捕获\", 原因)", "prints": "捕获 负数"},
-    {"id": "board-led", "title": "板级点灯（导入原生模块）", "source": "导入 引脚\n引脚写(13, 0)\n等待毫秒(400)\n引脚写(13, 1)", "prints": "（板上执行，无主机输出）"}
+    {"id": "board-led", "title": "板级点灯（导入原生模块）", "source": "导入 引脚\n引脚写(13, 0)\n等待毫秒(400)\n引脚写(13, 1)", "prints": "（板上执行，无主机输出）"},
+    {"id": "enum-match", "title": "枚举与匹配", "source": "枚举 颜色:\n    红\n    绿\n    蓝\n\n令 c = 颜色.绿\n匹配 c:\n    情形 颜色.红:\n        打印(\"红\")\n    情形 颜色.绿:\n        打印(\"绿\")\n    情形 其他:\n        打印(\"其他\")\n打印(颜色.蓝)", "prints": "绿\n2"}
   ]
 }

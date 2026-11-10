@@ -13,8 +13,6 @@
  *   - PC13 低电平点亮板载 LED，所以「引脚写(13, 0)」= 亮
  */
 
-#define BOARD_LED_PIN 13
-
 static int arg_int(JmStateRef st, const JmValue *args, uint8_t nargs, int32_t *v,
                    const char *what) {
     if (nargs != 1) {
@@ -36,8 +34,9 @@ static int n_pin_write(JmStateRef st, const JmValue *args, uint8_t nargs,
     if (jm_value_to_int(args[0], &pin) != 0 || jm_value_to_int(args[1], &level) != 0) {
         return jm_native_fail(st, JM_NE_TYPE, "引脚写：参数必须是整数");
     }
-    if (pin != BOARD_LED_PIN) {
-        return jm_native_fail(st, JM_NE_PARAM, "v0 只支持 PC13（引脚 13）");
+    if (pin < 0 || pin > 47) {
+        return jm_native_fail(st, JM_NE_PARAM,
+                              "引脚编码 0–47（0–15=PA0–PA15，16–31=PB0–PB15，32–47=PC0–PC15）");
     }
     if (level != 0 && level != 1) {
         return jm_native_fail(st, JM_NE_PARAM, "电平只能是 0 或 1");
@@ -53,8 +52,9 @@ static int n_pin_read(JmStateRef st, const JmValue *args, uint8_t nargs,
     if (arg_int(st, args, nargs, &pin, "引脚读需要一个参数：引脚") != 0) {
         return -1;
     }
-    if (pin != BOARD_LED_PIN) {
-        return jm_native_fail(st, JM_NE_PARAM, "v0 只支持 PC13（引脚 13）");
+    if (pin < 0 || pin > 47) {
+        return jm_native_fail(st, JM_NE_PARAM,
+                              "引脚编码 0–47（0–15=PA0–PA15，16–31=PB0–PB15，32–47=PC0–PC15）");
     }
     *out = jm_value_int(port_gpio_read((uint32_t)pin) ? 1 : 0);
     return JM_NATIVE_OK;
@@ -66,10 +66,11 @@ static int n_pin_toggle(JmStateRef st, const JmValue *args, uint8_t nargs,
     if (arg_int(st, args, nargs, &pin, "引脚翻转需要一个参数：引脚") != 0) {
         return -1;
     }
-    if (pin != BOARD_LED_PIN) {
-        return jm_native_fail(st, JM_NE_PARAM, "v0 只支持 PC13（引脚 13）");
+    if (pin < 0 || pin > 47) {
+        return jm_native_fail(st, JM_NE_PARAM,
+                              "引脚编码 0–47（0–15=PA0–PA15，16–31=PB0–PB15，32–47=PC0–PC15）");
     }
-    port_gpio_write((uint32_t)pin, port_gpio_read((uint32_t)pin) ? 0 : 1);
+    (void)port_gpio_toggle((uint32_t)pin);
     *out = jm_value_nil();
     return JM_NATIVE_OK;
 }
@@ -381,6 +382,104 @@ static int n_i2c_probe(JmStateRef st, const JmValue *args, uint8_t nargs,
         return jm_native_fail(st, JM_NE_HW, "I2C 探测失败");
     }
     *out = jm_value_bool(rc != 0);
+    return JM_NATIVE_OK;
+}
+
+/* ---- 「总线」表续：SPI（PA5/PA6/PA7 走硬件 SPI1，其它引脚走软件位翻转） ---- */
+
+static uint8_t g_spi_ready = 0u;
+
+static int n_spi_init(JmStateRef st, const JmValue *args, uint8_t nargs,
+                      JmValue *out) {
+    int32_t sck = 0;
+    int32_t miso = 0;
+    int32_t mosi = 0;
+    int32_t div = 0;
+    int rc;
+
+    if (nargs != 4) {
+        return jm_native_fail(
+            st, JM_NE_PARAM,
+            "SPI初始化需要四个参数：SCK引脚, MISO引脚, MOSI引脚, 分频");
+    }
+    if (jm_value_to_int(args[0], &sck) != 0 ||
+        jm_value_to_int(args[1], &miso) != 0 ||
+        jm_value_to_int(args[2], &mosi) != 0 ||
+        jm_value_to_int(args[3], &div) != 0) {
+        return jm_native_fail(st, JM_NE_TYPE, "SPI初始化：参数必须是整数");
+    }
+    if (sck < 0 || sck > 47 || miso < 0 || miso > 47 || mosi < 0 || mosi > 47) {
+        return jm_native_fail(st, JM_NE_PARAM,
+                              "引脚编码 0–47（0–15=PA0–PA15，16–31=PB0–PB15，32–47=PC0–PC15）");
+    }
+    if (sck == miso || sck == mosi || miso == mosi) {
+        return jm_native_fail(st, JM_NE_PARAM,
+                              "SCK / MISO / MOSI 三个引脚不能重复");
+    }
+    if (div != 2 && div != 4 && div != 8 && div != 16 && div != 32 &&
+        div != 64 && div != 128 && div != 256) {
+        return jm_native_fail(st, JM_NE_PARAM,
+                              "SPI 分频只能是 2/4/8/16/32/64/128/256");
+    }
+
+    rc = port_spi_init((uint32_t)sck, (uint32_t)miso, (uint32_t)mosi,
+                       (uint32_t)div);
+    if (rc < 0) {
+        return jm_native_fail(st, JM_NE_HW, "SPI 初始化失败");
+    }
+    g_spi_ready = 1u;
+    *out = jm_value_bool(rc != 0);      /* 真 = 硬件 SPI1，假 = 软件位翻转 */
+    return JM_NATIVE_OK;
+}
+
+static int n_spi_transfer(JmStateRef st, const JmValue *args, uint8_t nargs,
+                          JmValue *out) {
+    int32_t byte = 0;
+    uint32_t got = 0u;
+
+    if (arg_int(st, args, nargs, &byte, "SPI收发需要一个参数：数据字节") != 0) {
+        return -1;
+    }
+    if (byte < 0 || byte > 255) {
+        return jm_native_fail(st, JM_NE_PARAM, "SPI 数据字节范围 0–255");
+    }
+    if (g_spi_ready == 0u) {
+        return jm_native_fail(st, JM_NE_STATE, "SPI 未初始化，先调用 SPI初始化()");
+    }
+    if (port_spi_transfer((uint32_t)byte, &got) != 0) {
+        return jm_native_fail(st, JM_NE_HW, "SPI 收发失败（总线超时）");
+    }
+    *out = jm_value_int((int32_t)got);
+    return JM_NATIVE_OK;
+}
+
+static int n_spi_write_block(JmStateRef st, const JmValue *args, uint8_t nargs,
+                             JmValue *out) {
+    uint32_t data[5];
+    uint8_t i;
+
+    if (nargs < 1 || nargs > 5) {
+        return jm_native_fail(
+            st, JM_NE_PARAM,
+            "SPI写块需要 1–5 个参数：数据1[, 数据2 … 数据5]");
+    }
+    for (i = 0u; i < nargs; i++) {
+        int32_t v = 0;
+        if (jm_value_to_int(args[i], &v) != 0) {
+            return jm_native_fail(st, JM_NE_TYPE, "SPI 数据字节必须是整数");
+        }
+        if (v < 0 || v > 255) {
+            return jm_native_fail(st, JM_NE_PARAM, "SPI 数据字节范围 0–255");
+        }
+        data[i] = (uint32_t)v;
+    }
+    if (g_spi_ready == 0u) {
+        return jm_native_fail(st, JM_NE_STATE, "SPI 未初始化，先调用 SPI初始化()");
+    }
+    if (port_spi_write(data, (uint32_t)nargs) != 0) {
+        return jm_native_fail(st, JM_NE_HW, "SPI 写块失败（总线超时）");
+    }
+    *out = jm_value_nil();
     return JM_NATIVE_OK;
 }
 

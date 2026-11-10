@@ -96,19 +96,22 @@
 
 #endif /* JM_IRQ_TABLE_H */
 
-/* 原生表 f103_bus：4 项 */
+/* 原生表 f103_bus：7 项 */
 #ifndef F103_BUS_TABLE_H
 #define F103_BUS_TABLE_H
 
 #define F103_BUS_TABLE_NAME "f103_bus"
-#define F103_BUS_ENTRY_COUNT 4u
+#define F103_BUS_ENTRY_COUNT 7u
 
 /* 在 JmNativeEntry 数组初始化处展开；名字、参数个数、C 函数名都来自同一份规格。 */
 #define F103_BUS_TABLE_INIT \
     {"I2C初始化", n_i2c_init, 3u, 3u, 0u, 0u}, \
     {"I2C写", n_i2c_write, 3u, 3u, 0u, 0u}, \
     {"I2C写块", n_i2c_write_block, 3u, 8u, 0u, 0u}, \
-    {"I2C探测", n_i2c_probe, 1u, 1u, 0u, 0u}
+    {"I2C探测", n_i2c_probe, 1u, 1u, 0u, 0u}, \
+    {"SPI初始化", n_spi_init, 4u, 4u, 0u, 0u}, \
+    {"SPI收发", n_spi_transfer, 1u, 1u, 0u, 0u}, \
+    {"SPI写块", n_spi_write_block, 1u, 5u, 0u, 0u}
 
 #endif /* F103_BUS_TABLE_H */
 

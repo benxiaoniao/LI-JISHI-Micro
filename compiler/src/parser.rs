@@ -28,6 +28,10 @@ impl Parser {
         &self.tokens[self.pos.min(self.tokens.len() - 1)]
     }
 
+    fn peek_at(&self, n: usize) -> &Token {
+        &self.tokens[(self.pos + n).min(self.tokens.len() - 1)]
+    }
+
     fn bump(&mut self) -> Token {
         let t = self.tokens[self.pos.min(self.tokens.len() - 1)].clone();
         if self.pos < self.tokens.len() {
@@ -150,6 +154,50 @@ impl Parser {
             body,
             line,
         })
+    }
+
+    fn parse_match_pattern(&mut self) -> Result<MatchPattern> {
+        let t = self.peek().clone();
+        match t.tok {
+            Tok::Int(v) => {
+                self.pos += 1;
+                Ok(MatchPattern::Int(v))
+            }
+            Tok::Op("-") => {
+                self.pos += 1;
+                if let Tok::Int(v) = self.peek().tok {
+                    self.pos += 1;
+                    Ok(MatchPattern::Int(-v))
+                } else {
+                    Err(self.err("E139", "「情形」里的负号后面应该写整数"))
+                }
+            }
+            Tok::Ident(name) => {
+                // 单独一个「其他」是兜底分支；`其他.成员` 仍按枚举成员解析。
+                if name == "其他" && !matches!(self.peek_at(1).tok, Tok::Op(".")) {
+                    self.pos += 1;
+                    return Ok(MatchPattern::Else);
+                }
+                self.pos += 1;
+                if !matches!(self.peek().tok, Tok::Op(".")) {
+                    return Err(CompileError::new(
+                        "E139",
+                        t.line,
+                        t.col,
+                        "「情形」只能是整数字面量、枚举成员（名.成员）或「其他」",
+                    ));
+                }
+                self.pos += 1;
+                let (member, _, _) = self.expect_ident()?;
+                Ok(MatchPattern::EnumMember(name, member))
+            }
+            _ => Err(CompileError::new(
+                "E139",
+                t.line,
+                t.col,
+                "「情形」只能是整数字面量、枚举成员（名.成员）或「其他」",
+            )),
+        }
     }
 
     fn parse_stmt(&mut self) -> Result<Stmt> {
@@ -287,6 +335,100 @@ impl Parser {
                     line,
                 })
             }
+            Tok::Kw(Kw::Enum) => {
+                self.pos += 1;
+                let (name, _, _) = self.expect_ident()?;
+                self.expect_op(":")?;
+                self.expect_newline()?;
+                if !matches!(self.peek().tok, Tok::Indent) {
+                    return Err(self.err("E139", "「枚举」下面应该换行并缩进，写成员名"));
+                }
+                self.pos += 1;
+                let mut members = Vec::new();
+                while !matches!(self.peek().tok, Tok::Dedent | Tok::Eof) {
+                    if matches!(self.peek().tok, Tok::Newline) {
+                        self.pos += 1;
+                        continue;
+                    }
+                    let (m, _, _) = self.expect_ident()?;
+                    members.push(m);
+                    self.expect_newline()?;
+                }
+                if matches!(self.peek().tok, Tok::Dedent) {
+                    self.pos += 1;
+                }
+                if members.is_empty() {
+                    return Err(CompileError::new(
+                        "E139",
+                        line,
+                        1,
+                        format!("枚举「{}」至少要有一个成员", name),
+                    ));
+                }
+                Ok(Stmt {
+                    kind: StmtKind::Enum(EnumDecl { name, members }),
+                    line,
+                })
+            }
+            Tok::Kw(Kw::Match) => {
+                self.pos += 1;
+                let subject = self.parse_expr()?;
+                self.expect_op(":")?;
+                self.expect_newline()?;
+                if !matches!(self.peek().tok, Tok::Indent) {
+                    return Err(self.err("E139", "「匹配」下面应该换行并缩进，写「情形」分支"));
+                }
+                self.pos += 1;
+                let mut arms: Vec<(MatchPattern, Vec<Stmt>)> = Vec::new();
+                let mut else_body: Option<Vec<Stmt>> = None;
+                let mut saw_else = false;
+                while !matches!(self.peek().tok, Tok::Dedent | Tok::Eof) {
+                    if matches!(self.peek().tok, Tok::Newline) {
+                        self.pos += 1;
+                        continue;
+                    }
+                    if !matches!(self.peek().tok, Tok::Kw(Kw::Case)) {
+                        return Err(self.err("E139", "「匹配」里只能写「情形」分支"));
+                    }
+                    if saw_else {
+                        return Err(self.err("E139", "「情形 其他」后面不能再有分支"));
+                    }
+                    self.pos += 1;
+                    let pat = self.parse_match_pattern()?;
+                    let body = self.parse_block()?;
+                    if matches!(pat, MatchPattern::Else) {
+                        else_body = Some(body);
+                        saw_else = true;
+                    } else {
+                        arms.push((pat, body));
+                    }
+                }
+                if matches!(self.peek().tok, Tok::Dedent) {
+                    self.pos += 1;
+                }
+                if arms.is_empty() && else_body.is_none() {
+                    return Err(CompileError::new(
+                        "E139",
+                        line,
+                        1,
+                        "「匹配」至少要有一个「情形」分支",
+                    ));
+                }
+                Ok(Stmt {
+                    kind: StmtKind::Match {
+                        subject,
+                        arms,
+                        else_body,
+                    },
+                    line,
+                })
+            }
+            Tok::Kw(Kw::Case) => Err(CompileError::new(
+                "E139",
+                line,
+                t.col,
+                "「情形」只能写在「匹配」里",
+            )),
             Tok::Kw(Kw::Return) => {
                 self.pos += 1;
                 let e = if matches!(self.peek().tok, Tok::Newline | Tok::Dedent | Tok::Eof) {
@@ -368,7 +510,7 @@ impl Parser {
                 "E103",
                 line,
                 t.col,
-                format!("使用了 v0 不支持的关键字「{}」（如继承/最终/匹配等）", name),
+                format!("使用了 v0 不支持的关键字「{}」（如继承/最终等）", name),
             )),
             _ => {
                 let e = self.parse_expr()?;

@@ -698,11 +698,213 @@ static int n_i2c_probe(JmStateRef st, const JmValue *args, uint8_t nargs,
     return JM_NATIVE_OK;
 }
 
+/* ---- 主机端 SPI 替身 ----
+ * PC 上没有 SPI 总线，这里做两件事：
+ *   1) 与板级完全相同的参数校验与错误码；
+ *   2) SPI收发 做回环（返回发出的字节），SPI写块 打印字节轨迹，便于核对命令段。
+ */
+static uint8_t g_host_spi_ready = 0u;
+static uint8_t g_host_spi_hw = 0u;
+
+static int n_spi_init(JmStateRef st, const JmValue *args, uint8_t nargs,
+                      JmValue *out) {
+    int32_t sck = 0;
+    int32_t miso = 0;
+    int32_t mosi = 0;
+    int32_t div = 0;
+
+    if (nargs != 4) {
+        return jm_native_fail(
+            st, JM_NE_PARAM,
+            "SPI初始化需要四个参数：SCK引脚, MISO引脚, MOSI引脚, 分频");
+    }
+    if (jm_value_to_int(args[0], &sck) != 0 ||
+        jm_value_to_int(args[1], &miso) != 0 ||
+        jm_value_to_int(args[2], &mosi) != 0 ||
+        jm_value_to_int(args[3], &div) != 0) {
+        return jm_native_fail(st, JM_NE_TYPE, "SPI初始化：参数必须是整数");
+    }
+    if (sck < 0 || sck > 47 || miso < 0 || miso > 47 || mosi < 0 || mosi > 47) {
+        return jm_native_fail(st, JM_NE_PARAM,
+                              "引脚编码 0–47（0–15=PA0–PA15，16–31=PB0–PB15，32–47=PC0–PC15）");
+    }
+    if (sck == miso || sck == mosi || miso == mosi) {
+        return jm_native_fail(st, JM_NE_PARAM,
+                              "SCK / MISO / MOSI 三个引脚不能重复");
+    }
+    if (div != 2 && div != 4 && div != 8 && div != 16 && div != 32 &&
+        div != 64 && div != 128 && div != 256) {
+        return jm_native_fail(st, JM_NE_PARAM,
+                              "SPI 分频只能是 2/4/8/16/32/64/128/256");
+    }
+
+    g_host_spi_hw = (sck == 5 && miso == 6 && mosi == 7) ? 1u : 0u;
+    g_host_spi_ready = 1u;
+    printf("[SPI] 初始化：%s，SCK=%d MISO=%d MOSI=%d，分频 %d\n",
+           g_host_spi_hw ? "硬件 SPI1" : "软件位翻转",
+           sck, miso, mosi, div);
+    *out = jm_value_bool(g_host_spi_hw);
+    return JM_NATIVE_OK;
+}
+
+static int n_spi_transfer(JmStateRef st, const JmValue *args, uint8_t nargs,
+                          JmValue *out) {
+    int32_t byte = 0;
+
+    if (nargs != 1 || jm_value_to_int(args[0], &byte) != 0) {
+        return jm_native_fail(st, JM_NE_TYPE, "SPI收发需要一个整数参数：数据字节");
+    }
+    if (byte < 0 || byte > 255) {
+        return jm_native_fail(st, JM_NE_PARAM, "SPI 数据字节范围 0–255");
+    }
+    if (g_host_spi_ready == 0u) {
+        return jm_native_fail(st, JM_NE_STATE, "SPI 未初始化，先调用 SPI初始化()");
+    }
+    *out = jm_value_int(byte);          /* 回环：收到的就是发出的 */
+    return JM_NATIVE_OK;
+}
+
+static int n_spi_write_block(JmStateRef st, const JmValue *args, uint8_t nargs,
+                             JmValue *out) {
+    uint8_t i;
+
+    if (nargs < 1 || nargs > 5) {
+        return jm_native_fail(
+            st, JM_NE_PARAM,
+            "SPI写块需要 1–5 个参数：数据1[, 数据2 … 数据5]");
+    }
+    for (i = 0u; i < nargs; i++) {
+        int32_t v = 0;
+        if (jm_value_to_int(args[i], &v) != 0) {
+            return jm_native_fail(st, JM_NE_TYPE, "SPI 数据字节必须是整数");
+        }
+        if (v < 0 || v > 255) {
+            return jm_native_fail(st, JM_NE_PARAM, "SPI 数据字节范围 0–255");
+        }
+    }
+    if (g_host_spi_ready == 0u) {
+        return jm_native_fail(st, JM_NE_STATE, "SPI 未初始化，先调用 SPI初始化()");
+    }
+    printf("[SPI] 写 %d 字节：", (int)nargs);
+    for (i = 0u; i < nargs; i++) {
+        int32_t v = 0;
+        (void)jm_value_to_int(args[i], &v);
+        printf(" 0x%02X", (unsigned)v);
+    }
+    printf("\n");
+    *out = jm_value_nil();
+    return JM_NATIVE_OK;
+}
+
+/* ---- 主机端「引脚」替身 ----
+ * PC 上没有 GPIO：写只记录电平，读返回最后一次写入的值（从未写过读 0），
+ * 让同一份 .jsh 在主机上跑出与板上一致的数值；串口写打到 stdout，等待毫秒真睡。
+ * 引脚编码与板上一致：0–15=PA，16–31=PB，32–47=PC。
+ */
+static uint8_t g_host_pin_level[48];
+
+static int host_pin_check(JmStateRef st, int32_t pin) {
+    if (pin < 0 || pin > 47) {
+        return jm_native_fail(st, JM_NE_PARAM,
+                              "引脚编码 0–47（0–15=PA0–PA15，16–31=PB0–PB15，32–47=PC0–PC15）");
+    }
+    return 0;
+}
+
+static int n_pin_write(JmStateRef st, const JmValue *args, uint8_t nargs,
+                       JmValue *out) {
+    int32_t pin = 0;
+    int32_t level = 0;
+
+    if (nargs != 2) {
+        return jm_native_fail(st, JM_NE_PARAM, "引脚写需要两个参数：引脚, 电平");
+    }
+    if (jm_value_to_int(args[0], &pin) != 0 || jm_value_to_int(args[1], &level) != 0) {
+        return jm_native_fail(st, JM_NE_TYPE, "引脚写：参数必须是整数");
+    }
+    if (host_pin_check(st, pin) != 0) {
+        return -1;
+    }
+    if (level != 0 && level != 1) {
+        return jm_native_fail(st, JM_NE_PARAM, "电平只能是 0 或 1");
+    }
+    g_host_pin_level[pin] = (uint8_t)level;
+    *out = jm_value_nil();
+    return JM_NATIVE_OK;
+}
+
+static int n_pin_read(JmStateRef st, const JmValue *args, uint8_t nargs,
+                      JmValue *out) {
+    int32_t pin = 0;
+
+    if (nargs != 1 || jm_value_to_int(args[0], &pin) != 0) {
+        return jm_native_fail(st, JM_NE_TYPE, "引脚读需要一个整数参数：引脚");
+    }
+    if (host_pin_check(st, pin) != 0) {
+        return -1;
+    }
+    *out = jm_value_int((int32_t)g_host_pin_level[pin]);
+    return JM_NATIVE_OK;
+}
+
+static int n_pin_toggle(JmStateRef st, const JmValue *args, uint8_t nargs,
+                        JmValue *out) {
+    int32_t pin = 0;
+
+    if (nargs != 1 || jm_value_to_int(args[0], &pin) != 0) {
+        return jm_native_fail(st, JM_NE_TYPE, "引脚翻转需要一个整数参数：引脚");
+    }
+    if (host_pin_check(st, pin) != 0) {
+        return -1;
+    }
+    g_host_pin_level[pin] = (uint8_t)(g_host_pin_level[pin] ? 0u : 1u);
+    *out = jm_value_nil();
+    return JM_NATIVE_OK;
+}
+
+static int n_uart_write(JmStateRef st, const JmValue *args, uint8_t nargs,
+                        JmValue *out) {
+    const char *s = 0;
+    uint32_t len = 0;
+
+    if (nargs != 1) {
+        return jm_native_fail(st, JM_NE_PARAM, "串口写需要一个参数：文本");
+    }
+    if (jm_value_text(args[0], &s, &len) != 0) {
+        return jm_native_fail(st, JM_NE_TYPE, "串口写只接受文本");
+    }
+    fwrite(s, 1, len, stdout);
+    *out = jm_value_nil();
+    return JM_NATIVE_OK;
+}
+
+static int n_delay(JmStateRef st, const JmValue *args, uint8_t nargs,
+                   JmValue *out) {
+    int32_t ms = 0;
+
+    if (nargs != 1 || jm_value_to_int(args[0], &ms) != 0) {
+        return jm_native_fail(st, JM_NE_TYPE, "等待毫秒需要一个整数参数：毫秒");
+    }
+    if (ms < 0 || ms > 60000) {
+        return jm_native_fail(st, JM_NE_PARAM, "等待毫秒范围 0–60000");
+    }
+    jm_port_sleep_ms((uint32_t)ms);
+    *out = jm_value_nil();
+    return JM_NATIVE_OK;
+}
+
+static const JmNativeEntry HOST_BOARD_TABLE[] = {
+    F103_NATIVE_TABLE_INIT
+};
+
 static const JmNativeEntry HOST_BUS_TABLE[] = {
     F103_BUS_TABLE_INIT
 };
 
 int jm_host_native_register(void) {
+    if (jm_native_register(HOST_BOARD_TABLE, (uint8_t)F103_NATIVE_ENTRY_COUNT) != 0) {
+        return -1;
+    }
     if (jm_native_register(HOST_QUEUE_TABLE, (uint8_t)JM_QUEUE_ENTRY_COUNT) != 0) {
         return -1;
     }

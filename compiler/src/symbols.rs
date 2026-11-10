@@ -44,6 +44,22 @@ fn walk(stmts: &[Stmt], out: &mut Vec<Symbol>) {
                 }
             }
             StmtKind::Import(name) => push(out, "导入", name, s.line, 1),
+            StmtKind::Enum(e) => {
+                push(out, "枚举", &e.name, s.line, 1);
+                for m in &e.members {
+                    push(out, "成员", m, s.line, 1);
+                }
+            }
+            StmtKind::Match {
+                arms, else_body, ..
+            } => {
+                for (_, body) in arms {
+                    walk(body, out);
+                }
+                if let Some(body) = else_body {
+                    walk(body, out);
+                }
+            }
             StmtKind::If {
                 branches,
                 else_body,

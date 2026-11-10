@@ -28,9 +28,12 @@ uint32_t port_uptime_ms(void);
 void port_led_set(int on);
 void port_led_toggle(void);
 
-/* 板级 GPIO（v0 只开放 PC13 一个输出脚） */
+/* 板级 GPIO：引脚编码 0–47（0–15=PA0–PA15，16–31=PB0–PB15，32–47=PC0–PC15）。
+ * 写会把该脚配成推挽输出 2 MHz；读只读输入寄存器、不改模式；翻转按最后写入的电平取反。
+ * PC13 是板载 LED（低电平点亮），走同一套接口。 */
 void port_gpio_write(uint32_t pin, int level);
 int  port_gpio_read(uint32_t pin);
+int  port_gpio_toggle(uint32_t pin);
 
 /* 忙等延时（不带调度，供 native 函数使用） */
 void port_delay_ms(uint32_t ms);
@@ -61,6 +64,15 @@ int  port_pwm_stop(void);
 int  port_i2c_init(uint32_t scl_pin, uint32_t sda_pin, uint32_t speed_khz);
 int  port_i2c_write(uint32_t addr, uint32_t ctrl, const uint32_t *data, uint32_t len);
 int  port_i2c_probe(uint32_t addr);
+
+/* SPI：引脚编码同上。5/6/7（PA5/PA6/PA7 = SCK/MISO/MOSI）走硬件 SPI1（主机、模式 0、
+ * MSB 先行、NSS 软件），分频只能是 2/4/8/16/32/64/128/256；其它组合走软件位翻转。
+ * port_spi_init 返回 1 = 硬件 SPI1，0 = 软件模拟，-1 = 参数越界/初始化失败。
+ * port_spi_transfer 返回 0 = 成功（收到字节写 *got），-1 = 未初始化/总线超时。 */
+int  port_spi_init(uint32_t sck_pin, uint32_t miso_pin, uint32_t mosi_pin,
+                   uint32_t divider);
+int  port_spi_transfer(uint32_t byte, uint32_t *got);
+int  port_spi_write(const uint32_t *data, uint32_t len);
 
 /* EXTI：PA0–PA4 对应 EXTI0–4，边沿 0=上升 1=下降 2=双沿。
  * 引脚会被改成下拉输入；中断里只做计数与 hook 回调，hook 不许碰 VM。 */

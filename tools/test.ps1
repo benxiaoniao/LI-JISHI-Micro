@@ -79,6 +79,59 @@ try {
         $fail++
     }
 
+    # ---------- N22 前置：引脚 0–47 的越界错误（运行期 E030） ----------
+    $enc = New-Object System.Text.UTF8Encoding($false)
+    [IO.File]::WriteAllText((Join-Path $root "build\pin-bad.jsh"), "导入 引脚`n引脚写(48, 1)`n", $enc)
+    & $micc "build\pin-bad.jsh" -o "build\pin-bad.jmb" | Out-Null
+    $o = (& $jmrun "build\pin-bad.jmb" 2>&1 | Out-String)
+    $code = $LASTEXITCODE
+    $total++
+    if (($code -ne 0) -and $o.Contains("E030")) {
+        Write-Host "[通过] 引脚写(48) 报 E030"
+    } else {
+        Write-Host "[不通过] 引脚写(48) 报 E030"
+        Write-Host $o
+        $fail++
+    }
+
+    [IO.File]::WriteAllText((Join-Path $root "build\pin-neg.jsh"), "导入 引脚`n引脚读(-1)`n", $enc)
+    & $micc "build\pin-neg.jsh" -o "build\pin-neg.jmb" | Out-Null
+    $o = (& $jmrun "build\pin-neg.jmb" 2>&1 | Out-String)
+    $code = $LASTEXITCODE
+    $total++
+    if (($code -ne 0) -and $o.Contains("E030")) {
+        Write-Host "[通过] 引脚读(-1) 报 E030"
+    } else {
+        Write-Host "[不通过] 引脚读(-1) 报 E030"
+        Write-Host $o
+        $fail++
+    }
+
+    # ---------- N11：枚举/匹配 的编译期错误（E139） ----------
+    [IO.File]::WriteAllText((Join-Path $root "build\enum-bad.jsh"), "枚举 颜色:`n    红`n    绿`n`n打印(颜色.紫)`n", $enc)
+    $o = (& $micc "build\enum-bad.jsh" -o "build\enum-bad.jmb" 2>&1 | Out-String)
+    $code = $LASTEXITCODE
+    $total++
+    if (($code -ne 0) -and $o.Contains("E139")) {
+        Write-Host "[通过] 枚举未知成员 报 E139"
+    } else {
+        Write-Host "[不通过] 枚举未知成员 报 E139"
+        Write-Host $o
+        $fail++
+    }
+
+    [IO.File]::WriteAllText((Join-Path $root "build\match-dup.jsh"), "枚举 颜色:`n    红`n    绿`n`n匹配 0:`n    情形 0:`n        打印(1)`n    情形 颜色.红:`n        打印(2)`n", $enc)
+    $o = (& $micc "build\match-dup.jsh" -o "build\match-dup.jmb" 2>&1 | Out-String)
+    $code = $LASTEXITCODE
+    $total++
+    if (($code -ne 0) -and $o.Contains("E139")) {
+        Write-Host "[通过] 匹配重复分支值 报 E139"
+    } else {
+        Write-Host "[不通过] 匹配重复分支值 报 E139"
+        Write-Host $o
+        $fail++
+    }
+
     Write-Host ("共 " + $total + " 个用例，失败 " + $fail + " 个")
     if ($fail -gt 0) { exit 1 }
     exit 0

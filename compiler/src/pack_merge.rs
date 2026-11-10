@@ -83,6 +83,7 @@ pub fn check_dependency_top_level(unit: &Unit) -> Result<()> {
                 | StmtKind::Let(_, _)
                 | StmtKind::FuncDef { .. }
                 | StmtKind::Class(_)
+                | StmtKind::Enum(_)
         );
         if !ok {
             return Err(CompileError::new(
@@ -116,6 +117,8 @@ fn stmt_label(k: &StmtKind) -> &'static str {
         StmtKind::Continue => "继续",
         StmtKind::FuncDef { .. } => "函数",
         StmtKind::Class(_) => "类",
+        StmtKind::Enum(_) => "枚举",
+        StmtKind::Match { .. } => "匹配",
         StmtKind::Return(_) => "返回",
         StmtKind::Throw(_) => "抛出",
         StmtKind::Try { .. } => "尝试",
@@ -289,6 +292,21 @@ impl<'a> Renamer<'a> {
                 }
                 Ok(())
             }
+            StmtKind::Enum(_) => Ok(()),
+            StmtKind::Match {
+                subject,
+                arms,
+                else_body,
+            } => {
+                self.expr(subject)?;
+                for (_, body) in arms {
+                    self.stmts(body, false)?;
+                }
+                if let Some(body) = else_body {
+                    self.stmts(body, false)?;
+                }
+                Ok(())
+            }
             StmtKind::Return(e) => {
                 if let Some(e) = e {
                     self.expr(e)?;
@@ -430,6 +448,16 @@ fn local_decls(stmts: &[Stmt]) -> Vec<String> {
                     }
                 }
                 StmtKind::While(_, b) | StmtKind::Repeat(_, b) => walk(b, out),
+                StmtKind::Match {
+                    arms, else_body, ..
+                } => {
+                    for (_, b) in arms {
+                        walk(b, out);
+                    }
+                    if let Some(b) = else_body {
+                        walk(b, out);
+                    }
+                }
                 StmtKind::Try {
                     body,
                     catch_name,
@@ -573,6 +601,20 @@ pub fn heap_estimate(stmts: &[Stmt], class_fields: &HashMap<String, usize>) -> u
                 }
                 StmtKind::While(c, b) | StmtKind::Repeat(c, b) => expr(c, cf) + walk_stmts(b, cf),
                 StmtKind::ForEach(_, e, b) => expr(e, cf) + walk_stmts(b, cf),
+                StmtKind::Match {
+                    subject,
+                    arms,
+                    else_body,
+                } => {
+                    let mut m = expr(subject, cf);
+                    for (_, b) in arms {
+                        m += walk_stmts(b, cf);
+                    }
+                    if let Some(b) = else_body {
+                        m += walk_stmts(b, cf);
+                    }
+                    m
+                }
                 StmtKind::FuncDef { body, .. } => walk_stmts(body, cf),
                 StmtKind::Class(c) => {
                     let mut m = 0;
@@ -629,6 +671,16 @@ pub fn collect_imports(stmts: &[Stmt], out: &mut HashSet<String>) {
             }
             StmtKind::While(_, b) | StmtKind::Repeat(_, b) => collect_imports(b, out),
             StmtKind::ForEach(_, _, b) => collect_imports(b, out),
+            StmtKind::Match {
+                arms, else_body, ..
+            } => {
+                for (_, b) in arms {
+                    collect_imports(b, out);
+                }
+                if let Some(b) = else_body {
+                    collect_imports(b, out);
+                }
+            }
             StmtKind::FuncDef { body, .. } => collect_imports(body, out),
             StmtKind::Class(c) => {
                 for m in &c.methods {

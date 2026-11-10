@@ -138,6 +138,19 @@
 #define I2C_SR1_AF      (1u << 10)
 #define I2C_CCR_FS      (1u << 15)
 
+/* SPI1（APB2） */
+#define SPI1_CR1        REG32(0x40013000u)
+#define SPI1_SR         REG32(0x40013008u)
+#define SPI1_DR         REG32(0x4001300Cu)
+
+#define RCC_APB2ENR_SPI1EN  (1u << 12)
+#define SPI_CR1_MSTR    (1u << 2)
+#define SPI_CR1_SPE     (1u << 6)
+#define SPI_CR1_SSI     (1u << 8)
+#define SPI_CR1_SSM     (1u << 9)
+#define SPI_SR_RXNE     (1u << 0)
+#define SPI_SR_TXE      (1u << 1)
+
 /* EXTI：编码引脚 0–15 = PA0–PA15，16–31 = PB0–PB15，32–47 = PC0–PC15；
  * EXTI 线号 = 引脚 % 16，端口选择写 AFIO_EXTICR1–4。 */
 #define AFIO_EXTICR1    REG32(0x40010008u)
@@ -342,26 +355,52 @@ void port_led_toggle(void)
     port_led_set(state);
 }
 
-/* ---------------- 板级 GPIO（v0：PC13 一个脚） ---------------- */
+/* ---------------- 板级 GPIO：引脚编码 0–47（0–15=PA, 16–31=PB, 32–47=PC） ---------------- */
+
+/* gpio_reg / gpio_set_mode 定义在后面的 I2C/SPI 段，这里先声明，保证前面可用。 */
+static volatile uint32_t *gpio_reg(uint32_t port, uint32_t off);
+static void gpio_set_mode(uint32_t pin, uint32_t mode);
+
+/* 最后一次写入的电平（按引脚编码索引）；从未写过按 0 处理。 */
+static uint8_t g_pin_out[48];
 
 void port_gpio_write(uint32_t pin, int level)
 {
-    if (pin != LED_PIN) {
+    volatile uint32_t *set;
+    volatile uint32_t *reset;
+    uint32_t bit;
+
+    if (pin > 47u) {
         return;
     }
+    gpio_set_mode(pin, 0x2u);            /* 推挽输出 2 MHz（够 CS/普通 GPIO） */
+    set = gpio_reg(pin / 16u, 0x10u);    /* BSRR */
+    reset = gpio_reg(pin / 16u, 0x14u);  /* BRR */
+    bit = 1u << (pin % 16u);
     if (level) {
-        GPIOC_BSRR = (1u << LED_PIN);   /* 高电平 */
+        *set = bit;
+        g_pin_out[pin] = 1u;
     } else {
-        GPIOC_BRR = (1u << LED_PIN);    /* 低电平（板载 LED 点亮） */
+        *reset = bit;
+        g_pin_out[pin] = 0u;
     }
 }
 
 int port_gpio_read(uint32_t pin)
 {
-    if (pin != LED_PIN) {
+    if (pin > 47u) {
         return -1;
     }
-    return (int)((GPIOC_IDR >> LED_PIN) & 1u);
+    return (int)((*gpio_reg(pin / 16u, 0x08u) >> (pin % 16u)) & 1u);
+}
+
+int port_gpio_toggle(uint32_t pin)
+{
+    if (pin > 47u) {
+        return -1;
+    }
+    port_gpio_write(pin, g_pin_out[pin] ? 0 : 1);
+    return (int)g_pin_out[pin];
 }
 
 void port_delay_ms(uint32_t ms)
@@ -935,6 +974,173 @@ int port_i2c_probe(uint32_t addr)
         bb_stop();
         return (ack == 0u) ? 1 : 0;
     }
+}
+
+/* ---------------- SPI（PA5/PA6/PA7 → 硬件 SPI1，其它引脚 → 软件位翻转） ---------------- */
+
+#define SPI_PIN_HW_SCK  5u    /* PA5 */
+#define SPI_PIN_HW_MISO 6u    /* PA6 */
+#define SPI_PIN_HW_MOSI 7u    /* PA7 */
+
+/* GPIO CR nibble 的常用模式（F103 参考手册 9.1.11） */
+#define GPIO_MODE_OUT_PP_50M  0x3u
+#define GPIO_MODE_IN_FLOAT    0x4u
+#define GPIO_MODE_AF_PP_50M   0xBu
+
+static uint8_t g_spi_ready = 0u;
+static uint8_t g_spi_hw = 0u;
+static uint32_t g_spi_sck = 0u;
+static uint32_t g_spi_miso = 0u;
+static uint32_t g_spi_mosi = 0u;
+static uint32_t g_spi_div = 2u;
+
+static void gpio_set_mode(uint32_t pin, uint32_t mode)
+{
+    uint32_t port = pin / 16u;
+    uint32_t line = pin % 16u;
+    uint32_t shift = (line & 7u) * 4u;
+    volatile uint32_t *cr = gpio_reg(port, (line < 8u) ? 0x00u : 0x04u);
+
+    RCC_APB2ENR |= (1u << (2u + port));   /* IOPAEN / IOPBEN / IOPCEN */
+    *cr = (*cr & ~(0xFu << shift)) | ((mode & 0xFu) << shift);
+}
+
+/* SPI_CR1.BR = log2(分频) - 1；只接受 2 的幂，非法返回 -1 */
+static int spi_encode_br(uint32_t divider)
+{
+    uint32_t br = 0u;
+    uint32_t d = 2u;
+
+    while (d < divider) {
+        d <<= 1;
+        br++;
+    }
+    return (d == divider) ? (int)br : -1;
+}
+
+static void spi_bitbang_delay(void)
+{
+    volatile uint32_t i;
+    uint32_t n = g_spi_div * 4u;
+    for (i = 0u; i < n; i++) {
+    }
+}
+
+/* 模式 0（CPOL=0/CPHA=0）、MSB 先行：上升沿采样 */
+static uint32_t spi_bitbang_byte(uint32_t byte)
+{
+    uint32_t i;
+    uint32_t got = 0u;
+
+    for (i = 0u; i < 8u; i++) {
+        bb_write(g_spi_mosi, (byte & 0x80u) ? 1u : 0u);
+        spi_bitbang_delay();
+        bb_write(g_spi_sck, 1u);
+        spi_bitbang_delay();
+        got = (got << 1) | bb_read(g_spi_miso);
+        bb_write(g_spi_sck, 0u);
+        spi_bitbang_delay();
+        byte <<= 1;
+    }
+    return got;
+}
+
+int port_spi_init(uint32_t sck_pin, uint32_t miso_pin, uint32_t mosi_pin,
+                  uint32_t divider)
+{
+    int br;
+
+    if (sck_pin > 47u || miso_pin > 47u || mosi_pin > 47u) {
+        return -1;
+    }
+    if (sck_pin == miso_pin || sck_pin == mosi_pin || miso_pin == mosi_pin) {
+        return -1;
+    }
+    br = spi_encode_br(divider);
+    if (br < 0) {
+        return -1;
+    }
+
+    g_spi_sck = sck_pin;
+    g_spi_miso = miso_pin;
+    g_spi_mosi = mosi_pin;
+    g_spi_div = divider;
+    g_spi_hw = 0u;
+
+    if (sck_pin == SPI_PIN_HW_SCK && miso_pin == SPI_PIN_HW_MISO &&
+        mosi_pin == SPI_PIN_HW_MOSI) {
+        RCC_APB2ENR |= RCC_APB2ENR_IOPAEN | RCC_APB2ENR_SPI1EN;
+        gpio_set_mode(SPI_PIN_HW_SCK, GPIO_MODE_AF_PP_50M);
+        gpio_set_mode(SPI_PIN_HW_MISO, GPIO_MODE_IN_FLOAT);
+        gpio_set_mode(SPI_PIN_HW_MOSI, GPIO_MODE_AF_PP_50M);
+
+        SPI1_CR1 = 0u;
+        /* 主机 + NSS 软件（SSM/SSI）+ 模式 0 + MSB 先行 */
+        SPI1_CR1 = SPI_CR1_MSTR | SPI_CR1_SSM | SPI_CR1_SSI |
+                   ((uint32_t)br << 3) | SPI_CR1_SPE;
+        g_spi_hw = 1u;
+    } else {
+        gpio_set_mode(g_spi_sck, GPIO_MODE_OUT_PP_50M);
+        gpio_set_mode(g_spi_mosi, GPIO_MODE_OUT_PP_50M);
+        gpio_set_mode(g_spi_miso, GPIO_MODE_IN_FLOAT);
+        bb_write(g_spi_sck, 0u);
+        bb_write(g_spi_mosi, 0u);
+    }
+
+    g_spi_ready = 1u;
+    return (int)g_spi_hw;                /* 1 = 硬件 SPI1，0 = 软件位翻转 */
+}
+
+int port_spi_transfer(uint32_t byte, uint32_t *got)
+{
+    uint32_t timeout;
+    uint32_t value;
+
+    if (g_spi_ready == 0u) {
+        return -1;
+    }
+    if (g_spi_hw == 0u) {
+        value = spi_bitbang_byte(byte & 0xFFu);
+        if (got != 0) {
+            *got = value;
+        }
+        return 0;
+    }
+
+    timeout = 200000u;
+    while ((SPI1_SR & SPI_SR_TXE) == 0u) {
+        if (--timeout == 0u) {
+            return -1;
+        }
+    }
+    SPI1_DR = byte & 0xFFu;
+    timeout = 200000u;
+    while ((SPI1_SR & SPI_SR_RXNE) == 0u) {
+        if (--timeout == 0u) {
+            return -1;
+        }
+    }
+    value = SPI1_DR & 0xFFu;
+    if (got != 0) {
+        *got = value;
+    }
+    return 0;
+}
+
+int port_spi_write(const uint32_t *data, uint32_t len)
+{
+    uint32_t i;
+    uint32_t got = 0u;
+
+    if (g_spi_ready == 0u || data == 0 || len == 0u) {
+        return -1;
+    }
+    for (i = 0u; i < len; i++) {
+        if (port_spi_transfer(data[i], &got) != 0) {
+            return -1;
+        }
+    }
+    return 0;
 }
 
 /* ---------------- EXTI（PA0–PA4 → EXTI0–4） ---------------- */

@@ -252,6 +252,16 @@ const SYNTAX: &[SyntaxRow] = &[
         example: "令 c = 新建 计数器(5)\nc.加(3)\n打印(c.值)",
     },
     SyntaxRow {
+        construct: "枚举",
+        form: "枚举 名字:\n    成员\n    成员",
+        example: "枚举 颜色:\n    红\n    绿\n    蓝",
+    },
+    SyntaxRow {
+        construct: "匹配",
+        form: "匹配 表达式:\n    情形 整数字面量 / 枚举.成员: ...\n    情形 其他: ...",
+        example: "匹配 颜色.绿:\n    情形 颜色.红:\n        打印(\"红\")\n    情形 其他:\n        打印(\"其他\")",
+    },
+    SyntaxRow {
         construct: "下标",
         form: "容器[下标]",
         example: "列表[0]",
@@ -270,9 +280,12 @@ const SYNTAX: &[SyntaxRow] = &[
 
 const GRAMMAR: &[&str] = &[
     "program := { statement }",
-    "statement := import | class | let | assign | if | while | repeat | foreach | funcdef | return | break | continue | throw | try | expr_stmt",
+    "statement := import | class | enum | let | assign | if | while | repeat | foreach | match | funcdef | return | break | continue | throw | try | expr_stmt",
     "class := '类' IDENT ':' NEWLINE INDENT { class_member } DEDENT",
     "class_member := '令' IDENT '=' expr NEWLINE | funcdef",
+    "enum := '枚举' IDENT ':' NEWLINE INDENT { IDENT NEWLINE } DEDENT",
+    "match := '匹配' expr ':' NEWLINE INDENT { '情形' pattern block } DEDENT",
+    "pattern := INT | IDENT '.' IDENT | '其他'",
     "import := '导入' IDENT",
     "let := '令' IDENT '=' expr",
     "assign := lvalue '=' expr | lvalue AUGOP expr",
@@ -325,6 +338,8 @@ const SEMANTICS: &[SemanticRow] = &[
     SemanticRow { topic: "字符串", rule: "单引号、双引号、中文引号都可定界；反斜杠转义支持 \\n \\t \\\\ \\\" \\'；文本按 UTF-8 存。" },
     SemanticRow { topic: "字典键", rule: "键必须是整数/文本/空/真/假这类不可变值；列表、字典、函数、实例不能当键。" },
     SemanticRow { topic: "类", rule: "`类` 只能写在模块顶层，类名全局唯一；类体只允许字段（`令 名 = 默认值`，默认值必填且不能引用 `本`）与方法。`新建 C(...)` 调用构造：有 `初始化` 时实参个数必须与它一致，否则只能零实参；`初始化` 里禁止 `返回`，构造结果固定是实例本身。方法内 `本` 是只读绑定（不能 `本 = ...`），`本.字段` 读写与 `对象.字段` 相同。没有继承、没有虚分派：字段和方法都在运行期按名字在类的单层表里查找（结构化多态）。未声明字段/方法报 E035/E037，对非实例取成员报 E036；`本.未知` 与 `本.方法` 当值取是编译期 E122/E123。" },
+    SemanticRow { topic: "枚举", rule: "`枚举 名字:` 下每行一个成员，按声明顺序取 0..n-1 的编译期整数常量；成员写作 `枚举名.成员`，编译期直接折成整数，不产生运行期对象、不进名字表。枚举名只能写在模块顶层，不能与顶层变量/函数/类重名，成员不能重复（E139）。" },
+    SemanticRow { topic: "匹配", rule: "`匹配 表达式:` 后跟若干 `情形 整数字面量` 或 `情形 枚举.成员:` 分支，以及可选的 `情形 其他:`（必须最后）；主体只求值一次，按 `==` 顺序比较，命中即执行该分支再跳出。只做语句、无返回值、不要求覆盖所有取值；分支值不能重复（E139）。" },
     SemanticRow { topic: "实例", rule: "实例是普通堆对象：可进列表/字典值、可 `抛出` 并被 `捕获`、可被闭包捕获（含捕获 `本`）；相等比较按身份；`长度`/下标/遍历不适用；native 只能把实例当入参透传，不能构造或返回。" },
     SemanticRow { topic: "迭代", rule: "可遍历：列表、文本（按字符）、字典（按键）、范围。" },
     SemanticRow { topic: "异常", rule: "`抛出 表达式` 抛任意值；`尝试: ... 捕获 名字: ...`（或匿名 `捕获:`）在同一函数内捕获。只有显式 `抛出` 可捕获：除零（E007）、堆耗尽（E017）等 VM 故障与原生错误（E030/E031/E033）一律终止，不能被 `捕获` 拦下。没有 `最后`，一个 `尝试` 只能跟一个 `捕获`。" },
@@ -527,6 +542,12 @@ const EXAMPLES: &[Example] = &[
         title: "板级点灯（导入原生模块）",
         source: "导入 引脚\n引脚写(13, 0)\n等待毫秒(400)\n引脚写(13, 1)",
         prints: "（板上执行，无主机输出）",
+    },
+    Example {
+        id: "enum-match",
+        title: "枚举与匹配",
+        source: "枚举 颜色:\n    红\n    绿\n    蓝\n\n令 c = 颜色.绿\n匹配 c:\n    情形 颜色.红:\n        打印(\"红\")\n    情形 颜色.绿:\n        打印(\"绿\")\n    情形 其他:\n        打印(\"其他\")\n打印(颜色.蓝)",
+        prints: "绿\n2",
     },
 ];
 
@@ -1340,7 +1361,7 @@ pub fn check() -> Result<(), String> {
             "E102", "E103", "E104", "E105", "E106", "E107", "E108", "E109", "E110", "E111",
             "E112", "E113", "E114", "E115", "E116", "E117", "E118", "E119", "E120", "E121",
             "E122", "E123", "E124", "E125", "E126", "E127", "E128", "E129", "E130", "E131",
-            "E132", "E133", "E134", "E135", "E136", "E137", "E138",
+            "E132", "E133", "E134", "E135", "E136", "E137", "E138", "E139",
         ] {
             if text.contains(&format!("\"{}\"", code)) && !used.iter().any(|u| u == code) {
                 used.push(code.to_string());

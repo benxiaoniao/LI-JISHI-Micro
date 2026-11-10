@@ -77,6 +77,23 @@ pub struct ClassDecl {
     pub methods: Vec<MethodDecl>,
 }
 
+/// 枚举声明：成员按声明顺序取 0..n-1 的编译期整数常量，不产生运行期对象。
+#[derive(Clone, Debug)]
+pub struct EnumDecl {
+    pub name: String,
+    pub members: Vec<String>,
+}
+
+/// `匹配` 的分支模式。
+#[derive(Clone, Debug)]
+pub enum MatchPattern {
+    Int(i64),
+    /// `枚举名.成员`
+    EnumMember(String, String),
+    /// `其他`
+    Else,
+}
+
 #[derive(Clone, Debug)]
 pub struct Stmt {
     pub kind: StmtKind,
@@ -108,6 +125,14 @@ pub enum StmtKind {
     },
     /// 顶层类声明；类体只允许字段与函数。
     Class(ClassDecl),
+    /// 顶层枚举声明；只产生编译期整数常量。
+    Enum(EnumDecl),
+    /// 匹配语句：主体只求值一次，按 `==` 顺序比较；只做语句，无返回值。
+    Match {
+        subject: Expr,
+        arms: Vec<(MatchPattern, Vec<Stmt>)>,
+        else_body: Option<Vec<Stmt>>,
+    },
     Return(Option<Expr>),
     Throw(Expr),
     Try {
