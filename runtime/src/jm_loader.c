@@ -18,8 +18,8 @@ int jm_loader_init(JmState *st, const void *data, size_t len) {
     if (p[0] != 'J' || p[1] != 'M' || p[2] != 'B' || p[3] != '1') {
         return jm_fail(st, E_FILE, "不是 .jmb 文件（魔数不对）");
     }
-    if (p[4] != 4) {
-        return jm_fail(st, E_FILE, "不支持的字节码版本（需要 JMB v4）");
+    if (p[4] != 5) {
+        return jm_fail(st, E_FILE, "不支持的字节码版本（需要 JMB v5）");
     }
     st->nconsts = p[6];
     st->nnames = p[7];
@@ -95,25 +95,38 @@ int jm_loader_init(JmState *st, const void *data, size_t len) {
         return jm_fail(st, E_FILE, "捕获表长度不一致");
     }
 
-    /* 类表：定长 8 B 记录数组，随后是字段名数组与方法(name,code)数组，
-     * 记录里的偏移都相对 class_start。 */
+    /* 类表：定长 10 B 记录数组，随后是字段名数组与方法(name,code)数组，
+     * 记录里的偏移都相对 class_start。[8] 是父类下标（255 = 无父类）。 */
     st->class_start = tables_end;
-    uint32_t cls_end = st->class_start + (uint32_t)st->nclasses * 8u;
+    uint32_t cls_end = st->class_start + (uint32_t)st->nclasses * 10u;
     if (cls_end > st->len) {
         return jm_fail(st, E_FILE, "类表越界");
     }
     for (uint8_t i = 0; i < st->nclasses; i++) {
-        const uint8_t *e = st->base + st->class_start + (uint32_t)i * 8u;
+        const uint8_t *e = st->base + st->class_start + (uint32_t)i * 10u;
         uint8_t nfields = e[1];
         uint8_t nmethods = e[2];
         uint8_t init_code = e[3];
         uint32_t foff = st->class_start + rd16(e + 4);
         uint32_t moff = st->class_start + rd16(e + 6);
+        uint8_t parent = e[8];
         if (e[0] >= st->nnames) {
             return jm_fail(st, E_FILE, "类名下标越界");
         }
         if (init_code >= st->ncodes) {
             return jm_fail(st, E_FILE, "初始化代码下标越界");
+        }
+        if (parent != 0xFF && (parent == i || parent >= st->nclasses)) {
+            return jm_fail(st, E_FILE, "父类下标越界或自继承");
+        }
+        /* 防环：沿父链最多走 nclasses 步。 */
+        uint8_t k = parent;
+        uint8_t hops = 0;
+        while (k != 0xFF) {
+            if (hops++ >= st->nclasses || k >= st->nclasses) {
+                return jm_fail(st, E_FILE, "类继承关系成环");
+            }
+            k = st->base[st->class_start + (uint32_t)k * 10u + 8u];
         }
         if (foff + nfields > st->len || moff + (uint32_t)nmethods * 2u > st->len) {
             return jm_fail(st, E_FILE, "类成员表越界");

@@ -142,6 +142,19 @@ JmStr *jm_str_new_obj(const char *s, uint32_t len) {
     return str;
 }
 
+JmBytes *jm_bytes_new_obj(const uint8_t *p, uint32_t len) {
+    JmBytes *b = (JmBytes *)jm_obj_alloc(
+        JM_T_BYTES, (sizeof(JmBytes) - sizeof(JmObj)) + len);
+    if (!b) {
+        return NULL;
+    }
+    b->len = len;
+    if (len && p) {
+        memcpy(b->data, p, len);
+    }
+    return b;
+}
+
 JmList *jm_list_new_obj(void) {
     JmList *l = (JmList *)jm_obj_alloc(JM_T_LIST, sizeof(JmList) - sizeof(JmObj));
     if (!l) {
@@ -151,6 +164,17 @@ JmList *jm_list_new_obj(void) {
     l->cap = 0;
     l->items = NULL;
     return l;
+}
+
+JmSet *jm_set_new_obj(void) {
+    JmSet *s = (JmSet *)jm_obj_alloc(JM_T_SET, sizeof(JmSet) - sizeof(JmObj));
+    if (!s) {
+        return NULL;
+    }
+    s->len = 0;
+    s->cap = 0;
+    s->items = NULL;
+    return s;
 }
 
 JmDict *jm_dict_new_obj(void) {
@@ -260,6 +284,40 @@ int jm_list_push(JmState *st, JmList *l, JmValue v) {
     }
     l->items[l->len++] = v;
     return 0;
+}
+
+int jm_set_add(JmState *st, JmSet *s, JmValue v) {
+    /* 与字典键同规则：容器/迭代器/实例不能进集合。 */
+    if (JM_TAG(v) == JM_TAG_HEAP) {
+        uint16_t vt = jm_obj(v)->type;
+        if (vt == JM_T_LIST || vt == JM_T_DICT || vt == JM_T_ITER ||
+            vt == JM_T_INSTANCE || vt == JM_T_SET) {
+            return jm_fail(st, E_KEY, "集合元素必须是不可变的值");
+        }
+    }
+    for (uint32_t i = 0; i < s->len; i++) {
+        if (jm_equal(s->items[i], v)) {
+            jm_release(v);
+            return 0;
+        }
+    }
+    if (s->cap < s->len + 1) {
+        uint32_t cap = s->cap ? s->cap * 2 : 4;
+        JmValue *it = (JmValue *)jm_raw_alloc((size_t)cap * sizeof(JmValue));
+        if (!it) {
+            return jm_fail(st, E_OOM, "集合扩容失败");
+        }
+        if (s->len) {
+            memcpy(it, s->items, (size_t)s->len * sizeof(JmValue));
+        }
+        if (s->items) {
+            jm_raw_free(s->items);
+        }
+        s->items = it;
+        s->cap = cap;
+    }
+    s->items[s->len++] = v;
+    return 1;
 }
 
 int jm_dict_set(JmState *st, JmDict *d, JmValue k, JmValue v) {
@@ -383,6 +441,8 @@ static void free_obj(JmValue v) {
     }
     case JM_T_RANGE:
         break;
+    case JM_T_BYTES:
+        break;
     case JM_T_CLOSURE: {
         JmClosure *c = (JmClosure *)o;
         for (uint8_t i = 0; i < c->ncap; i++) {
@@ -394,6 +454,16 @@ static void free_obj(JmValue v) {
         JmInstance *in = (JmInstance *)o;
         for (uint8_t i = 0; i < in->nfields; i++) {
             jm_release(in->fields[i]);
+        }
+        break;
+    }
+    case JM_T_SET: {
+        JmSet *s = (JmSet *)o;
+        for (uint32_t i = 0; i < s->len; i++) {
+            jm_release(s->items[i]);
+        }
+        if (s->items) {
+            jm_raw_free(s->items);
         }
         break;
     }

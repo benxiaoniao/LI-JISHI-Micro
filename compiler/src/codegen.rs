@@ -44,7 +44,9 @@ pub struct CodeObj {
 pub struct ClassObj {
     pub name_idx: u8,
     pub init_code: u8,
-    /// 字段名在名字表中的下标，按声明顺序。
+    /// 父类下标；255 表示没有父类（单继承）。
+    pub parent: u8,
+    /// 字段名在名字表中的下标，按声明顺序（父类扁平字段在前）。
     pub fields: Vec<u8>,
     /// `(方法名下标, 代码对象下标)`。
     pub methods: Vec<(u8, u8)>,
@@ -96,6 +98,8 @@ struct Builder {
     class_map: HashMap<String, u8>,
     /// 枚举名 → (成员名 → 编译期整数常量)。
     enums: HashMap<String, HashMap<String, i32>>,
+    /// `--no-assert`：整句 `断言` 不生成字节码。
+    no_assert: bool,
 }
 
 impl Builder {
@@ -108,6 +112,7 @@ impl Builder {
             classes: Vec::new(),
             class_map: HashMap::new(),
             enums: HashMap::new(),
+            no_assert: false,
         }
     }
 
@@ -132,7 +137,7 @@ impl Builder {
         Ok(i as u8)
     }
 
-    /// 在类表里找字段名下标。
+    /// 在类表里找字段名下标（字段数组已按继承扁平化）。
     fn class_field_idx(&self, class_idx: u8, name: &str) -> Option<u8> {
         let c = self.classes.get(class_idx as usize)?;
         c.fields
@@ -141,14 +146,44 @@ impl Builder {
             .find(|&ni| self.names.get(ni as usize).map(|s| s == name).unwrap_or(false))
     }
 
-    /// 在类表里找方法名下标。
+    /// 在类表里找方法名下标；沿父链上溯，子类同名方法优先（覆写）。
     fn class_method_idx(&self, class_idx: u8, name: &str) -> Option<u8> {
-        let c = self.classes.get(class_idx as usize)?;
-        c.methods
-            .iter()
-            .copied()
-            .find(|&(ni, _)| self.names.get(ni as usize).map(|s| s == name).unwrap_or(false))
-            .map(|(ni, _)| ni)
+        let mut ci = class_idx;
+        let mut hops = 0usize;
+        while ci != 255 {
+            let c = self.classes.get(ci as usize)?;
+            if let Some(&(ni, _)) = c.methods.iter().find(|&&(ni, _)| {
+                self.names.get(ni as usize).map(|s| s == name).unwrap_or(false)
+            }) {
+                return Some(ni);
+            }
+            hops += 1;
+            if hops > self.classes.len() {
+                return None;
+            }
+            ci = c.parent;
+        }
+        None
+    }
+
+    /// 沿父链找方法并返回代码对象下标（`超.方法(...)` 的静态调用目标）。
+    fn class_method_code_idx(&self, class_idx: u8, name: &str) -> Option<u8> {
+        let mut ci = class_idx;
+        let mut hops = 0usize;
+        while ci != 255 {
+            let c = self.classes.get(ci as usize)?;
+            if let Some(&(_, code)) = c.methods.iter().find(|&&(ni, _)| {
+                self.names.get(ni as usize).map(|s| s == name).unwrap_or(false)
+            }) {
+                return Some(code);
+            }
+            hops += 1;
+            if hops > self.classes.len() {
+                return None;
+            }
+            ci = c.parent;
+        }
+        None
     }
 
     fn const_int(&mut self, v: i64, line: u32, col: u32) -> Result<u8> {
@@ -653,6 +688,27 @@ fn collect_free_expr(e: &Expr, bound: &HashSet<String>, out: &mut Vec<String>) {
                 collect_free_expr(a, bound, out);
             }
         }
+        ExprKind::SuperCall(_, args) => {
+            note_free(out, bound, "本");
+            for a in args {
+                collect_free_expr(a, bound, out);
+            }
+        }
+        ExprKind::AnonFunc(params, body) => {
+            // 匿名函数体里的自由名字冒泡到本层，供中间层提前建立捕获。
+            let mut child_bound: HashSet<String> = params.iter().cloned().collect();
+            let mut decls = Vec::new();
+            collect_decls(body, &mut decls);
+            child_bound.extend(decls);
+            collect_free_stmts(body, &child_bound, out);
+        }
+        ExprKind::Match(subject, arms, else_value) => {
+            collect_free_expr(subject, bound, out);
+            for (_, v) in arms {
+                collect_free_expr(v, bound, out);
+            }
+            collect_free_expr(else_value, bound, out);
+        }
         _ => {}
     }
 }
@@ -693,6 +749,12 @@ fn collect_free_stmts(stmts: &[Stmt], bound: &HashSet<String>, out: &mut Vec<Str
                 }
             }
             StmtKind::Expr(e) => collect_free_expr(e, bound, out),
+            StmtKind::Assert(c, m) => {
+                collect_free_expr(c, bound, out);
+                if let Some(m) = m {
+                    collect_free_expr(m, bound, out);
+                }
+            }
             StmtKind::Return(Some(e)) => collect_free_expr(e, bound, out),
             StmtKind::Return(None) => {}
             StmtKind::Throw(e) => collect_free_expr(e, bound, out),
@@ -752,6 +814,7 @@ pub fn compile(
     stmts: &[Stmt],
     files: Vec<String>,
     spans: &[(usize, usize, u8)],
+    no_assert: bool,
 ) -> Result<Program> {
     // 先汇总顶层导入：`导入 模块` 是纯编译期声明，不生成字节码，
     // 但模块里的原生名字会进入本文件的名字作用域（供静态检查）。
@@ -784,6 +847,7 @@ pub fn compile(
     }
 
     let mut b = Builder::new();
+    b.no_assert = no_assert;
     let module_name = b.intern_name("<模块>", 1, 1)?;
     b.codes.push(CodeObj {
         name_idx: module_name,
@@ -895,15 +959,40 @@ fn collect_enums(b: &mut Builder, stmts: &[Stmt]) -> Result<()> {
             ));
         }
         let mut map: HashMap<String, i32> = HashMap::new();
-        for (i, m) in e.members.iter().enumerate() {
-            if map.insert(m.clone(), i as i32).is_some() {
+        // 成员取值：显式值优先，否则上一个取值 +1（首个为 0）。
+        let mut by_value: HashMap<i64, String> = HashMap::new();
+        let mut next: i64 = 0;
+        for m in &e.members {
+            let v = m.value.unwrap_or(next);
+            if !(-(1i64 << 28)..=(1i64 << 28) - 1).contains(&v) {
                 return Err(CompileError::new(
-                    "E139",
-                    s.line,
+                    "E110",
+                    m.line,
                     1,
-                    format!("枚举「{}」里重复的成员「{}」", e.name, m),
+                    "枚举成员的取值超出 29 位范围（-268435456 .. 268435455）",
                 ));
             }
+            if map.insert(m.name.clone(), v as i32).is_some() {
+                return Err(CompileError::new(
+                    "E139",
+                    m.line,
+                    1,
+                    format!("枚举「{}」里重复的成员「{}」", e.name, m.name),
+                ));
+            }
+            if let Some(prev) = by_value.get(&v) {
+                return Err(CompileError::new(
+                    "E139",
+                    m.line,
+                    1,
+                    format!(
+                        "枚举「{}」里「{}」与「{}」的取值都是 {}；取值不能重复",
+                        e.name, prev, m.name, v
+                    ),
+                ));
+            }
+            by_value.insert(v, m.name.clone());
+            next = v + 1;
         }
         b.enums.insert(e.name.clone(), map);
     }
@@ -932,6 +1021,7 @@ fn compile_classes(
 
     // 第一遍：分配类下标（类名全局唯一）。
     let mut decls: Vec<(&ClassDecl, u8)> = Vec::new();
+    let mut decl_lines: Vec<u32> = Vec::new();
     for (si, s) in stmts.iter().enumerate() {
         if let StmtKind::Class(c) = &s.kind {
             if top.contains(&c.name) {
@@ -957,14 +1047,78 @@ fn compile_classes(
             b.classes.push(ClassObj {
                 name_idx: 0,
                 init_code: 0,
+                parent: 255,
                 fields: Vec::new(),
                 methods: Vec::new(),
             });
             decls.push((c, file_at(spans, si)));
+            decl_lines.push(s.line);
         }
     }
 
-    // 第二遍：类名 / 字段名 / 方法名进全局名字表，并做类内唯一性检查。
+    // 父类解析：按名字查类表，父类可以写在子类之后。
+    let mut parents: Vec<u8> = vec![255; decls.len()];
+    for (ci, (c, _)) in decls.iter().enumerate() {
+        let Some(p) = &c.parent else { continue };
+        let Some(&pi) = b.class_map.get(p) else {
+            return Err(CompileError::new(
+                "E140",
+                decl_lines[ci],
+                1,
+                format!("父类「{}」没有定义（继承只支持同一模块里的类）", p),
+            ));
+        };
+        if pi as usize == ci {
+            return Err(CompileError::new(
+                "E140",
+                decl_lines[ci],
+                1,
+                format!("类「{}」不能继承自己", c.name),
+            ));
+        }
+        // LI012 没有「超」，父构造只能零实参自动调用。
+        if let Some(m) = decls[pi as usize]
+            .0
+            .methods
+            .iter()
+            .find(|m| m.name == "初始化")
+        {
+            if !m.params.is_empty() {
+                return Err(CompileError::new(
+                    "E140",
+                    decl_lines[ci],
+                    1,
+                    format!(
+                        "父类「{}」的初始化带参数，LI012 不支持自动传参（等「超」）",
+                        decls[pi as usize].0.name
+                    ),
+                ));
+            }
+        }
+        parents[ci] = pi;
+        b.classes[ci].parent = pi;
+    }
+    // 防环：沿父链最多走 nclasses 步。
+    for ci in 0..decls.len() {
+        let mut k = parents[ci];
+        let mut hops = 0usize;
+        while k != 255 {
+            hops += 1;
+            if hops > decls.len() {
+                return Err(CompileError::new(
+                    "E140",
+                    decl_lines[ci],
+                    1,
+                    format!("类「{}」的继承关系成环", decls[ci].0.name),
+                ));
+            }
+            k = parents[k as usize];
+        }
+    }
+
+    // 第二遍：类名 / 字段名 / 方法名进全局名字表，做类内唯一性检查。
+    let mut own_fields: Vec<Vec<u8>> = Vec::new();
+    let mut own_method_names: Vec<Vec<String>> = Vec::new();
     for (ci, (c, _)) in decls.iter().enumerate() {
         let name_idx = b.intern_name(&c.name, 1, 1)?;
         b.classes[ci].name_idx = name_idx;
@@ -1004,24 +1158,107 @@ fn compile_classes(
         for (fname, _) in &c.fields {
             fields.push(b.intern_name(fname, 1, 1)?);
         }
-        b.classes[ci].fields = fields;
+        own_fields.push(fields);
+        let mut mnames = Vec::new();
+        for m in &c.methods {
+            if m.name == "初始化" {
+                continue;
+            }
+            b.intern_name(&m.name, m.line, 1)?;
+            mnames.push(m.name.clone());
+        }
+        own_method_names.push(mnames);
     }
 
-    // 第三遍：编译方法体与合成的初始化代码对象。
-    for (ci, (c, fid)) in decls.iter().enumerate() {
-        let ci = ci as u8;
+    // 第三遍：按继承深度升序扁平化字段（父类字段在前），并做跨类成员冲突检查。
+    let mut depth = vec![0usize; decls.len()];
+    for (ci, d) in depth.iter_mut().enumerate() {
+        let mut k = parents[ci];
+        while k != 255 {
+            *d += 1;
+            k = parents[k as usize];
+        }
+    }
+    let mut order: Vec<usize> = (0..decls.len()).collect();
+    order.sort_by_key(|&ci| depth[ci]);
+    for &ci in &order {
+        let (c, _) = decls[ci];
+        let mut flat: Vec<u8> = if parents[ci] == 255 {
+            Vec::new()
+        } else {
+            b.classes[parents[ci] as usize].fields.clone()
+        };
+        let ancestor_fields: Vec<String> = flat
+            .iter()
+            .map(|&ni| b.names[ni as usize].clone())
+            .collect();
+        let mut ancestor_methods: HashSet<String> = HashSet::new();
+        let mut k = parents[ci];
+        while k != 255 {
+            for n in &own_method_names[k as usize] {
+                ancestor_methods.insert(n.clone());
+            }
+            k = parents[k as usize];
+        }
+        for (i, (fname, fexpr)) in c.fields.iter().enumerate() {
+            if ancestor_fields.iter().any(|n| n == fname) {
+                return Err(CompileError::new(
+                    "E140",
+                    fexpr.line,
+                    fexpr.col,
+                    format!("子类不能重定义父类字段「{}」", fname),
+                ));
+            }
+            if ancestor_methods.contains(fname) {
+                return Err(CompileError::new(
+                    "E140",
+                    fexpr.line,
+                    fexpr.col,
+                    format!("「{}」在父类里是方法，子类不能当字段", fname),
+                ));
+            }
+            flat.push(own_fields[ci][i]);
+        }
+        for mname in &own_method_names[ci] {
+            if ancestor_fields.iter().any(|n| n == mname) {
+                return Err(CompileError::new(
+                    "E140",
+                    decl_lines[ci],
+                    1,
+                    format!("「{}」在父类里是字段，子类不能当方法", mname),
+                ));
+            }
+        }
+        if flat.len() > 255 {
+            return Err(CompileError::new(
+                "E105",
+                decl_lines[ci],
+                1,
+                "类的字段超过 255 个（含继承）",
+            ));
+        }
+        b.classes[ci].fields = flat;
+    }
+
+    // 第四遍：先给所有类登记方法名（含父类声明在后面的情况），再编译方法体。
+    for (ci, (c, _)) in decls.iter().enumerate() {
         for m in &c.methods {
             if m.name == "初始化" {
                 continue; // 构造方法只由合成的初始化代码真正执行
             }
             let midx = b.intern_name(&m.name, m.line, 1)?;
-            // 先占位登记名字，后面的方法才能静态看到前面的方法（E122 检查要用）。
-            let slot = b.classes[ci as usize].methods.len();
-            b.classes[ci as usize].methods.push((midx, 0));
-            let code = compile_method(b, ci, midx, &m.params, &m.body, imported, m.line, *fid)?;
-            b.classes[ci as usize].methods[slot].1 = code;
+            b.classes[ci].methods.push((midx, 0));
         }
-        let init_code = compile_class_init(b, c, ci, imported, *fid)?;
+    }
+    for &ci in &order {
+        let (c, fid) = decls[ci];
+        let ci = ci as u8;
+        for (k, m) in c.methods.iter().filter(|m| m.name != "初始化").enumerate() {
+            let midx = b.classes[ci as usize].methods[k].0;
+            let code = compile_method(b, ci, midx, &m.params, &m.body, imported, m.line, fid)?;
+            b.classes[ci as usize].methods[k].1 = code;
+        }
+        let init_code = compile_class_init(b, c, ci, imported, fid)?;
         b.classes[ci as usize].init_code = init_code;
     }
     Ok(())
@@ -1201,13 +1438,23 @@ fn compile_class_init(
         }
     }
 
+    // 构造链：先让父类初始化跑一遍（LI012 只支持零实参父构造）。
+    let parent = b.classes[class_idx as usize].parent;
+    if parent != 255 {
+        fs.emit_u8(OP_LOAD_LOCAL, 0);
+        fs.emit_u8u8(OP_CALL_INIT, parent, 0);
+        fs.emit(OP_POP);
+    }
+
     // 字段默认值：按声明顺序求值，禁止引用 `本`。
+    // 字段数组是「父类扁平字段 ++ 本类字段」，本类字段从 base 开始。
+    let base = b.classes[class_idx as usize].fields.len() - c.fields.len();
     for (i, (_, fexpr)) in c.fields.iter().enumerate() {
         fs.emit_u8(OP_LOAD_LOCAL, 0);
         fs.self_blocked = true;
         compile_expr(&mut fs, b, fexpr)?;
         fs.self_blocked = false;
-        let fidx = b.classes[class_idx as usize].fields[i];
+        let fidx = b.classes[class_idx as usize].fields[base + i];
         fs.emit_u8(OP_SET_FIELD, fidx);
     }
 
@@ -1230,6 +1477,7 @@ fn compile_class_init(
 fn compile_function(
     b: &mut Builder,
     name: &str,
+    self_name: Option<&str>,
     params: &[String],
     body: &[Stmt],
     parent_slots: HashMap<String, u8>,
@@ -1262,7 +1510,7 @@ fn compile_function(
         captures: HashMap::new(),
         parent_slots,
         caps: Vec::new(),
-        self_name: Some(name.to_string()),
+        self_name: self_name.map(|s| s.to_string()),
         nlocals: params.len() as u8,
         temps: Vec::new(),
         loops: Vec::new(),
@@ -1318,6 +1566,65 @@ fn compile_function(
     b.codes[idx as usize].marks = fs.marks;
     b.codes[idx as usize].code = fs.code;
     Ok(idx)
+}
+
+/// 在当前位置生成一个函数值（具名函数定义与匿名函数表达式共用）。
+///
+/// `name` 是名字表/调试里显示的名字；`self_name` 是函数体内可以递归引用的名字
+/// （匿名函数为 `None`）。产物是一个函数/闭包值，留在操作数栈上。
+#[allow(clippy::too_many_arguments)]
+fn emit_function_value(
+    fs: &mut FnState,
+    b: &mut Builder,
+    name: &str,
+    self_name: Option<&str>,
+    params: &[String],
+    body: &[Stmt],
+    line: u32,
+    col: u32,
+) -> Result<()> {
+    // 父帧里可见的名字：本帧局部槽 + 本帧已有的捕获槽。
+    let mut visible: HashMap<String, u8> = fs.slots.clone();
+    for (n, slot) in &fs.captures {
+        visible.insert(n.clone(), *slot);
+    }
+    // 子函数（含更深层）用到、但本帧还没有的祖先变量，先让本帧捕获，
+    // 这样多层闭包就能沿捕获槽一层层传下去。
+    let mut child_bound: HashSet<String> = params.iter().cloned().collect();
+    let mut decls = Vec::new();
+    collect_decls(body, &mut decls);
+    child_bound.extend(decls);
+    let mut free = Vec::new();
+    collect_free_stmts(body, &child_bound, &mut free);
+    for n in free {
+        if visible.contains_key(&n) {
+            continue;
+        }
+        if fs.parent_slots.contains_key(&n) {
+            if let Res::Capture(slot) = resolve(fs, b, &n, line, col)? {
+                visible.insert(n, slot);
+            }
+        }
+    }
+    let idx = compile_function(
+        b,
+        name,
+        self_name,
+        params,
+        body,
+        visible,
+        &fs.imported,
+        fs.current_class,
+        line,
+        col,
+        fs.file_id,
+    )?;
+    if b.codes[idx as usize].caps.is_empty() {
+        fs.emit_u8(OP_MAKE_FUNCTION, idx);
+    } else {
+        fs.emit_u8(OP_MAKE_CLOSURE, idx);
+    }
+    Ok(())
 }
 
 fn compile_stmts(fs: &mut FnState, b: &mut Builder, stmts: &[Stmt]) -> Result<()> {
@@ -1386,6 +1693,26 @@ fn compile_stmt(fs: &mut FnState, b: &mut Builder, s: &Stmt) -> Result<()> {
             compile_expr(fs, b, obj)?;
             compile_expr(fs, b, val)?;
             fs.emit_u8(OP_SET_FIELD, ni);
+        }
+        StmtKind::Assert(cond, msg) => {
+            // `--no-assert` 时整句消除：条件和消息都不求值。
+            if !b.no_assert {
+                compile_expr(fs, b, cond)?;
+                let jf = fs.jump(OP_JUMP_IF_FALSE);
+                let jend = fs.jump(OP_JUMP);
+                let fail = fs.here();
+                fs.patch(jf, fail);
+                match msg {
+                    Some(m) => compile_expr(fs, b, m)?,
+                    None => {
+                        let c = b.const_str("断言失败", s.line, 1)?;
+                        fs.emit_u8(OP_CONST, c);
+                    }
+                }
+                fs.emit(OP_THROW);
+                let end = fs.here();
+                fs.patch(jend, end);
+            }
         }
         StmtKind::Expr(e) => {
             compile_expr(fs, b, e)?;
@@ -1535,46 +1862,7 @@ fn compile_stmt(fs: &mut FnState, b: &mut Builder, s: &Stmt) -> Result<()> {
             fs.patch(skip, end);
         }
         StmtKind::FuncDef { name, params, body } => {
-            // 父帧里可见的名字：本帧局部槽 + 本帧已有的捕获槽。
-            let mut visible: HashMap<String, u8> = fs.slots.clone();
-            for (n, slot) in &fs.captures {
-                visible.insert(n.clone(), *slot);
-            }
-            // 子函数（含更深层）用到、但本帧还没有的祖先变量，先让本帧捕获，
-            // 这样多层闭包就能沿捕获槽一层层传下去。
-            let mut child_bound: HashSet<String> = params.iter().cloned().collect();
-            let mut decls = Vec::new();
-            collect_decls(body, &mut decls);
-            child_bound.extend(decls);
-            let mut free = Vec::new();
-            collect_free_stmts(body, &child_bound, &mut free);
-            for n in free {
-                if visible.contains_key(&n) {
-                    continue;
-                }
-                if fs.parent_slots.contains_key(&n) {
-                    if let Res::Capture(slot) = resolve(fs, b, &n, s.line, 1)? {
-                        visible.insert(n, slot);
-                    }
-                }
-            }
-            let idx = compile_function(
-                b,
-                name,
-                params,
-                body,
-                visible,
-                &fs.imported,
-                fs.current_class,
-                s.line,
-                1,
-                fs.file_id,
-            )?;
-            if b.codes[idx as usize].caps.is_empty() {
-                fs.emit_u8(OP_MAKE_FUNCTION, idx);
-            } else {
-                fs.emit_u8(OP_MAKE_CLOSURE, idx);
-            }
+            emit_function_value(fs, b, name, Some(name), params, body, s.line, 1)?;
             store_name(fs, b, name, s.line, 1)?;
         }
         StmtKind::Return(e) => {
@@ -1611,71 +1899,30 @@ fn compile_match(
     fs: &mut FnState,
     b: &mut Builder,
     subject: &Expr,
-    arms: &[(MatchPattern, Vec<Stmt>)],
+    arms: &[(Vec<MatchPattern>, Vec<Stmt>)],
     else_body: Option<&[Stmt]>,
     line: u32,
 ) -> Result<()> {
-    // 先把分支模式解析成常量，顺带检查未知枚举成员与重复分支值。
-    let mut vals: Vec<i64> = Vec::new();
-    for (pat, _) in arms {
-        let v = match pat {
-            MatchPattern::Int(v) => *v,
-            MatchPattern::EnumMember(en, member) => {
-                let Some(map) = b.enums.get(en) else {
-                    return Err(CompileError::new(
-                        "E139",
-                        line,
-                        1,
-                        format!("「情形」里的「{}」不是枚举", en),
-                    ));
-                };
-                match map.get(member) {
-                    Some(&v) => v as i64,
-                    None => {
-                        return Err(CompileError::new(
-                            "E139",
-                            line,
-                            1,
-                            format!("枚举「{}」里没有成员「{}」", en, member),
-                        ))
-                    }
-                }
-            }
-            MatchPattern::Else => {
-                return Err(CompileError::new(
-                    "E139",
-                    line,
-                    1,
-                    "「其他」不能出现在普通分支里",
-                ))
-            }
-        };
-        if vals.contains(&v) {
-            return Err(CompileError::new(
-                "E139",
-                line,
-                1,
-                format!("「匹配」里重复的情形值 {}", v),
-            ));
-        }
-        vals.push(v);
-    }
+    // 先把分支模式解析成整数区间，顺带检查未知枚举成员与重复/重叠。
+    let resolved = resolve_match_arms(b, arms.iter().map(|(p, _)| p.as_slice()), line)?;
 
-    // 主体只求值一次，放进临时槽，再逐支 `==` 比较。
+    // 主体只求值一次，放进临时槽，再逐支比较。
     compile_expr(fs, b, subject)?;
     let t = fs.alloc_temp(line, 1)?;
     fs.emit_u8(OP_STORE_LOCAL, t);
     let mut ends: Vec<usize> = Vec::new();
-    for (i, (_, body)) in arms.iter().enumerate() {
-        fs.emit_u8(OP_LOAD_LOCAL, t);
-        let c = b.const_int(vals[i], line, 1)?;
-        fs.emit_u8(OP_CONST, c);
-        fs.emit_u8(OP_CMP, CMP_EQ);
-        let jf = fs.jump(OP_JUMP_IF_FALSE);
+    for ((_, body), pats) in arms.iter().zip(resolved.iter()) {
+        let mut hits: Vec<usize> = Vec::new();
+        emit_match_test(fs, b, t, pats, line, &mut hits)?;
+        let jskip = fs.jump(OP_JUMP);
+        let body_start = fs.here();
+        for j in hits {
+            fs.patch(j, body_start);
+        }
         compile_stmts(fs, b, body)?;
         ends.push(fs.jump(OP_JUMP));
         let next = fs.here();
-        fs.patch(jf, next);
+        fs.patch(jskip, next);
     }
     if let Some(body) = else_body {
         compile_stmts(fs, b, body)?;
@@ -1684,6 +1931,193 @@ fn compile_match(
     for p in ends {
         fs.patch(p, end);
     }
+    fs.free_temp(t);
+    Ok(())
+}
+
+/// 把每个分支的模式解析成闭区间 `[起, 止]`，并检查未知枚举成员与区间重叠。
+fn resolve_match_arms<'a>(
+    b: &Builder,
+    patterns: impl Iterator<Item = &'a [MatchPattern]>,
+    line: u32,
+) -> Result<Vec<Vec<(i64, i64)>>> {
+    let mut out: Vec<Vec<(i64, i64)>> = Vec::new();
+    let mut seen: Vec<(i64, i64)> = Vec::new();
+    for pats in patterns {
+        let mut cur: Vec<(i64, i64)> = Vec::new();
+        for p in pats {
+            let (lo, hi) = match p {
+                MatchPattern::Int(v) => (*v, *v),
+                MatchPattern::Range(a, z) => (*a, *z),
+                MatchPattern::EnumMember(en, member) => {
+                    let Some(map) = b.enums.get(en) else {
+                        return Err(CompileError::new(
+                            "E139",
+                            line,
+                            1,
+                            format!("「情形」里的「{}」不是枚举", en),
+                        ));
+                    };
+                    match map.get(member) {
+                        Some(&v) => (v as i64, v as i64),
+                        None => {
+                            return Err(CompileError::new(
+                                "E139",
+                                line,
+                                1,
+                                format!("枚举「{}」里没有成员「{}」", en, member),
+                            ))
+                        }
+                    }
+                }
+                MatchPattern::Else => {
+                    return Err(CompileError::new(
+                        "E139",
+                        line,
+                        1,
+                        "「其他」不能出现在普通分支里",
+                    ))
+                }
+            };
+            if seen.iter().any(|&(a, z)| lo <= z && a <= hi) {
+                return Err(CompileError::new(
+                    "E139",
+                    line,
+                    1,
+                    format!(
+                        "「匹配」里的情形值与之前的分支重复或区间重叠（{}..{}）",
+                        lo, hi
+                    ),
+                ));
+            }
+            seen.push((lo, hi));
+            cur.push((lo, hi));
+        }
+        out.push(cur);
+    }
+    Ok(out)
+}
+
+/// 为一条分支发出比较链：任一模式命中就跳到分支体。
+fn emit_match_test(
+    fs: &mut FnState,
+    b: &mut Builder,
+    slot: u8,
+    pats: &[(i64, i64)],
+    line: u32,
+    hits: &mut Vec<usize>,
+) -> Result<()> {
+    for &(lo, hi) in pats {
+        fs.emit_u8(OP_LOAD_LOCAL, slot);
+        let c = b.const_int(lo, line, 1)?;
+        fs.emit_u8(OP_CONST, c);
+        if lo == hi {
+            fs.emit_u8(OP_CMP, CMP_EQ);
+            hits.push(fs.jump(OP_JUMP_IF_TRUE));
+        } else {
+            // 区间：`起 <= 值 <= 止`，两次比较，不新增指令。
+            fs.emit_u8(OP_CMP, CMP_GE);
+            let jf = fs.jump(OP_JUMP_IF_FALSE);
+            fs.emit_u8(OP_LOAD_LOCAL, slot);
+            let c2 = b.const_int(hi, line, 1)?;
+            fs.emit_u8(OP_CONST, c2);
+            fs.emit_u8(OP_CMP, CMP_LE);
+            hits.push(fs.jump(OP_JUMP_IF_TRUE));
+            let skip = fs.here();
+            fs.patch(jf, skip);
+        }
+    }
+    Ok(())
+}
+
+/// 匹配表达式里能静态看出的字面量种类（非字面量返回 `None`）。
+fn literal_kind(e: &Expr) -> Option<&'static str> {
+    match &e.kind {
+        ExprKind::Int(_) => Some("整数"),
+        ExprKind::Dec(_) => Some("小数"),
+        ExprKind::Str(_) => Some("文本"),
+        ExprKind::True | ExprKind::False => Some("布尔"),
+        ExprKind::Nil => Some("空"),
+        _ => None,
+    }
+}
+
+/// 表达式形式的匹配：各分支（含兜底）的字面量结果必须同类型。
+fn check_match_value_kinds(
+    arms: &[(Vec<MatchPattern>, Expr)],
+    else_value: &Expr,
+    line: u32,
+    col: u32,
+) -> Result<()> {
+    let mut first: Option<(&'static str, u32)> = None;
+    let mut note = |kind: &'static str, at: u32| -> Result<()> {
+        match first {
+            None => {
+                first = Some((kind, at));
+                Ok(())
+            }
+            Some((f, _)) if f == kind => Ok(()),
+            Some((f, _)) => Err(CompileError::new(
+                "E139",
+                at,
+                col,
+                format!(
+                    "匹配分支的结果类型不一致：{} 与 {}；表达式形式要求各分支同类型（第 {} 行已经出现 {}）",
+                    f, kind, line, f
+                ),
+            )),
+        }
+    };
+    for (_, v) in arms {
+        if let Some(k) = literal_kind(v) {
+            note(k, v.line)?;
+        }
+    }
+    if let Some(k) = literal_kind(else_value) {
+        note(k, else_value.line)?;
+    }
+    Ok(())
+}
+
+/// 匹配表达式：主体求值一次，命中分支的值放进结果槽，最后压栈。
+fn compile_match_value(
+    fs: &mut FnState,
+    b: &mut Builder,
+    subject: &Expr,
+    arms: &[(Vec<MatchPattern>, Expr)],
+    else_value: &Expr,
+    line: u32,
+    col: u32,
+) -> Result<()> {
+    check_match_value_kinds(arms, else_value, line, col)?;
+    let resolved = resolve_match_arms(b, arms.iter().map(|(p, _)| p.as_slice()), line)?;
+    compile_expr(fs, b, subject)?;
+    let t = fs.alloc_temp(line, col)?;
+    fs.emit_u8(OP_STORE_LOCAL, t);
+    let r = fs.alloc_temp(line, col)?;
+    let mut ends: Vec<usize> = Vec::new();
+    for ((_, value), pats) in arms.iter().zip(resolved.iter()) {
+        let mut hits: Vec<usize> = Vec::new();
+        emit_match_test(fs, b, t, pats, line, &mut hits)?;
+        let jskip = fs.jump(OP_JUMP);
+        let body_start = fs.here();
+        for j in hits {
+            fs.patch(j, body_start);
+        }
+        compile_expr(fs, b, value)?;
+        fs.emit_u8(OP_STORE_LOCAL, r);
+        ends.push(fs.jump(OP_JUMP));
+        let next = fs.here();
+        fs.patch(jskip, next);
+    }
+    compile_expr(fs, b, else_value)?;
+    fs.emit_u8(OP_STORE_LOCAL, r);
+    let end = fs.here();
+    for p in ends {
+        fs.patch(p, end);
+    }
+    fs.emit_u8(OP_LOAD_LOCAL, r);
+    fs.free_temp(r);
     fs.free_temp(t);
     Ok(())
 }
@@ -1723,7 +2157,12 @@ fn binop_code(op: BinOp) -> u8 {
         BinOp::FloorDiv => BIN_FLOORDIV,
         BinOp::Mod => BIN_MOD,
         BinOp::Pow => BIN_POW,
-        _ => unreachable!(),
+        BinOp::BitAnd => BIN_BAND,
+        BinOp::BitOr => BIN_BOR,
+        BinOp::BitXor => BIN_BXOR,
+        BinOp::Shl => BIN_SHL,
+        BinOp::Shr => BIN_SHR,
+        BinOp::And | BinOp::Or => unreachable!("短路运算单独生成"),
     }
 }
 
@@ -1813,6 +2252,14 @@ fn compile_expr(fs: &mut FnState, b: &mut Builder, e: &Expr) -> Result<()> {
             }
             load_name(fs, b, name, e.line, e.col)?;
         }
+        ExprKind::Match(subject, arms, else_value) => {
+            compile_match_value(fs, b, subject, arms, else_value, e.line, e.col)?;
+        }
+        ExprKind::AnonFunc(params, body) => {
+            // 匿名函数没有可递归引用的名字，所以 self_name 传 None。
+            let name = format!("匿名函数{}", e.line);
+            emit_function_value(fs, b, &name, None, params, body, e.line, e.col)?;
+        }
         ExprKind::List(items) => {
             for it in items {
                 compile_expr(fs, b, it)?;
@@ -1858,6 +2305,13 @@ fn compile_expr(fs: &mut FnState, b: &mut Builder, e: &Expr) -> Result<()> {
         ExprKind::Unary(UnOp::Not, x) => {
             compile_expr(fs, b, x)?;
             fs.emit(OP_NOT);
+        }
+        ExprKind::Unary(UnOp::Bnot, x) => {
+            // `~x` 降级为 `x ^ -1`：32 位补码下与按位取反等价，不新增操作码。
+            compile_expr(fs, b, x)?;
+            let c = b.const_int(-1, e.line, e.col)?;
+            fs.emit_u8(OP_CONST, c);
+            fs.emit_u8(OP_BINOP, BIN_BXOR);
         }
         ExprKind::Compare(first, pairs) => {
             compile_expr(fs, b, first)?;
@@ -2035,6 +2489,50 @@ fn compile_expr(fs: &mut FnState, b: &mut Builder, e: &Expr) -> Result<()> {
                 return Err(CompileError::new("E114", e.line, e.col, "实参超过 255 个"));
             }
             fs.emit_u8u8(OP_CALL_METHOD, ni, args.len() as u8);
+        }
+        ExprKind::SuperCall(name, args) => {
+            let Some(ci) = fs.current_class else {
+                return Err(CompileError::new(
+                    "E141",
+                    e.line,
+                    e.col,
+                    "「超」只能在类方法（或其中的闭包）里使用",
+                ));
+            };
+            let cname = b.names[b.classes[ci as usize].name_idx as usize].clone();
+            if name == "初始化" {
+                return Err(CompileError::new(
+                    "E141",
+                    e.line,
+                    e.col,
+                    "父构造已自动执行，不能写 超.初始化(...)",
+                ));
+            }
+            let parent = b.classes[ci as usize].parent;
+            if parent == 255 {
+                return Err(CompileError::new(
+                    "E141",
+                    e.line,
+                    e.col,
+                    format!("类「{}」没有父类，不能用「超」", cname),
+                ));
+            }
+            let Some(code) = b.class_method_code_idx(parent, name) else {
+                return Err(CompileError::new(
+                    "E141",
+                    e.line,
+                    e.col,
+                    format!("父类里没有方法「{}」", name),
+                ));
+            };
+            load_self(fs, e.line, e.col)?;
+            for a in args {
+                compile_expr(fs, b, a)?;
+            }
+            if args.len() > 255 {
+                return Err(CompileError::new("E114", e.line, e.col, "实参超过 255 个"));
+            }
+            fs.emit_u8u8(OP_CALL_SUPER, code, args.len() as u8);
         }
         ExprKind::Index(obj, idx) => {
             compile_expr(fs, b, obj)?;

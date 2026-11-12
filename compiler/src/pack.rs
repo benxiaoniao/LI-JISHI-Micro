@@ -27,6 +27,7 @@ struct Opts {
     out: Option<PathBuf>,
     offline: bool,
     strip_debug: bool,
+    no_assert: bool,
     index: Option<String>,
     archive: bool,
     /// `--源码`：归档内容换成源码包（`砾包.toml` + `.jsh`），供 `micc install` 消费。
@@ -40,6 +41,7 @@ fn parse_opts(args: &[String], allow_out: bool, allow_index: bool) -> Result<Opt
     let mut archive = false;
     let mut source_archive = false;
     let mut strip_debug = false;
+    let mut no_assert = false;
     let mut index = None;
     let mut i = 0;
     while i < args.len() {
@@ -72,6 +74,7 @@ fn parse_opts(args: &[String], allow_out: bool, allow_index: bool) -> Result<Opt
                 archive = true;
             }
             "--strip-debug" => strip_debug = true,
+            "--no-assert" => no_assert = true,
             "-h" | "--help" => {
                 return Err(usage_err("micc pack / micc install / micc hash / micc verify"))
             }
@@ -84,6 +87,7 @@ fn parse_opts(args: &[String], allow_out: bool, allow_index: bool) -> Result<Opt
         out,
         offline,
         strip_debug,
+        no_assert,
         index,
         archive,
         source_archive,
@@ -208,6 +212,7 @@ fn do_pack(args: &[String]) -> Result<()> {
         &merged.stmts,
         merged.files.clone(),
         &merged.spans,
+        opts.no_assert,
     )?;
 
     let class_fields = pack_merge::class_field_counts(&merged.stmts);

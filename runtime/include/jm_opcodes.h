@@ -45,6 +45,7 @@
 #define OP_TASK_SLEEP 40
 #define OP_TASK_WAIT 41
 #define OP_TASK_KILL 42
+#define OP_CALL_SUPER 43
 
 #define BIN_ADD 0
 #define BIN_SUB 1
@@ -53,6 +54,11 @@
 #define BIN_FLOORDIV 4
 #define BIN_MOD 5
 #define BIN_POW 6
+#define BIN_BAND 7
+#define BIN_BOR 8
+#define BIN_BXOR 9
+#define BIN_SHL 10
+#define BIN_SHR 11
 
 #define CMP_EQ 0
 #define CMP_NE 1

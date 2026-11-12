@@ -125,6 +125,7 @@ fn stmt_label(k: &StmtKind) -> &'static str {
         StmtKind::Assign(_, _) => "赋值",
         StmtKind::AssignIndex(_, _, _) | StmtKind::AssignMember(_, _, _) => "赋值",
         StmtKind::Expr(_) => "表达式语句",
+        StmtKind::Assert(_, _) => "断言",
         StmtKind::If { .. } => "如果",
         StmtKind::While(_, _) => "当",
         StmtKind::Repeat(_, _) => "循环",
@@ -180,6 +181,30 @@ impl<'a> Renamer<'a> {
         } else {
             None
         }
+    }
+
+    /// 改写分支模式里的枚举名（依赖包内改名为 `包名::枚举名`；根包直接引用报 E128）。
+    fn match_patterns(&mut self, pats: &mut [MatchPattern], line: u32) -> Result<()> {
+        for pat in pats {
+            if let MatchPattern::EnumMember(n, _) = pat {
+                if let Some(m) = self.global_ref(n) {
+                    *n = m;
+                } else if self.is_root {
+                    if let Some(owner) = self.dep_enum_owner(n) {
+                        return Err(CompileError::new(
+                            "E128",
+                            line,
+                            1,
+                            format!("枚举「{}.{}」是包内私有的，不能跨包直接使用", owner, n),
+                        )
+                        .with_hint(
+                            "把需要跨包的行为封成依赖包的导出函数；枚举只在定义它的包内可见",
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     fn check_export(&self, pkg: &str, name: &str, line: u32) -> Result<()> {
@@ -248,6 +273,13 @@ impl<'a> Renamer<'a> {
                 self.expr(v)
             }
             StmtKind::Expr(e) => self.expr(e),
+            StmtKind::Assert(c, m) => {
+                self.expr(c)?;
+                if let Some(m) = m {
+                    self.expr(m)?;
+                }
+                Ok(())
+            }
             StmtKind::If {
                 branches,
                 else_body,
@@ -301,6 +333,10 @@ impl<'a> Renamer<'a> {
                     if let Some(m) = self.global_ref(&c.name) {
                         c.name = m;
                     }
+                    // 父类名与类名走同一套改名规则（依赖包内的父类要同步）。
+                    if let Some(m) = c.parent.as_deref().and_then(|p| self.global_ref(p)) {
+                        c.parent = Some(m);
+                    }
                 }
                 for (_, e) in c.fields.iter_mut() {
                     self.expr(e)?;
@@ -334,25 +370,8 @@ impl<'a> Renamer<'a> {
                 else_body,
             } => {
                 self.expr(subject)?;
-                for (pat, body) in arms.iter_mut() {
-                    if let MatchPattern::EnumMember(n, _) = pat {
-                        if let Some(m) = self.global_ref(n) {
-                            *n = m;
-                        } else if self.is_root {
-                            if let Some(owner) = self.dep_enum_owner(n) {
-                                return Err(CompileError::new(
-                                    "E128",
-                                    line,
-                                    1,
-                                    format!(
-                                        "枚举「{}.{}」是包内私有的，不能跨包直接使用",
-                                        owner, n
-                                    ),
-                                )
-                                .with_hint("把需要跨包的行为封成依赖包的导出函数；枚举只在定义它的包内可见"));
-                            }
-                        }
-                    }
+                for (pats, body) in arms.iter_mut() {
+                    self.match_patterns(pats, line)?;
                     self.stmts(body, false)?;
                 }
                 if let Some(body) = else_body {
@@ -506,6 +525,32 @@ impl<'a> Renamer<'a> {
                 for a in args {
                     self.expr(a)?;
                 }
+            }
+            ExprKind::SuperCall(_, args) => {
+                for a in args {
+                    self.expr(a)?;
+                }
+            }
+            ExprKind::AnonFunc(params, body) => {
+                let mut scope = HashSet::new();
+                for d in local_decls(body) {
+                    scope.insert(d);
+                }
+                for p in params.iter() {
+                    scope.insert(p.clone());
+                }
+                self.scopes.push(scope);
+                let r = self.stmts(body, false);
+                self.scopes.pop();
+                r?;
+            }
+            ExprKind::Match(subject, arms, else_value) => {
+                self.expr(subject)?;
+                for (pats, v) in arms.iter_mut() {
+                    self.match_patterns(pats, e.line)?;
+                    self.expr(v)?;
+                }
+                self.expr(else_value)?;
             }
             ExprKind::Int(_)
             | ExprKind::Dec(_)
@@ -668,6 +713,21 @@ pub fn heap_estimate(stmts: &[Stmt], class_fields: &HashMap<String, usize>) -> u
                 }
                 n
             }
+            ExprKind::SuperCall(_, args) => {
+                let mut n = 0;
+                for x in args {
+                    n += expr(x, cf);
+                }
+                n
+            }
+            ExprKind::AnonFunc(_, body) => walk_stmts(body, cf),
+            ExprKind::Match(subject, arms, else_value) => {
+                let mut n = expr(subject, cf);
+                for (_, v) in arms {
+                    n += expr(v, cf);
+                }
+                n + expr(else_value, cf)
+            }
             _ => 0,
         }
     }
@@ -680,6 +740,7 @@ pub fn heap_estimate(stmts: &[Stmt], class_fields: &HashMap<String, usize>) -> u
                 StmtKind::AssignIndex(a, b, c) => expr(a, cf) + expr(b, cf) + expr(c, cf),
                 StmtKind::AssignMember(a, _, b) => expr(a, cf) + expr(b, cf),
                 StmtKind::Expr(e) => expr(e, cf),
+                StmtKind::Assert(c, m) => expr(c, cf) + m.as_ref().map(|x| expr(x, cf)).unwrap_or(0),
                 StmtKind::If {
                     branches,
                     else_body,
@@ -734,13 +795,29 @@ pub fn heap_estimate(stmts: &[Stmt], class_fields: &HashMap<String, usize>) -> u
     walk_stmts(stmts, class_fields)
 }
 
-/// 合并后的类名 → 字段数（用于新建实例的堆下界）。
+/// 合并后的类名 → 字段数（用于新建实例的堆下界）；含继承来的字段。
 pub fn class_field_counts(stmts: &[Stmt]) -> HashMap<String, usize> {
-    let mut out = HashMap::new();
+    let mut own: HashMap<String, (Option<String>, usize)> = HashMap::new();
     for s in stmts {
         if let StmtKind::Class(c) = &s.kind {
-            out.insert(c.name.clone(), c.fields.len());
+            own.insert(c.name.clone(), (c.parent.clone(), c.fields.len()));
         }
+    }
+    let mut out = HashMap::new();
+    for name in own.keys() {
+        let mut total = 0usize;
+        let mut cur = Some(name.clone());
+        let mut hops = 0usize;
+        while let Some(c) = cur {
+            let Some((p, n)) = own.get(&c) else { break };
+            total += *n;
+            hops += 1;
+            if hops > own.len() {
+                break; // 成环时停在已累计部分，真正报错由 codegen 负责
+            }
+            cur = p.clone();
+        }
+        out.insert(name.clone(), total);
     }
     out
 }

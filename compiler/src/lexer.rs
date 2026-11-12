@@ -26,11 +26,14 @@ pub enum Kw {
     Try,
     Catch,
     Class,
+    Inherit,
+    Super,
     New,
     SelfRef,
     Enum,
     Match,
     Case,
+    Assert,
     /// JISHI 有、Micro v0 明确不支持的关键字
     Unsupported(&'static str),
 }
@@ -82,6 +85,10 @@ fn norm(c: char) -> char {
         '＿' => '_',
         '．' => '.',
         '＃' => '#',
+        '＆' => '&',
+        '｜' => '|',
+        '＾' => '^',
+        '～' => '~',
         '　' => ' ',
         _ => c,
     }
@@ -118,11 +125,11 @@ pub const KEYWORDS: &[(&str, Kw)] = &[
     ("枚举", Kw::Enum),
     ("匹配", Kw::Match),
     ("情形", Kw::Case),
-    ("继承", Kw::Unsupported("继承")),
+    ("断言", Kw::Assert),
+    ("继承", Kw::Inherit),
     ("最终", Kw::Unsupported("最终")),
     ("用", Kw::Unsupported("用")),
-    ("断言", Kw::Unsupported("断言")),
-    ("超", Kw::Unsupported("超")),
+    ("超", Kw::Super),
 ];
 
 pub fn keyword_table() -> &'static [(&'static str, Kw)] {
@@ -304,7 +311,7 @@ impl Lexer {
             let rest: String = chars[i..].iter().map(|x| norm(*x)).collect();
             let mut matched: Option<(&'static str, usize)> = None;
             for op in [
-                "//=", "**=", "**", "//", "==", "!=", "<=", ">=", "+=", "-=", "*=", "/=", "%=", "->",
+                "//=", "**=", "<<", ">>", "**", "//", "==", "!=", "<=", ">=", "+=", "-=", "*=", "/=", "%=", "->", "..",
             ] {
                 if rest.starts_with(op) {
                     matched = Some((op, op.chars().count()));
@@ -339,6 +346,10 @@ impl Lexer {
                 ':' => Some(":"),
                 '.' => Some("."),
                 '!' => Some("!"),
+                '&' => Some("&"),
+                '|' => Some("|"),
+                '^' => Some("^"),
+                '~' => Some("~"),
                 _ => None,
             };
             match single {
@@ -384,7 +395,10 @@ impl Lexer {
             i += 1;
         }
 
-        let is_dec = i < chars.len() && norm(chars[i]) == '.';
+        // `1..5` 的区间写法：第一个点后面还是点，不算小数点。
+        let dot = i < chars.len() && norm(chars[i]) == '.';
+        let range_dot = dot && i + 1 < chars.len() && norm(chars[i + 1]) == '.';
+        let is_dec = dot && !range_dot;
         if !is_dec {
             if i < chars.len() && matches!(norm(chars[i]), 'e' | 'E') {
                 return Err(CompileError::new(
@@ -499,6 +513,10 @@ impl Lexer {
                     '\\' => '\\',
                     '"' => '"',
                     '\'' => '\'',
+                    // `\{` / `\}`：转义成字面花括号。用私用区哨兵标记，
+                    // 由 parser 还原成 `{` / `}`，以免和文本插值的 `{…}` 混淆。
+                    '{' => '\u{E000}',
+                    '}' => '\u{E001}',
                     other => other,
                 });
                 i += 1;

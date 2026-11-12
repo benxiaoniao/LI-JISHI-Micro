@@ -22,8 +22,8 @@ use std::path::PathBuf;
 use std::process::exit;
 
 fn usage() {
-    eprintln!("用法：micc <输入.jsh> [-o 输出.jmb] [--dump] [--strip-debug]");
-    eprintln!("      micc pack [--目录 <包目录>] [-o 输出] [--离线] [--strip-debug] [--归档]");
+    eprintln!("用法：micc <输入.jsh> [-o 输出.jmb] [--dump] [--strip-debug] [--no-assert]");
+    eprintln!("      micc pack [--目录 <包目录>] [-o 输出] [--离线] [--strip-debug] [--no-assert] [--归档]");
     eprintln!("      micc install [--目录 <包目录>] [--索引 <索引文件|URL>] [--离线]");
     eprintln!("      micc hash [--目录 <包目录>]                # 算目录内容哈希（填索引的 校验）");
     eprintln!("      micc verify <包目录|归档.zip>              # 校验归档/二进制包（清单 + 产物 + 哈希）");
@@ -405,6 +405,7 @@ fn main() {
     let mut output: Option<PathBuf> = None;
     let mut dump = false;
     let mut strip_debug = false;
+    let mut no_assert = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -418,6 +419,7 @@ fn main() {
             }
             "--dump" => dump = true,
             "--strip-debug" => strip_debug = true,
+            "--no-assert" => no_assert = true,
             "-h" | "--help" => {
                 usage();
                 return;
@@ -448,7 +450,7 @@ fn main() {
     };
 
     let file_name = pack::display_path(&input);
-    match compile_source_opts(&src, &[file_name], !strip_debug) {
+    match compile_source_opts(&src, &[file_name], !strip_debug, no_assert) {
         Ok((enc, dump_text)) => {
             if dump {
                 print!("{}", dump_text);
@@ -484,6 +486,7 @@ pub(crate) fn compile_source_opts(
     src: &str,
     files: &[String],
     with_debug: bool,
+    no_assert: bool,
 ) -> Result<(writer::Encoded, String), error::CompileError> {
     let tokens = lexer::tokenize(src)?;
     let mut p = parser::Parser::new(tokens);
@@ -493,7 +496,7 @@ pub(crate) fn compile_source_opts(
     } else {
         vec![(0usize, stmts.len(), 0u8)]
     };
-    let prog = codegen::compile(&stmts, files.to_vec(), &spans)?;
+    let prog = codegen::compile(&stmts, files.to_vec(), &spans, no_assert)?;
     let text = writer::disassemble(&prog);
     let enc = writer::write(&prog, with_debug)?;
     Ok((enc, text))
@@ -501,6 +504,6 @@ pub(crate) fn compile_source_opts(
 
 pub(crate) fn compile_source(src: &str) -> Result<(Vec<u8>, String), error::CompileError> {
     let files = vec!["<内置示例>".to_string()];
-    let (enc, text) = compile_source_opts(src, &files, true)?;
+    let (enc, text) = compile_source_opts(src, &files, true, false)?;
     Ok((enc.bytes, text))
 }

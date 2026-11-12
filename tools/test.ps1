@@ -172,6 +172,48 @@ try {
         $fail++
     }
 
+    # ---------- LI004：断言与 --no-assert ----------
+    & $micc "examples\断言.jsh" -o "build\assert-on.jmb" | Out-Null
+    $onCode = $LASTEXITCODE
+    $onOut = ""
+    $onSize = 0
+    if ($onCode -eq 0) {
+        $onOut = ((& $jmrun "build\assert-on.jmb" 2>&1 | Out-String).TrimEnd() -replace "`r`n", "`n")
+        $onSize = (Get-Item "build\assert-on.jmb").Length
+    }
+    & $micc "examples\断言.jsh" -o "build\assert-off.jmb" --no-assert | Out-Null
+    $offCode = $LASTEXITCODE
+    $offOut = ""
+    $offSize = 0
+    if ($offCode -eq 0) {
+        $offOut = ((& $jmrun "build\assert-off.jmb" 2>&1 | Out-String).TrimEnd() -replace "`r`n", "`n")
+        $offSize = (Get-Item "build\assert-off.jmb").Length
+    }
+    $total++
+    if (($onCode -eq 0) -and ($onOut -eq "42`n捕获1 n 不能为负`n捕获2 断言失败`n继续") -and
+        ($offCode -eq 0) -and ($offOut -eq "42`n-1`n200`n继续") -and ($offSize -lt $onSize)) {
+        Write-Host "[通过] --no-assert 整句消除（不触发断言且产物更小）"
+    } else {
+        Write-Host "[不通过] --no-assert 整句消除（不触发断言且产物更小）"
+        Write-Host $onOut
+        Write-Host $offOut
+        Write-Host ("大小 " + $onSize + " / " + $offSize)
+        $fail++
+    }
+
+    [IO.File]::WriteAllText((Join-Path $root "build\assert-uncaught.jsh"), "断言 假, ""坏输入""`n", $enc)
+    & $micc "build\assert-uncaught.jsh" -o "build\assert-uncaught.jmb" | Out-Null
+    $o = (& $jmrun "build\assert-uncaught.jmb" 2>&1 | Out-String)
+    $code = $LASTEXITCODE
+    $total++
+    if (($code -ne 0) -and $o.Contains("E027") -and $o.Contains("坏输入")) {
+        Write-Host "[通过] 未捕获的断言报 E027 并带消息"
+    } else {
+        Write-Host "[不通过] 未捕获的断言报 E027 并带消息"
+        Write-Host $o
+        $fail++
+    }
+
     Write-Host ("共 " + $total + " 个用例，失败 " + $fail + " 个")
     if ($fail -gt 0) { exit 1 }
     exit 0

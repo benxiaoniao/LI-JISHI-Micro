@@ -63,6 +63,10 @@ static inline JmValue jm_v_builtin(uint8_t id) {
 #define JM_T_CLOSURE 7u
 /* 实例：类表下标 + 固定字段数组（字段名只存在于 .jmb 类表里）。 */
 #define JM_T_INSTANCE 8u
+/* 集合：无序去重，键限不可变值；线性数组 + 引用计数，与列表同构。 */
+#define JM_T_SET 9u
+/* 字节串：不可变原始字节序列，布局与文本相同，但下标/长度按字节。 */
+#define JM_T_BYTES 10u
 
 /* 小数：Q12 定点，raw = 真实值 × 4096。
  * raw 用完整 int32（不是 29 位），故值域约 ±524288、精度 1/4096。
@@ -89,6 +93,19 @@ typedef struct {
     uint32_t cap;
     JmValue *items;
 } JmList;
+
+typedef struct {
+    JmObj o;
+    uint32_t len;
+    uint8_t data[];
+} JmBytes;
+
+typedef struct {
+    JmObj o;
+    uint32_t len;
+    uint32_t cap;
+    JmValue *items;
+} JmSet;
 
 typedef struct {
     JmValue key;
@@ -344,7 +361,9 @@ void jm_raw_free(void *p);
 
 JmObj *jm_obj_alloc(uint16_t type, size_t payload);
 JmStr *jm_str_new_obj(const char *s, uint32_t len);
+JmBytes *jm_bytes_new_obj(const uint8_t *p, uint32_t len);
 JmList *jm_list_new_obj(void);
+JmSet *jm_set_new_obj(void);
 JmDict *jm_dict_new_obj(void);
 JmIter *jm_iter_new_obj(JmValue container, uint32_t kind);
 JmRange *jm_range_new_obj(int32_t start, int32_t step, uint32_t len);
@@ -354,6 +373,9 @@ JmInstance *jm_instance_new_obj(uint8_t class_idx, uint8_t nfields);
 
 int jm_list_reserve(JmState *st, JmList *l, uint32_t need);
 int jm_list_push(JmState *st, JmList *l, JmValue v);
+/* 返回 1=新增、0=已存在（此时释放传入值的引用）、-1=失败（调用方负责释放）。
+ * 与 jm_dict_set 一致：成功时接管 v 的引用。 */
+int jm_set_add(JmState *st, JmSet *s, JmValue v);
 int jm_dict_set(JmState *st, JmDict *d, JmValue k, JmValue v);
 int jm_str_new(JmState *st, const char *s, uint32_t len, JmValue *out);
 int jm_list_new(JmState *st, JmValue *out);

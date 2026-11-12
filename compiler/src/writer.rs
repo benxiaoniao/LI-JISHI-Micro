@@ -4,8 +4,8 @@ use crate::opcodes::*;
 
 /// `.jmb` 魔数；`--check-langcard` 也从这里取，避免语言卡手写漂移。
 pub const MAGIC: [u8; 4] = *b"JMB1";
-/// 当前字节码格式版本（JMB v4：类表）。
-pub const VERSION: u8 = 4;
+/// 当前字节码格式版本（JMB v5：类表带父类下标）。
+pub const VERSION: u8 = 5;
 
 const HEADER_LEN: usize = 12;
 const CONST_ENTRY: usize = 8;
@@ -14,8 +14,8 @@ const NAME_ENTRY: usize = 2;
 const CODE_ENTRY: usize = 10;
 /// 捕获表每项 2 字节：`(父帧槽, 子帧槽)`。
 const CAP_ENTRY: usize = 2;
-/// JMB v4：类记录每项 8 字节。
-const CLASS_REC: usize = 8;
+/// JMB v5：类记录每项 10 字节（新增 `parent_idx`）。
+const CLASS_REC: usize = 10;
 
 /// 把 `.jmb` 字节生成 `jm_blob.c`（C 数组）。
 ///
@@ -327,7 +327,7 @@ pub fn write(prog: &Program, with_debug: bool) -> Result<Encoded> {
     let mut out = Vec::with_capacity(total + debug.as_ref().map(|d| d.len() + 6).unwrap_or(0));
     // 头
     out.extend_from_slice(&MAGIC);
-    out.push(VERSION); // version：JMB v4（类表）
+    out.push(VERSION); // version：JMB v5（类表带父类下标）
     out.push(0); // flags
     out.push(nconsts as u8);
     out.push(nnames as u8);
@@ -407,6 +407,8 @@ pub fn write(prog: &Program, with_debug: bool) -> Result<Encoded> {
         out.push(c.init_code);
         out.extend_from_slice(&(rel_fields as u16).to_le_bytes());
         out.extend_from_slice(&(rel_methods as u16).to_le_bytes());
+        out.push(c.parent); // 父类下标；255 = 无父类
+        out.push(0); // 保留
         rel_fields += c.fields.len();
         rel_methods += 2 * c.methods.len();
     }

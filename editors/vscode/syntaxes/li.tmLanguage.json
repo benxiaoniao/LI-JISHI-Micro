@@ -107,7 +107,7 @@
     "unsupported": {
       "patterns": [
         {
-          "match": "(?<![A-Za-z0-9_\\u4e00-\\u9fff])(?:继承|最终|匹配|情形|枚举|用|断言|超)(?![A-Za-z0-9_\\u4e00-\\u9fff])",
+          "match": "(?<![A-Za-z0-9_\\u4e00-\\u9fff])(?:继承|最终|用|超)(?![A-Za-z0-9_\\u4e00-\\u9fff])",
           "name": "invalid.illegal.deprecated.li"
         }
       ]
@@ -115,11 +115,11 @@
     "keywords": {
       "patterns": [
         {
-          "match": "(?<![A-Za-z0-9_\\u4e00-\\u9fff])(?:否则如果|否则|如果|当|循环|次|遍历|在|中断|继续|返回|尝试|捕获|抛出)(?![A-Za-z0-9_\\u4e00-\\u9fff])",
+          "match": "(?<![A-Za-z0-9_\\u4e00-\\u9fff])(?:否则如果|否则|如果|当|循环|次|遍历|在|中断|继续|返回|尝试|捕获|抛出|匹配|情形|断言)(?![A-Za-z0-9_\\u4e00-\\u9fff])",
           "name": "keyword.control.li"
         },
         {
-          "match": "(?<![A-Za-z0-9_\\u4e00-\\u9fff])(?:令|函数|导入|类|新建|本)(?![A-Za-z0-9_\\u4e00-\\u9fff])",
+          "match": "(?<![A-Za-z0-9_\\u4e00-\\u9fff])(?:令|函数|导入|类|新建|本|枚举)(?![A-Za-z0-9_\\u4e00-\\u9fff])",
           "name": "keyword.declaration.li"
         },
         {

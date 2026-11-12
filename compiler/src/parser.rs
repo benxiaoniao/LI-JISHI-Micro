@@ -1,6 +1,6 @@
 use crate::ast::*;
 use crate::error::{CompileError, Result};
-use crate::lexer::{Kw, Tok, Token};
+use crate::lexer::{tokenize, Kw, Tok, Token};
 
 pub struct Parser {
     tokens: Vec<Token>,
@@ -111,11 +111,8 @@ impl Parser {
         Ok(stmts)
     }
 
-    fn parse_func_decl(&mut self) -> Result<MethodDecl> {
-        let t = self.peek().clone();
-        let line = t.line;
-        self.pos += 1;
-        let (name, _, _) = self.expect_ident()?;
+    /// 解析 `(参数, ...)` 与可选的 `-> 类型`；类型标注只读掉、不参与运行。
+    fn parse_params(&mut self) -> Result<Vec<String>> {
         self.expect_op("(")?;
         let mut params = Vec::new();
         if !matches!(self.peek().tok, Tok::Op(")")) {
@@ -147,7 +144,82 @@ impl Parser {
             self.pos += 1;
             let _ = self.expect_ident()?;
         }
-        let body = self.parse_block()?;
+        Ok(params)
+    }
+
+    /// 函数体：`函数 f(x):` + 缩进块，或 `函数 f(x): 表达式` 的单行写法。
+    fn parse_func_body(&mut self) -> Result<Vec<Stmt>> {
+        self.expect_op(":")?;
+        if !matches!(self.peek().tok, Tok::Newline) {
+            let e = self.parse_expr()?;
+            let line = e.line;
+            if !matches!(
+                self.peek().tok,
+                Tok::Newline | Tok::Dedent | Tok::Eof | Tok::Op(")") | Tok::Op(",") | Tok::Op("]")
+            ) {
+                return Err(self.err("E109", "单行函数体后面应该换行"));
+            }
+            // 换行留给外层语句消费（`令 f = 函数(x): x + 1` 的「令」要自己收尾）。
+            return Ok(vec![Stmt {
+                kind: StmtKind::Return(Some(e)),
+                line,
+            }]);
+        }
+        self.pos += 1;
+        if !matches!(self.peek().tok, Tok::Indent) {
+            return Err(self.err("E109", "这里应该换行并缩进"));
+        }
+        self.pos += 1;
+        let mut stmts = Vec::new();
+        while !matches!(self.peek().tok, Tok::Dedent | Tok::Eof) {
+            if matches!(self.peek().tok, Tok::Newline) {
+                self.pos += 1;
+                continue;
+            }
+            stmts.push(self.parse_stmt()?);
+        }
+        self.close_block();
+        Ok(stmts)
+    }
+
+    /// 缩进块结束：吃掉 Dedent，并处理紧随其后的换行。
+    ///
+    /// 块体出现在表达式位置时（`令 f = 函数(x):` + 缩进块、`令 x = 匹配 …`），
+    /// 源码里那一行是有换行的，但词法上的 Dedent 已经先出现；这里补一个换行 token，
+    /// 让外层语句（令/返回/调用等）照常收尾。
+    fn close_block(&mut self) {
+        if matches!(self.peek().tok, Tok::Dedent) {
+            self.pos += 1;
+        }
+        match self.peek().tok {
+            Tok::Newline => self.pos += 1,
+            Tok::Eof
+            | Tok::Dedent
+            | Tok::Op(")")
+            | Tok::Op(",")
+            | Tok::Op("]")
+            | Tok::Op("}") => {}
+            _ => {
+                let (l, c) = (self.peek().line, self.peek().col);
+                self.tokens.insert(
+                    self.pos,
+                    Token {
+                        tok: Tok::Newline,
+                        line: l,
+                        col: c,
+                    },
+                );
+            }
+        }
+    }
+
+    fn parse_func_decl(&mut self) -> Result<MethodDecl> {
+        let t = self.peek().clone();
+        let line = t.line;
+        self.pos += 1;
+        let (name, _, _) = self.expect_ident()?;
+        let params = self.parse_params()?;
+        let body = self.parse_func_body()?;
         Ok(MethodDecl {
             name,
             params,
@@ -156,21 +228,109 @@ impl Parser {
         })
     }
 
+    /// `匹配 表达式:` + 缩进分支，每个分支体是单行表达式；必须有 `情形 其他`。
+    /// 调用方已经吃掉「匹配」关键字。
+    fn parse_match_expr(&mut self, line: u32, col: u32) -> Result<Expr> {
+        let subject = self.parse_expr()?;
+        self.expect_op(":")?;
+        self.expect_newline()?;
+        if !matches!(self.peek().tok, Tok::Indent) {
+            return Err(self.err("E139", "「匹配」下面应该换行并缩进，写「情形」分支"));
+        }
+        self.pos += 1;
+        let mut arms: Vec<(Vec<MatchPattern>, Expr)> = Vec::new();
+        let mut else_value: Option<Expr> = None;
+        while !matches!(self.peek().tok, Tok::Dedent | Tok::Eof) {
+            if matches!(self.peek().tok, Tok::Newline) {
+                self.pos += 1;
+                continue;
+            }
+            if !matches!(self.peek().tok, Tok::Kw(Kw::Case)) {
+                return Err(self.err("E139", "「匹配」里只能写「情形」分支"));
+            }
+            if else_value.is_some() {
+                return Err(self.err("E139", "「情形 其他」后面不能再有分支"));
+            }
+            self.pos += 1;
+            let pats = self.parse_match_patterns()?;
+            self.expect_op(":")?;
+            if matches!(self.peek().tok, Tok::Newline) {
+                return Err(self.err(
+                    "E139",
+                    "匹配作为表达式时分支只写一个表达式（如 情形 0: \"零\"）",
+                ));
+            }
+            let v = self.parse_expr()?;
+            self.expect_newline()?;
+            if pats.len() == 1 && matches!(pats[0], MatchPattern::Else) {
+                else_value = Some(v);
+            } else {
+                arms.push((pats, v));
+            }
+        }
+        self.close_block();
+        let Some(else_value) = else_value else {
+            return Err(CompileError::new(
+                "E139",
+                line,
+                col,
+                "匹配作为表达式必须有「情形 其他」兜底",
+            ));
+        };
+        if arms.is_empty() {
+            return Err(CompileError::new(
+                "E139",
+                line,
+                col,
+                "「匹配」至少要有一个「情形」分支",
+            ));
+        }
+        Ok(Expr {
+            kind: ExprKind::Match(Box::new(subject), arms, Box::new(else_value)),
+            line,
+            col,
+        })
+    }
+
+    /// 解析一个情形模式：整数、负数、闭区间 `起..止`、枚举成员或 `其他`。
     fn parse_match_pattern(&mut self) -> Result<MatchPattern> {
         let t = self.peek().clone();
         match t.tok {
             Tok::Int(v) => {
                 self.pos += 1;
+                if matches!(self.peek().tok, Tok::Op("..")) {
+                    self.pos += 1;
+                    let hi = self.expect_pattern_int(t.line, t.col)?;
+                    if v > hi {
+                        return Err(CompileError::new(
+                            "E139",
+                            t.line,
+                            t.col,
+                            format!("「情形」区间的起点 {} 大于终点 {}", v, hi),
+                        ));
+                    }
+                    return Ok(MatchPattern::Range(v, hi));
+                }
                 Ok(MatchPattern::Int(v))
             }
             Tok::Op("-") => {
                 self.pos += 1;
-                if let Tok::Int(v) = self.peek().tok {
+                let lo = self.expect_pattern_int(t.line, t.col)?;
+                let lo = -lo;
+                if matches!(self.peek().tok, Tok::Op("..")) {
                     self.pos += 1;
-                    Ok(MatchPattern::Int(-v))
-                } else {
-                    Err(self.err("E139", "「情形」里的负号后面应该写整数"))
+                    let hi = self.expect_pattern_int(t.line, t.col)?;
+                    if lo > hi {
+                        return Err(CompileError::new(
+                            "E139",
+                            t.line,
+                            t.col,
+                            format!("「情形」区间的起点 {} 大于终点 {}", lo, hi),
+                        ));
+                    }
+                    return Ok(MatchPattern::Range(lo, hi));
                 }
+                Ok(MatchPattern::Int(lo))
             }
             Tok::Ident(name) => {
                 // 单独一个「其他」是兜底分支；`其他.成员` 仍按枚举成员解析。
@@ -184,7 +344,7 @@ impl Parser {
                         "E139",
                         t.line,
                         t.col,
-                        "「情形」只能是整数字面量、枚举成员（名.成员）或「其他」",
+                        "「情形」只能是整数字面量、区间（起..止）、枚举成员（名.成员）或「其他」",
                     ));
                 }
                 self.pos += 1;
@@ -195,9 +355,194 @@ impl Parser {
                 "E139",
                 t.line,
                 t.col,
-                "「情形」只能是整数字面量、枚举成员（名.成员）或「其他」",
+                "「情形」只能是整数字面量、区间（起..止）、枚举成员（名.成员）或「其他」",
             )),
         }
+    }
+
+    /// 区间右端点：只允许整数字面量（可带负号）。
+    fn expect_pattern_int(&mut self, line: u32, col: u32) -> Result<i64> {
+        let neg = if matches!(self.peek().tok, Tok::Op("-")) {
+            self.pos += 1;
+            true
+        } else {
+            false
+        };
+        if let Tok::Int(v) = self.peek().tok {
+            self.pos += 1;
+            Ok(if neg { -v } else { v })
+        } else {
+            Err(CompileError::new(
+                "E139",
+                line,
+                col,
+                "「情形」区间只能写整数字面量（如 1..5 或 -3..-1）",
+            ))
+        }
+    }
+
+    /// 一个「情形」后面可以写多个模式，用逗号分隔：`情形 1, 3, 5:`。
+    fn parse_match_patterns(&mut self) -> Result<Vec<MatchPattern>> {
+        let mut pats = vec![self.parse_match_pattern()?];
+        while matches!(self.peek().tok, Tok::Op(",")) {
+            self.pos += 1;
+            pats.push(self.parse_match_pattern()?);
+        }
+        if pats.len() > 1 && pats.iter().any(|p| matches!(p, MatchPattern::Else)) {
+            return Err(self.err("E139", "「其他」必须单独成一个分支，不能和别的值写在一起"));
+        }
+        Ok(pats)
+    }
+
+    /// 字符串字面量的文本插值：`"值 = {x}"` → `"值 = " + 文本(x)`。
+    ///
+    /// - `{表达式}`：花括号里按普通表达式解析，结果自动套 `文本()`；
+    /// - `{{` / `}}` 或 `\{` / `\}`：字面花括号（后者在词法阶段已换成哨兵字符）；
+    /// - 单独的 `}` 按字面处理。
+    fn parse_string_literal(&mut self, s: String, line: u32, col: u32) -> Result<Expr> {
+        let chars: Vec<char> = s.chars().collect();
+        let mut parts: Vec<Expr> = Vec::new();
+        let mut text = String::new();
+        let mut i = 0;
+        while i < chars.len() {
+            let c = chars[i];
+            match c {
+                '\u{E000}' => {
+                    text.push('{');
+                    i += 1;
+                }
+                '\u{E001}' => {
+                    text.push('}');
+                    i += 1;
+                }
+                '{' => {
+                    if i + 1 < chars.len() && chars[i + 1] == '{' {
+                        text.push('{');
+                        i += 2;
+                        continue;
+                    }
+                    let start = i + 1;
+                    let mut j = start;
+                    let mut depth = 1;
+                    while j < chars.len() {
+                        match chars[j] {
+                            '{' => depth += 1,
+                            '}' => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                        j += 1;
+                    }
+                    if j >= chars.len() {
+                        return Err(CompileError::new(
+                            "E139",
+                            line,
+                            col,
+                            "文本插值缺少右花括号「}」",
+                        ));
+                    }
+                    let raw: String = chars[start..j].iter().collect();
+                    let trimmed = raw.trim();
+                    if trimmed.is_empty() {
+                        return Err(CompileError::new(
+                            "E139",
+                            line,
+                            col,
+                            "文本插值里要写表达式，如 \"值 = {x}\"",
+                        ));
+                    }
+                    if !text.is_empty() {
+                        parts.push(Expr {
+                            kind: ExprKind::Str(std::mem::take(&mut text)),
+                            line,
+                            col,
+                        });
+                    }
+                    // 片段开头的空白不参与切词（否则会被当成缩进），列号相应右移。
+                    let lead = raw.chars().take_while(|c| c.is_whitespace()).count() as u32;
+                    let v = self.parse_interp_expr(
+                        trimmed,
+                        line,
+                        col + 1 + start as u32 + lead,
+                    )?;
+                    let (vl, vc) = (v.line, v.col);
+                    parts.push(Expr {
+                        kind: ExprKind::Call(
+                            Box::new(Expr {
+                                kind: ExprKind::Name("文本".to_string()),
+                                line: vl,
+                                col: vc,
+                            }),
+                            vec![v],
+                        ),
+                        line: vl,
+                        col: vc,
+                    });
+                    i = j + 1;
+                }
+                '}' => {
+                    if i + 1 < chars.len() && chars[i + 1] == '}' {
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                    text.push('}');
+                }
+                _ => {
+                    text.push(c);
+                    i += 1;
+                }
+            }
+        }
+        if !text.is_empty() || parts.is_empty() {
+            parts.push(Expr {
+                kind: ExprKind::Str(text),
+                line,
+                col,
+            });
+        }
+        let mut iter = parts.into_iter();
+        let mut acc = iter.next().unwrap();
+        for p in iter {
+            let (l, c) = (acc.line, acc.col);
+            acc = Expr {
+                kind: ExprKind::Bin(BinOp::Add, Box::new(acc), Box::new(p)),
+                line: l,
+                col: c,
+            };
+        }
+        Ok(acc)
+    }
+
+    /// 解析插值花括号里的表达式：单独切词，位置按所在字符串的列号平移。
+    fn parse_interp_expr(&mut self, src: &str, line: u32, col: u32) -> Result<Expr> {
+        let mut toks = tokenize(src).map_err(|e| {
+            CompileError::new("E139", line, col, format!("插值里的表达式无法解析：{}", e))
+        })?;
+        for t in toks.iter_mut() {
+            if t.line == 1 {
+                t.col = t.col.saturating_add(col.saturating_sub(1));
+            }
+            t.line = t.line.saturating_add(line.saturating_sub(1));
+        }
+        let mut p = Parser::new(toks);
+        let e = p.parse_expr()?;
+        if matches!(p.peek().tok, Tok::Newline) {
+            p.pos += 1;
+        }
+        if !matches!(p.peek().tok, Tok::Eof) {
+            return Err(CompileError::new(
+                "E139",
+                p.peek().line,
+                p.peek().col,
+                "插值里的表达式后面还有多余内容",
+            ));
+        }
+        Ok(e)
     }
 
     fn parse_stmt(&mut self) -> Result<Stmt> {
@@ -275,7 +620,7 @@ impl Parser {
                     line,
                 })
             }
-            Tok::Kw(Kw::Func) => {
+            Tok::Kw(Kw::Func) if !matches!(self.peek_at(1).tok, Tok::Op("(")) => {
                 let m = self.parse_func_decl()?;
                 Ok(Stmt {
                     kind: StmtKind::FuncDef {
@@ -289,6 +634,12 @@ impl Parser {
             Tok::Kw(Kw::Class) => {
                 self.pos += 1;
                 let (name, _, _) = self.expect_ident()?;
+                let parent = if matches!(self.peek().tok, Tok::Kw(Kw::Inherit)) {
+                    self.pos += 1;
+                    Some(self.expect_ident()?.0)
+                } else {
+                    None
+                };
                 self.expect_op(":")?;
                 self.expect_newline()?;
                 if !matches!(self.peek().tok, Tok::Indent) {
@@ -329,6 +680,7 @@ impl Parser {
                 Ok(Stmt {
                     kind: StmtKind::Class(ClassDecl {
                         name,
+                        parent,
                         fields,
                         methods,
                     }),
@@ -350,8 +702,36 @@ impl Parser {
                         self.pos += 1;
                         continue;
                     }
-                    let (m, _, _) = self.expect_ident()?;
-                    members.push(m);
+                    let (m, ml, _) = self.expect_ident()?;
+                    let value = if matches!(self.peek().tok, Tok::Op("=")) {
+                        self.pos += 1;
+                        let neg = if matches!(self.peek().tok, Tok::Op("-")) {
+                            self.pos += 1;
+                            true
+                        } else {
+                            false
+                        };
+                        let v = match self.peek().tok.clone() {
+                            Tok::Int(v) => v,
+                            _ => {
+                                return Err(CompileError::new(
+                                    "E139",
+                                    ml,
+                                    1,
+                                    "枚举成员的显式值必须是整数字面量（如 运行 = 10）",
+                                ))
+                            }
+                        };
+                        self.pos += 1;
+                        Some(if neg { -v } else { v })
+                    } else {
+                        None
+                    };
+                    members.push(EnumMember {
+                        name: m,
+                        value,
+                        line: ml,
+                    });
                     self.expect_newline()?;
                 }
                 if matches!(self.peek().tok, Tok::Dedent) {
@@ -379,7 +759,7 @@ impl Parser {
                     return Err(self.err("E139", "「匹配」下面应该换行并缩进，写「情形」分支"));
                 }
                 self.pos += 1;
-                let mut arms: Vec<(MatchPattern, Vec<Stmt>)> = Vec::new();
+                let mut arms: Vec<(Vec<MatchPattern>, Vec<Stmt>)> = Vec::new();
                 let mut else_body: Option<Vec<Stmt>> = None;
                 let mut saw_else = false;
                 while !matches!(self.peek().tok, Tok::Dedent | Tok::Eof) {
@@ -394,13 +774,21 @@ impl Parser {
                         return Err(self.err("E139", "「情形 其他」后面不能再有分支"));
                     }
                     self.pos += 1;
-                    let pat = self.parse_match_pattern()?;
+                    let pats = self.parse_match_patterns()?;
+                    if matches!(self.peek().tok, Tok::Op(":"))
+                        && !matches!(self.peek_at(1).tok, Tok::Newline)
+                    {
+                        return Err(self.err(
+                            "E139",
+                            "语句形式的「匹配」分支要换行缩进；单行表达式分支请写成「令 名字 = 匹配 …」或「返回 匹配 …」",
+                        ));
+                    }
                     let body = self.parse_block()?;
-                    if matches!(pat, MatchPattern::Else) {
+                    if pats.len() == 1 && matches!(pats[0], MatchPattern::Else) {
                         else_body = Some(body);
                         saw_else = true;
                     } else {
-                        arms.push((pat, body));
+                        arms.push((pats, body));
                     }
                 }
                 if matches!(self.peek().tok, Tok::Dedent) {
@@ -429,6 +817,21 @@ impl Parser {
                 t.col,
                 "「情形」只能写在「匹配」里",
             )),
+            Tok::Kw(Kw::Assert) => {
+                self.pos += 1;
+                let cond = self.parse_expr()?;
+                let msg = if matches!(self.peek().tok, Tok::Op(",")) {
+                    self.pos += 1;
+                    Some(self.parse_expr()?)
+                } else {
+                    None
+                };
+                self.expect_newline()?;
+                Ok(Stmt {
+                    kind: StmtKind::Assert(cond, msg),
+                    line,
+                })
+            }
             Tok::Kw(Kw::Return) => {
                 self.pos += 1;
                 let e = if matches!(self.peek().tok, Tok::Newline | Tok::Dedent | Tok::Eof) {
@@ -510,7 +913,7 @@ impl Parser {
                 "E103",
                 line,
                 t.col,
-                format!("使用了 v0 不支持的关键字「{}」（如继承/最终等）", name),
+                format!("使用了 v0 不支持的关键字「{}」（如最终/用等）", name),
             )),
             _ => {
                 let e = self.parse_expr()?;
@@ -667,7 +1070,7 @@ impl Parser {
     }
 
     fn parse_compare(&mut self) -> Result<Expr> {
-        let first = self.parse_add()?;
+        let first = self.parse_bor()?;
         let mut pairs: Vec<(CmpOp, Box<Expr>)> = Vec::new();
         loop {
             let op = match self.peek().tok {
@@ -680,7 +1083,7 @@ impl Parser {
                 _ => break,
             };
             self.pos += 1;
-            let right = self.parse_add()?;
+            let right = self.parse_bor()?;
             pairs.push((op, Box::new(right)));
         }
         if pairs.is_empty() {
@@ -693,6 +1096,73 @@ impl Parser {
                 col,
             })
         }
+    }
+
+    /// 位或：最低的位运算层，比比较更高（`a & b == c` 是 `(a & b) == c`）。
+    fn parse_bor(&mut self) -> Result<Expr> {
+        let mut left = self.parse_bxor()?;
+        while matches!(self.peek().tok, Tok::Op("|")) {
+            self.pos += 1;
+            let right = self.parse_bxor()?;
+            let (line, col) = (left.line, left.col);
+            left = Expr {
+                kind: ExprKind::Bin(BinOp::BitOr, Box::new(left), Box::new(right)),
+                line,
+                col,
+            };
+        }
+        Ok(left)
+    }
+
+    fn parse_bxor(&mut self) -> Result<Expr> {
+        let mut left = self.parse_band()?;
+        while matches!(self.peek().tok, Tok::Op("^")) {
+            self.pos += 1;
+            let right = self.parse_band()?;
+            let (line, col) = (left.line, left.col);
+            left = Expr {
+                kind: ExprKind::Bin(BinOp::BitXor, Box::new(left), Box::new(right)),
+                line,
+                col,
+            };
+        }
+        Ok(left)
+    }
+
+    fn parse_band(&mut self) -> Result<Expr> {
+        let mut left = self.parse_shift()?;
+        while matches!(self.peek().tok, Tok::Op("&")) {
+            self.pos += 1;
+            let right = self.parse_shift()?;
+            let (line, col) = (left.line, left.col);
+            left = Expr {
+                kind: ExprKind::Bin(BinOp::BitAnd, Box::new(left), Box::new(right)),
+                line,
+                col,
+            };
+        }
+        Ok(left)
+    }
+
+    /// 移位：高于 `&`、低于 `+ -`。
+    fn parse_shift(&mut self) -> Result<Expr> {
+        let mut left = self.parse_add()?;
+        loop {
+            let op = match self.peek().tok {
+                Tok::Op("<<") => BinOp::Shl,
+                Tok::Op(">>") => BinOp::Shr,
+                _ => break,
+            };
+            self.pos += 1;
+            let right = self.parse_add()?;
+            let (line, col) = (left.line, left.col);
+            left = Expr {
+                kind: ExprKind::Bin(op, Box::new(left), Box::new(right)),
+                line,
+                col,
+            };
+        }
+        Ok(left)
     }
 
     fn parse_add(&mut self) -> Result<Expr> {
@@ -743,6 +1213,15 @@ impl Parser {
             let e = self.parse_unary()?;
             return Ok(Expr {
                 kind: ExprKind::Unary(UnOp::Neg, Box::new(e)),
+                line: t.line,
+                col: t.col,
+            });
+        }
+        if matches!(self.peek().tok, Tok::Op("~")) {
+            let t = self.bump();
+            let e = self.parse_unary()?;
+            return Ok(Expr {
+                kind: ExprKind::Unary(UnOp::Bnot, Box::new(e)),
                 line: t.line,
                 col: t.col,
             });
@@ -869,11 +1348,7 @@ impl Parser {
             }
             Tok::Str(s) => {
                 self.pos += 1;
-                Ok(Expr {
-                    kind: ExprKind::Str(s),
-                    line,
-                    col,
-                })
+                self.parse_string_literal(s, line, col)
             }
             Tok::Kw(Kw::True) => {
                 self.pos += 1;
@@ -907,6 +1382,48 @@ impl Parser {
                     col,
                 })
             }
+            Tok::Kw(Kw::Super) => {
+                self.pos += 1;
+                if !matches!(self.peek().tok, Tok::Op(".")) {
+                    return Err(CompileError::new(
+                        "E141",
+                        line,
+                        col,
+                        "「超」只能写 超.方法(...)，不能当值或赋值",
+                    ));
+                }
+                self.pos += 1;
+                let (name, nline, ncol) = self.expect_ident()?;
+                if !matches!(self.peek().tok, Tok::Op("(")) {
+                    return Err(CompileError::new(
+                        "E141",
+                        nline,
+                        ncol,
+                        "「超」后面必须跟方法调用，写 超.方法(...)",
+                    ));
+                }
+                self.expect_op("(")?;
+                let mut args = Vec::new();
+                if !matches!(self.peek().tok, Tok::Op(")")) {
+                    loop {
+                        args.push(self.parse_expr()?);
+                        if matches!(self.peek().tok, Tok::Op(",")) {
+                            self.pos += 1;
+                            if matches!(self.peek().tok, Tok::Op(")")) {
+                                break;
+                            }
+                            continue;
+                        }
+                        break;
+                    }
+                }
+                self.expect_op(")")?;
+                Ok(Expr {
+                    kind: ExprKind::SuperCall(name, args),
+                    line,
+                    col,
+                })
+            }
             Tok::Kw(Kw::New) => {
                 self.pos += 1;
                 let (cls, _, _) = self.expect_ident()?;
@@ -928,6 +1445,21 @@ impl Parser {
                 self.expect_op(")")?;
                 Ok(Expr {
                     kind: ExprKind::New(cls, args),
+                    line,
+                    col,
+                })
+            }
+            Tok::Kw(Kw::Match) => {
+                self.pos += 1;
+                self.parse_match_expr(line, col)
+            }
+            Tok::Kw(Kw::Func) => {
+                // 表达式位置的 `函数(...)` 是匿名函数。
+                self.pos += 1;
+                let params = self.parse_params()?;
+                let body = self.parse_func_body()?;
+                Ok(Expr {
+                    kind: ExprKind::AnonFunc(params, body),
                     line,
                     col,
                 })

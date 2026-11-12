@@ -56,6 +56,8 @@ pub const OP_TASK_SLEEP: u8 = 40;
 pub const OP_TASK_WAIT: u8 = 41;
 /// 删除绿色任务：弹栈取任务句柄，压回 真/假（无操作数）
 pub const OP_TASK_KILL: u8 = 42;
+/// LI013 超：静态调父类方法（U8 代码对象下标, U8 实参数）
+pub const OP_CALL_SUPER: u8 = 43;
 
 /// 运算子码
 pub const BIN_ADD: u8 = 0;
@@ -65,6 +67,12 @@ pub const BIN_DIV: u8 = 3;
 pub const BIN_FLOORDIV: u8 = 4;
 pub const BIN_MOD: u8 = 5;
 pub const BIN_POW: u8 = 6;
+/* 位运算：按 32 位补码算，结果必须落在 29 位范围（左移可能溢出）。 */
+pub const BIN_BAND: u8 = 7;
+pub const BIN_BOR: u8 = 8;
+pub const BIN_BXOR: u8 = 9;
+pub const BIN_SHL: u8 = 10;
+pub const BIN_SHR: u8 = 11;
 
 /// 比较子码
 pub const CMP_EQ: u8 = 0;
@@ -100,7 +108,7 @@ pub fn operand(op: u8) -> Operand {
         | OP_TASK_SPAWN | OP_TASK_YIELD | OP_TASK_SLEEP | OP_TASK_KILL => Operand::None,
         OP_JUMP | OP_JUMP_IF_FALSE | OP_JUMP_IF_TRUE | OP_JUMP_IF_FALSE_OR_POP
         | OP_JUMP_IF_TRUE_OR_POP | OP_FOR_ITER | OP_TRY => Operand::U16,
-        OP_CALL_METHOD | OP_CALL_INIT => Operand::U8U8,
+        OP_CALL_METHOD | OP_CALL_INIT | OP_CALL_SUPER => Operand::U8U8,
         _ => Operand::U8,
     }
 }
@@ -150,6 +158,7 @@ pub fn op_name(op: u8) -> &'static str {
         OP_TASK_SLEEP => "TASK_SLEEP",
         OP_TASK_WAIT => "TASK_WAIT",
         OP_TASK_KILL => "TASK_KILL",
+        OP_CALL_SUPER => "CALL_SUPER",
         _ => "?",
     }
 }
@@ -163,6 +172,11 @@ pub fn binop_name(sub: u8) -> &'static str {
         BIN_FLOORDIV => "//",
         BIN_MOD => "%",
         BIN_POW => "**",
+        BIN_BAND => "&",
+        BIN_BOR => "|",
+        BIN_BXOR => "^",
+        BIN_SHL => "<<",
+        BIN_SHR => ">>",
         _ => "?",
     }
 }
@@ -184,7 +198,7 @@ pub fn emit_c_header() -> String {
     let mut s = String::new();
     s.push_str("/* 由 micc --emit-header 生成，请勿手改。 */\n");
     s.push_str("#ifndef JM_OPCODES_H\n#define JM_OPCODES_H\n\n");
-    let ops: [(u8, &str); 43] = [
+    let ops: [(u8, &str); 44] = [
         (OP_HALT, "OP_HALT"),
         (OP_CONST, "OP_CONST"),
         (OP_LOAD_LOCAL, "OP_LOAD_LOCAL"),
@@ -228,6 +242,7 @@ pub fn emit_c_header() -> String {
         (OP_TASK_SLEEP, "OP_TASK_SLEEP"),
         (OP_TASK_WAIT, "OP_TASK_WAIT"),
         (OP_TASK_KILL, "OP_TASK_KILL"),
+        (OP_CALL_SUPER, "OP_CALL_SUPER"),
     ];
     for (v, n) in ops {
         s.push_str(&format!("#define {n} {v}\n"));
@@ -239,7 +254,12 @@ pub fn emit_c_header() -> String {
     s.push_str(&format!("#define BIN_DIV {BIN_DIV}\n"));
     s.push_str(&format!("#define BIN_FLOORDIV {BIN_FLOORDIV}\n"));
     s.push_str(&format!("#define BIN_MOD {BIN_MOD}\n"));
-    s.push_str(&format!("#define BIN_POW {BIN_POW}\n\n"));
+    s.push_str(&format!("#define BIN_POW {BIN_POW}\n"));
+    s.push_str(&format!("#define BIN_BAND {BIN_BAND}\n"));
+    s.push_str(&format!("#define BIN_BOR {BIN_BOR}\n"));
+    s.push_str(&format!("#define BIN_BXOR {BIN_BXOR}\n"));
+    s.push_str(&format!("#define BIN_SHL {BIN_SHL}\n"));
+    s.push_str(&format!("#define BIN_SHR {BIN_SHR}\n\n"));
     s.push_str(&format!("#define CMP_EQ {CMP_EQ}\n"));
     s.push_str(&format!("#define CMP_NE {CMP_NE}\n"));
     s.push_str(&format!("#define CMP_LT {CMP_LT}\n"));
