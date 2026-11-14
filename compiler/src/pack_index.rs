@@ -400,26 +400,78 @@ fn is_zip_archive(path: &Path) -> bool {
 }
 
 /// 解包用的临时序号，保证同一进程内并发调用不撞名。
+#[cfg(windows)]
 static STAGE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 fn extract_archive(archive: &Path, dest: &Path) -> Result<()> {
-    // Windows 的 tar/unzip 走 ANSI：路径里有中文时 bsdtar 会报
-    // `Failed to open '...\???'`。这类情况先把归档与解包目录都放到 ASCII 临时路径，
-    // 解完再用 Rust 搬回目标目录（Rust 在 Windows 上走 UTF-16，不受 locale 影响）。
-    if needs_ascii_staging(archive, dest) {
-        return extract_with_ascii_staging(archive, dest);
+    // Windows 的 tar 走 ANSI：中文路径会报 `Failed to open '...\???'`，
+    // zip 里的中文条目名也会被判成 `empty or unreadable filename`。
+    // 所以 zip 交给 PowerShell 的 Expand-Archive（.NET，天然 Unicode）；
+    // 其它归档至少先把路径搬到 ASCII 临时目录，避免连归档都打不开。
+    #[cfg(windows)]
+    {
+        if is_zip_archive(archive) {
+            return extract_zip_windows(archive, dest);
+        }
+        if !archive.to_string_lossy().is_ascii() || !dest.to_string_lossy().is_ascii() {
+            return extract_with_ascii_staging(archive, dest);
+        }
     }
     extract_archive_direct(archive, dest)
 }
 
+/// Windows：用 PowerShell 的 `Expand-Archive` 解 zip（.NET 按 UTF-8 读条目名）。
+///
+/// `Expand-Archive` 只认 `.zip` 后缀，而 HTTP 下载的归档在临时目录里叫 `包归档`；
+/// 一律先复制成 ASCII 的 `.zip` 再解，同时避开中文路径。
 #[cfg(windows)]
-fn needs_ascii_staging(archive: &Path, dest: &Path) -> bool {
-    !archive.to_string_lossy().is_ascii() || !dest.to_string_lossy().is_ascii()
+fn extract_zip_windows(archive: &Path, dest: &Path) -> Result<()> {
+    use std::process::Command;
+    std::fs::create_dir_all(dest)
+        .map_err(|e| idx_err(1, format!("建不了目录 {}：{}", dest.display(), e)))?;
+    let seq = STAGE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let work = std::env::temp_dir().join(format!("li-unpack-{}-{}", std::process::id(), seq));
+    let staged = work.join("a.zip");
+    let run = std::fs::create_dir_all(&work)
+        .map_err(|e| idx_err(1, format!("建不了临时目录 {}：{}", work.display(), e)))
+        .and_then(|_| {
+            std::fs::copy(archive, &staged)
+                .map_err(|e| idx_err(1, format!("复制归档 {} 失败：{}", archive.display(), e)))
+        })
+        .and_then(|_| {
+            let script = format!(
+                "$ErrorActionPreference='Stop'; Expand-Archive -LiteralPath '{}' -DestinationPath '{}' -Force",
+                ps_quote(&staged),
+                ps_quote(dest)
+            );
+            match Command::new("powershell")
+                .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+                .status()
+            {
+                Ok(s) if s.success() => Ok(()),
+                Ok(s) => Err(CompileError::new(
+                    "E135",
+                    1,
+                    1,
+                    format!("解包 {} 失败：Expand-Archive 退出码 {:?}", archive.display(), s.code()),
+                )
+                .with_hint("确认归档本身完好；PowerShell 5.1+ 的 Expand-Archive 才能解 zip")),
+                Err(e) => Err(CompileError::new(
+                    "E135",
+                    1,
+                    1,
+                    format!("解包 {} 失败：找不到 powershell（{}）", archive.display(), e),
+                )
+                .with_hint("Windows 自带的 powershell.exe 应在 PATH 里")),
+            }
+        });
+    let _ = std::fs::remove_dir_all(&work);
+    run
 }
 
-#[cfg(not(windows))]
-fn needs_ascii_staging(_archive: &Path, _dest: &Path) -> bool {
-    false
+#[cfg(windows)]
+fn ps_quote(p: &Path) -> String {
+    p.to_string_lossy().replace('\'', "''")
 }
 
 #[cfg(windows)]
