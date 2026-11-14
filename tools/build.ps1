@@ -1,4 +1,4 @@
-﻿param([switch]$SkipTests)
+﻿param([switch]$SkipTests, [switch]$SkipPackages)
 
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
@@ -87,8 +87,10 @@ try {
         if ($LASTEXITCODE -ne 0) { throw "错误用例失败" }
         & (Join-Path $PSScriptRoot "test-native-import.ps1")
         if ($LASTEXITCODE -ne 0) { throw "原生导入回归失败" }
-        & (Join-Path $PSScriptRoot "test-packages.ps1")
-        if ($LASTEXITCODE -ne 0) { throw "包用例失败" }
+        if (-not $SkipPackages) {
+            & (Join-Path $PSScriptRoot "test-packages.ps1")
+            if ($LASTEXITCODE -ne 0) { throw "包用例失败" }
+        }
         & (Join-Path $PSScriptRoot "test-debug.ps1")
         if ($LASTEXITCODE -ne 0) { throw "调试表用例失败" }
     }

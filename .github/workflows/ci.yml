@@ -5,6 +5,7 @@
 #   - 串口采集与实机时序（tools/capture-serial.ps1）
 #   - ADC / PWM / 定时器的电气行为、20 KB SRAM 的真实运行余量
 # CI 只验证：主机编译与全部回归、规范防漂移、交叉编译产物、静态体积对比。
+# 打包回归（test-packages）拆到独立 job，失败时不用翻整条主构建日志。
 #
 # 环境说明：
 #   - windows-latest，PowerShell 7（pwsh），避免 Windows PowerShell 5.1
@@ -66,7 +67,7 @@ jobs:
         shell: pwsh
         run: |
           [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
-          ./tools/build.ps1
+          ./tools/build.ps1 -SkipPackages
           ./compiler/target/release/micc.exe --check-langcard
           ./compiler/target/release/micc.exe --check-native
 
@@ -90,3 +91,35 @@ jobs:
             build/stm32/jishim.map
             build/stm32/size-report.json
           if-no-files-found: warn
+
+  packages:
+    name: 打包回归（独立 job）
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: 检出
+        uses: actions/checkout@v4
+
+      - name: 安装 Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: 安装主机 gcc（MSYS2 MinGW-w64）
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: false
+          install: mingw-w64-x86_64-gcc
+          path-type: inherit
+
+      - name: 主机构建（跳过全部回归）
+        shell: pwsh
+        run: |
+          [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+          ./tools/build.ps1 -SkipTests
+
+      - name: 打包回归
+        shell: pwsh
+        run: |
+          [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+          ./tools/test-packages.ps1
