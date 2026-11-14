@@ -399,7 +399,69 @@ fn is_zip_archive(path: &Path) -> bool {
     }
 }
 
+/// 解包用的临时序号，保证同一进程内并发调用不撞名。
+static STAGE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 fn extract_archive(archive: &Path, dest: &Path) -> Result<()> {
+    // Windows 的 tar/unzip 走 ANSI：路径里有中文时 bsdtar 会报
+    // `Failed to open '...\???'`。这类情况先把归档与解包目录都放到 ASCII 临时路径，
+    // 解完再用 Rust 搬回目标目录（Rust 在 Windows 上走 UTF-16，不受 locale 影响）。
+    if needs_ascii_staging(archive, dest) {
+        return extract_with_ascii_staging(archive, dest);
+    }
+    extract_archive_direct(archive, dest)
+}
+
+#[cfg(windows)]
+fn needs_ascii_staging(archive: &Path, dest: &Path) -> bool {
+    !archive.to_string_lossy().is_ascii() || !dest.to_string_lossy().is_ascii()
+}
+
+#[cfg(not(windows))]
+fn needs_ascii_staging(_archive: &Path, _dest: &Path) -> bool {
+    false
+}
+
+#[cfg(windows)]
+fn extract_with_ascii_staging(archive: &Path, dest: &Path) -> Result<()> {
+    let seq = STAGE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let work = std::env::temp_dir().join(format!("li-unpack-{}-{}", std::process::id(), seq));
+    let staged = work.join(if is_zip_archive(archive) { "a.zip" } else { "a.tar" });
+    let out = work.join("out");
+    let result = std::fs::create_dir_all(&out)
+        .map_err(|e| idx_err(1, format!("建不了临时目录 {}：{}", out.display(), e)))
+        .and_then(|_| {
+            std::fs::copy(archive, &staged).map_err(|e| {
+                idx_err(1, format!("复制归档 {} 失败：{}", archive.display(), e))
+            })
+        })
+        .and_then(|_| extract_archive_direct(&staged, &out))
+        .and_then(|_| move_tree(&out, dest));
+    let _ = std::fs::remove_dir_all(&work);
+    result
+}
+
+#[cfg(windows)]
+fn move_tree(from: &Path, to: &Path) -> Result<()> {
+    std::fs::create_dir_all(to)
+        .map_err(|e| idx_err(1, format!("建不了目录 {}：{}", to.display(), e)))?;
+    let entries = std::fs::read_dir(from)
+        .map_err(|e| idx_err(1, format!("读不了目录 {}：{}", from.display(), e)))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| idx_err(1, format!("读目录项失败：{}", e)))?;
+        let src = entry.path();
+        let dst = to.join(entry.file_name());
+        if src.is_dir() {
+            move_tree(&src, &dst)?;
+        } else if std::fs::rename(&src, &dst).is_err() {
+            std::fs::copy(&src, &dst)
+                .map_err(|e| idx_err(1, format!("搬移 {} 失败：{}", src.display(), e)))?;
+        }
+    }
+    Ok(())
+}
+
+fn extract_archive_direct(archive: &Path, dest: &Path) -> Result<()> {
     let tar_err = match std::process::Command::new("tar")
         .arg("-xf")
         .arg(archive)

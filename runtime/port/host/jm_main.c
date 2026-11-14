@@ -113,7 +113,7 @@ static const char *micc_path(void) {
 #ifdef _WIN32
     return "compiler\\target\\release\\micc.exe";
 #else
-    return "compiler/target/release/micc.exe";
+    return "compiler/target/release/micc";
 #endif
 }
 
