@@ -22,7 +22,7 @@ g_pfnVectors:
     .word _estack                 /* 0x00 初始主栈指针 */
     .word Reset_Handler           /* 0x04 复位 */
     .word Default_Handler         /* 0x08 NMI */
-    .word Default_Handler         /* 0x0C HardFault */
+    .word HardFault_Handler       /* 0x0C HardFault */
     .word Default_Handler         /* 0x10 MemManage */
     .word Default_Handler         /* 0x14 BusFault */
     .word Default_Handler         /* 0x18 UsageFault */
@@ -125,5 +125,20 @@ halt:
 Default_Handler:
     b .
     .size Default_Handler, .-Default_Handler
+
+    /*
+     * HardFault：把 EXC_RETURN / MSP / PSP 交给 C 侧 hardfault_report 打印现场，
+     * 打印完在 C 里死循环，不返回。
+     */
+    .global HardFault_Handler
+    .thumb_func
+    .type HardFault_Handler, %function
+HardFault_Handler:
+    mov r0, lr          /* EXC_RETURN */
+    mrs r1, msp
+    mrs r2, psp
+    bl hardfault_report
+    b .
+    .size HardFault_Handler, .-HardFault_Handler
 
     .end

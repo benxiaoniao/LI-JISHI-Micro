@@ -12,9 +12,13 @@ use std::collections::{HashMap, HashSet};
 #[derive(Clone, Debug)]
 pub struct DepView {
     pub exports: Option<HashSet<String>>,
+    /// `[导出] 类型`：可跨包的类/枚举名；`None` = 不导出任何类型。
+    pub types: Option<HashSet<String>>,
     pub classes: HashSet<String>,
-    /// 依赖包定义的枚举名（包内私有，跨包不可见）。
+    /// 依赖包定义的枚举名。
     pub enums: HashSet<String>,
+    /// 顶层 `私有` 声明，任何情况下都不跨包。
+    pub private: HashSet<String>,
 }
 
 pub struct Unit {
@@ -24,7 +28,9 @@ pub struct Unit {
     pub globals: HashSet<String>,
     pub classes: HashSet<String>,
     pub enums: HashSet<String>,
+    pub private: HashSet<String>,
     pub exports: Option<HashSet<String>>,
+    pub export_types: Option<HashSet<String>>,
     /// 入口源文件（调试表的显示名）。
     pub file: String,
 }
@@ -35,12 +41,14 @@ impl Unit {
         is_root: bool,
         stmts: Vec<Stmt>,
         exports: Option<Vec<String>>,
+        export_types: Option<Vec<String>>,
         file: String,
     ) -> Unit {
         let mut globals = HashSet::new();
         let mut classes = HashSet::new();
         let mut enums = HashSet::new();
-        collect_top(&stmts, &mut globals, &mut classes, &mut enums);
+        let mut private = HashSet::new();
+        collect_top(&stmts, &mut globals, &mut classes, &mut enums, &mut private);
         Unit {
             name,
             is_root,
@@ -48,7 +56,9 @@ impl Unit {
             globals,
             classes,
             enums,
+            private,
             exports: exports.map(|v| v.into_iter().collect()),
+            export_types: export_types.map(|v| v.into_iter().collect()),
             file,
         }
     }
@@ -56,8 +66,10 @@ impl Unit {
     pub fn view(&self) -> DepView {
         DepView {
             exports: self.exports.clone(),
+            types: self.export_types.clone(),
             classes: self.classes.clone(),
             enums: self.enums.clone(),
+            private: self.private.clone(),
         }
     }
 }
@@ -67,25 +79,30 @@ fn collect_top(
     globals: &mut HashSet<String>,
     classes: &mut HashSet<String>,
     enums: &mut HashSet<String>,
+    private: &mut HashSet<String>,
 ) {
     for s in stmts {
-        match &s.kind {
-            StmtKind::Let(n, _) | StmtKind::FuncDef { name: n, .. } => {
-                globals.insert(n.clone());
-            }
+        let name = match &s.kind {
+            StmtKind::Let(n, _) | StmtKind::FuncDef { name: n, .. } => Some(n.clone()),
             StmtKind::Class(c) => {
                 globals.insert(c.name.clone());
                 classes.insert(c.name.clone());
+                Some(c.name.clone())
             }
             StmtKind::Enum(e) => {
                 // 枚举名按模块级名字处理：依赖包里会随其他顶层名字一起改名。
                 globals.insert(e.name.clone());
                 enums.insert(e.name.clone());
+                Some(e.name.clone())
             }
-            StmtKind::ForEach(n, _, _) => {
-                globals.insert(n.clone());
+            StmtKind::ForEach(n, _, _) => Some(n.clone()),
+            _ => None,
+        };
+        if let Some(n) = name {
+            globals.insert(n.clone());
+            if s.is_private {
+                private.insert(n);
             }
-            _ => {}
         }
     }
 }
@@ -147,6 +164,7 @@ struct Renamer<'a> {
     is_root: bool,
     globals: &'a HashSet<String>,
     classes: &'a HashSet<String>,
+    enums: &'a HashSet<String>,
     deps: &'a HashMap<String, DepView>,
     scopes: Vec<HashSet<String>>,
 }
@@ -175,6 +193,74 @@ impl<'a> Renamer<'a> {
             .map(|(k, _)| k.as_str())
     }
 
+    /// 依赖包的类型是否可跨包：默认公开；`私有` 永不导出；
+    /// 写了 `[导出] 类型` 时按该清单过滤。
+    fn type_exported(&self, pkg: &str, name: &str) -> bool {
+        let Some(view) = self.deps.get(pkg) else {
+            return false;
+        };
+        if view.private.contains(name) {
+            return false;
+        }
+        view.types
+            .as_ref()
+            .map(|t| t.contains(name))
+            .unwrap_or(true)
+    }
+
+    fn is_private(&self, pkg: &str, name: &str) -> bool {
+        self.deps
+            .get(pkg)
+            .map(|v| v.private.contains(name))
+            .unwrap_or(false)
+    }
+
+    /// 把类型标注里的跨包引用改成合并后的名字。
+    /// `包名.类名` → `包名::类名`；依赖包内部的 `类名` → `包名::类名`。
+    fn mangle_ann(&self, ann: &mut Option<String>, line: u32) -> Result<()> {
+        let Some(name) = ann.as_mut() else {
+            return Ok(());
+        };
+        if let Some((pkg, ty)) = name.split_once('.') {
+            if self.is_dep_pkg(pkg) {
+                let view = &self.deps[pkg];
+                if !view.classes.contains(ty) && !view.enums.contains(ty) {
+                    return Err(CompileError::new(
+                        "E128",
+                        line,
+                        1,
+                        format!("包「{}」里没有类型「{}」", pkg, ty),
+                    ));
+                }
+                if self.is_private(pkg, ty) {
+                    return Err(CompileError::new(
+                        "E128",
+                        line,
+                        1,
+                        format!("类型「{}.{}」是私有声明，不能跨包使用", pkg, ty),
+                    ));
+                }
+                if !self.type_exported(pkg, ty) {
+                    return Err(CompileError::new(
+                        "E128",
+                        line,
+                        1,
+                        format!(
+                            "类型「{}.{}」没有导出；请在它的 砾包.toml [导出] 类型 里列出这个名字",
+                            pkg, ty
+                        ),
+                    ));
+                }
+                *name = format!("{}::{}", pkg, ty);
+            }
+        } else if !self.is_root
+            && (self.classes.contains(name.as_str()) || self.enums.contains(name.as_str()))
+        {
+            *name = self.mangle(name);
+        }
+        Ok(())
+    }
+
     fn global_ref(&self, n: &str) -> Option<String> {
         if !self.is_root && !self.shadowed(n) && self.globals.contains(n) {
             Some(self.mangle(n))
@@ -183,24 +269,68 @@ impl<'a> Renamer<'a> {
         }
     }
 
-    /// 改写分支模式里的枚举名（依赖包内改名为 `包名::枚举名`；根包直接引用报 E128）。
+    /// 改写分支模式里的枚举名（依赖包内改名为 `包名::枚举名`；跨包看 `[导出] 类型`）。
     fn match_patterns(&mut self, pats: &mut [MatchPattern], line: u32) -> Result<()> {
         for pat in pats {
-            if let MatchPattern::EnumMember(n, _) = pat {
-                if let Some(m) = self.global_ref(n) {
-                    *n = m;
-                } else if self.is_root {
-                    if let Some(owner) = self.dep_enum_owner(n) {
-                        return Err(CompileError::new(
-                            "E128",
-                            line,
-                            1,
-                            format!("枚举「{}.{}」是包内私有的，不能跨包直接使用", owner, n),
-                        )
-                        .with_hint(
-                            "把需要跨包的行为封成依赖包的导出函数；枚举只在定义它的包内可见",
-                        ));
-                    }
+            let MatchPattern::EnumMember(n, _) = pat else {
+                continue;
+            };
+            // `包名.枚举名.成员`：解析器把枚举名拼成 `包名.枚举名`。
+            if let Some((pkg, en)) = n.split_once('.') {
+                let pkg = pkg.to_string();
+                let en = en.to_string();
+                if !self.is_dep_pkg(&pkg) {
+                    return Err(CompileError::new(
+                        "E128",
+                        line,
+                        1,
+                        format!("包「{}」不在依赖里；跨包枚举要写 包名.枚举名.成员", pkg),
+                    ));
+                }
+                if !self.deps[&pkg].enums.contains(&en) {
+                    return Err(CompileError::new(
+                        "E128",
+                        line,
+                        1,
+                        format!("包「{}」里没有枚举「{}」", pkg, en),
+                    ));
+                }
+                if self.is_private(&pkg, &en) {
+                    return Err(CompileError::new(
+                        "E128",
+                        line,
+                        1,
+                        format!("枚举「{}.{}」是私有声明，不能跨包使用", pkg, en),
+                    ));
+                }
+                if !self.type_exported(&pkg, &en) {
+                    return Err(CompileError::new(
+                        "E128",
+                        line,
+                        1,
+                        format!(
+                            "枚举「{}.{}」没有导出；请在它的 砾包.toml [导出] 类型 里列出这个名字",
+                            pkg, en
+                        ),
+                    ));
+                }
+                *n = format!("{}::{}", pkg, en);
+                continue;
+            }
+            if let Some(m) = self.global_ref(n) {
+                *n = m;
+            } else if self.is_root {
+                if let Some(owner) = self.dep_enum_owner(n) {
+                    return Err(CompileError::new(
+                        "E128",
+                        line,
+                        1,
+                        format!(
+                            "枚举「{}.{}」不能直接写；跨包请用 {}.{}.成员，并在对方 [导出] 类型 里列出",
+                            owner, n, owner, n
+                        ),
+                    )
+                    .with_hint("枚举跨包需要显式导出；枚举名本身不能当值用"));
                 }
             }
         }
@@ -209,14 +339,36 @@ impl<'a> Renamer<'a> {
 
     fn check_export(&self, pkg: &str, name: &str, line: u32) -> Result<()> {
         let view = &self.deps[pkg];
+        if view.private.contains(name) {
+            return Err(CompileError::new(
+                "E128",
+                line,
+                1,
+                format!(
+                    "「{}.{}」是私有声明，不能跨包使用；去掉 `私有` 或在对方导出对应名字",
+                    pkg, name
+                ),
+            ));
+        }
         if view.classes.contains(name) {
             return Err(CompileError::new(
                 "E128",
                 line,
                 1,
                 format!(
-                    "类「{}.{}」不能跨包当值用；跨包 `新建` 不在本切片范围内",
-                    pkg, name
+                    "类「{}.{}」不能当值用；跨包创建请写 `新建 {}.{}(...)`，类型需在对方 [导出] 类型 里列出",
+                    pkg, name, pkg, name
+                ),
+            ));
+        }
+        if view.enums.contains(name) {
+            return Err(CompileError::new(
+                "E128",
+                line,
+                1,
+                format!(
+                    "枚举「{}.{}」不能当值用；请写 `{}.{}.成员`，类型需在对方 [导出] 类型 里列出",
+                    pkg, name, pkg, name
                 ),
             ));
         }
@@ -310,12 +462,23 @@ impl<'a> Renamer<'a> {
                 }
                 self.stmts(b, false)
             }
-            StmtKind::FuncDef { name, params, body } => {
+            StmtKind::FuncDef {
+                name,
+                params,
+                param_types,
+                ret_type,
+                body,
+                ..
+            } => {
                 if module {
                     if let Some(m) = self.global_ref(name) {
                         *name = m;
                     }
                 }
+                for t in param_types.iter_mut() {
+                    self.mangle_ann(t, line)?;
+                }
+                self.mangle_ann(ret_type, line)?;
                 let mut scope = HashSet::new();
                 for d in local_decls(body) {
                     scope.insert(d);
@@ -342,6 +505,10 @@ impl<'a> Renamer<'a> {
                     self.expr(e)?;
                 }
                 for m in c.methods.iter_mut() {
+                    for t in m.param_types.iter_mut() {
+                        self.mangle_ann(t, line)?;
+                    }
+                    self.mangle_ann(&mut m.ret_type, line)?;
                     let mut scope = HashSet::new();
                     for d in local_decls(&m.body) {
                         scope.insert(d);
@@ -398,6 +565,41 @@ impl<'a> Renamer<'a> {
     }
 
     fn expr(&mut self, e: &mut Expr) -> Result<()> {
+        // `包名.枚举名.成员`：把内层整体折成 `包名::枚举名`，外层只留一个成员访问。
+        let (eline, ecol) = (e.line, e.col);
+        if let ExprKind::Member(base, _) = &mut e.kind {
+            let mut folded: Option<String> = None;
+            if let ExprKind::Member(inner, en) = &base.kind {
+                if let ExprKind::Name(p) = &inner.kind {
+                    if self.is_dep_pkg(p) && self.deps[p].enums.contains(en) {
+                        if self.is_private(p, en) {
+                            return Err(CompileError::new(
+                                "E128",
+                                eline,
+                                ecol,
+                                format!("枚举「{}.{}」是私有声明，不能跨包使用", p, en),
+                            ));
+                        }
+                        if !self.type_exported(p, en) {
+                            return Err(CompileError::new(
+                                "E128",
+                                eline,
+                                ecol,
+                                format!(
+                                    "枚举「{}.{}」没有导出；请在它的 砾包.toml [导出] 类型 里列出这个名字",
+                                    p, en
+                                ),
+                            ));
+                        }
+                        folded = Some(format!("{}::{}", p, en));
+                    }
+                }
+            }
+            if let Some(name) = folded {
+                base.kind = ExprKind::Name(name);
+            }
+        }
+
         // `包名.名字` / `包名.函数(...)`：跨包引用。
         if let ExprKind::Member(base, field) = &e.kind {
             if let ExprKind::Name(p) = &base.kind {
@@ -432,7 +634,7 @@ impl<'a> Renamer<'a> {
             }
         }
 
-        // 根包不能直接引用依赖包的枚举：依赖包里的枚举在合并时已改名为 `包名::枚举名`。
+        // 根包直接写依赖包的枚举名（`状态.运行`）：提示改用 `包名.状态.运行`。
         if self.is_root {
             if let ExprKind::Member(base, _) = &e.kind {
                 if let ExprKind::Name(n) = &base.kind {
@@ -442,32 +644,11 @@ impl<'a> Renamer<'a> {
                             e.line,
                             e.col,
                             format!(
-                                "枚举「{}.{}」是包内私有的，不能跨包直接使用",
-                                owner, n
+                                "枚举「{}.{}」不能直接写；跨包请用 {}.{}.成员，并在对方 [导出] 类型 里列出",
+                                owner, n, owner, n
                             ),
                         )
-                        .with_hint(
-                            "把需要跨包的行为封成依赖包的导出函数；枚举只在定义它的包内可见",
-                        ));
-                    }
-                }
-                // `包名.枚举名.成员`：同样拒绝，避免误以为支持跨包枚举。
-                if let ExprKind::Member(inner, en) = &base.kind {
-                    if let ExprKind::Name(p) = &inner.kind {
-                        if self.is_dep_pkg(p) && self.deps[p].enums.contains(en.as_str()) {
-                            return Err(CompileError::new(
-                                "E128",
-                                e.line,
-                                e.col,
-                                format!(
-                                    "枚举「{}.{}」是包内私有的，不能跨包直接使用",
-                                    p, en
-                                ),
-                            )
-                            .with_hint(
-                                "把需要跨包的行为封成依赖包的导出函数；枚举只在定义它的包内可见",
-                            ));
-                        }
+                        .with_hint("枚举跨包需要显式导出；枚举名本身不能当值用"));
                     }
                 }
             }
@@ -480,7 +661,49 @@ impl<'a> Renamer<'a> {
                 }
             }
             ExprKind::New(cls, args) => {
-                if !self.is_root && self.classes.contains(cls.as_str()) {
+                if let Some((pkg, name)) = cls.split_once('.') {
+                    let pkg = pkg.to_string();
+                    let name = name.to_string();
+                    if !self.is_dep_pkg(&pkg) {
+                        return Err(CompileError::new(
+                            "E128",
+                            e.line,
+                            e.col,
+                            format!(
+                                "包「{}」不在依赖里；跨包创建要写 `新建 包名.类名(...)`",
+                                pkg
+                            ),
+                        ));
+                    }
+                    if !self.deps[&pkg].classes.contains(&name) {
+                        return Err(CompileError::new(
+                            "E128",
+                            e.line,
+                            e.col,
+                            format!("包「{}」里没有类「{}」", pkg, name),
+                        ));
+                    }
+                    if self.is_private(&pkg, &name) {
+                        return Err(CompileError::new(
+                            "E128",
+                            e.line,
+                            e.col,
+                            format!("类「{}.{}」是私有声明，不能跨包使用", pkg, name),
+                        ));
+                    }
+                    if !self.type_exported(&pkg, &name) {
+                        return Err(CompileError::new(
+                            "E128",
+                            e.line,
+                            e.col,
+                            format!(
+                                "类「{}.{}」没有导出；请在它的 砾包.toml [导出] 类型 里列出这个名字",
+                                pkg, name
+                            ),
+                        ));
+                    }
+                    *cls = format!("{}::{}", pkg, name);
+                } else if !self.is_root && self.classes.contains(cls.as_str()) {
                     *cls = self.mangle(cls);
                 }
                 for a in args {
@@ -531,7 +754,11 @@ impl<'a> Renamer<'a> {
                     self.expr(a)?;
                 }
             }
-            ExprKind::AnonFunc(params, body) => {
+            ExprKind::AnonFunc(params, param_types, ret_type, body) => {
+                for t in param_types.iter_mut() {
+                    self.mangle_ann(t, e.line)?;
+                }
+                self.mangle_ann(ret_type, e.line)?;
                 let mut scope = HashSet::new();
                 for d in local_decls(body) {
                     scope.insert(d);
@@ -637,6 +864,7 @@ pub fn merge(units: &mut Vec<Unit>) -> Result<Merged> {
             is_root: u.is_root,
             globals: &u.globals,
             classes: &u.classes,
+            enums: &u.enums,
             deps: &views,
             scopes: Vec::new(),
         };
@@ -720,7 +948,7 @@ pub fn heap_estimate(stmts: &[Stmt], class_fields: &HashMap<String, usize>) -> u
                 }
                 n
             }
-            ExprKind::AnonFunc(_, body) => walk_stmts(body, cf),
+            ExprKind::AnonFunc(_, _, _, body) => walk_stmts(body, cf),
             ExprKind::Match(subject, arms, else_value) => {
                 let mut n = expr(subject, cf);
                 for (_, v) in arms {

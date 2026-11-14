@@ -1,6 +1,7 @@
 use crate::ast::*;
 use crate::error::{CompileError, Result};
 use crate::native_spec;
+use crate::stdlib_spec;
 use crate::vm_spec;
 use crate::opcodes::*;
 use std::collections::{HashMap, HashSet};
@@ -46,6 +47,8 @@ pub struct ClassObj {
     pub init_code: u8,
     /// 父类下标；255 表示没有父类（单继承）。
     pub parent: u8,
+    /// `最终 类`：不能再被继承。
+    pub is_final: bool,
     /// 字段名在名字表中的下标，按声明顺序（父类扁平字段在前）。
     pub fields: Vec<u8>,
     /// `(方法名下标, 代码对象下标)`。
@@ -100,6 +103,40 @@ struct Builder {
     enums: HashMap<String, HashMap<String, i32>>,
     /// `--no-assert`：整句 `断言` 不生成字节码。
     no_assert: bool,
+    /// `--strict-type`：校验类型标注（默认关闭，保持宽松）。
+    strict: bool,
+    /// 顶层函数签名（名字 → 参数/返回类型标注）。
+    func_sigs: HashMap<String, FuncSig>,
+    /// 类下标 + 方法名 → 签名。
+    method_sigs: HashMap<(u8, String), FuncSig>,
+    /// 类下标 → `初始化` 签名。
+    init_sigs: HashMap<u8, FuncSig>,
+    /// 模块顶层声明/赋值的名字；这些名字即便与标准库同名，也按用户自己的算。
+    declared: HashSet<String>,
+}
+
+/// 类型标注（只做编译期校验，不进入字节码）。
+#[derive(Clone, Default)]
+struct FuncSig {
+    param_types: Vec<Option<String>>,
+    ret_type: Option<String>,
+}
+
+/// 严格模式下能静态确认的类型。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Ty {
+    Int,
+    Dec,
+    Str,
+    Bool,
+    Nil,
+    List,
+    Dict,
+    Bytes,
+    Set,
+    Range,
+    Func,
+    Class(u8),
 }
 
 impl Builder {
@@ -113,6 +150,11 @@ impl Builder {
             class_map: HashMap::new(),
             enums: HashMap::new(),
             no_assert: false,
+            strict: false,
+            func_sigs: HashMap::new(),
+            method_sigs: HashMap::new(),
+            init_sigs: HashMap::new(),
+            declared: HashSet::new(),
         }
     }
 
@@ -264,6 +306,316 @@ impl Builder {
     }
 }
 
+/// 把类型标注名解析成静态类型；未知返回 `None`。
+/// 枚举在运行期就是整数，`枚举名` 作标注时按整数处理。
+fn resolve_ty(b: &Builder, name: &str) -> Option<Ty> {
+    Some(match name {
+        "整数" => Ty::Int,
+        "小数" => Ty::Dec,
+        "文本" => Ty::Str,
+        "布尔" => Ty::Bool,
+        "空" => Ty::Nil,
+        "列表" => Ty::List,
+        "字典" => Ty::Dict,
+        "字节" => Ty::Bytes,
+        "集合" => Ty::Set,
+        "范围" => Ty::Range,
+        "函数" => Ty::Func,
+        _ => {
+            if let Some(&ci) = b.class_map.get(name) {
+                return Some(Ty::Class(ci));
+            }
+            if b.enums.contains_key(name) {
+                return Some(Ty::Int);
+            }
+            return None;
+        }
+    })
+}
+
+fn ty_name(b: &Builder, t: Ty) -> String {
+    match t {
+        Ty::Int => "整数".to_string(),
+        Ty::Dec => "小数".to_string(),
+        Ty::Str => "文本".to_string(),
+        Ty::Bool => "布尔".to_string(),
+        Ty::Nil => "空".to_string(),
+        Ty::List => "列表".to_string(),
+        Ty::Dict => "字典".to_string(),
+        Ty::Bytes => "字节".to_string(),
+        Ty::Set => "集合".to_string(),
+        Ty::Range => "范围".to_string(),
+        Ty::Func => "函数".to_string(),
+        Ty::Class(ci) => b
+            .classes
+            .get(ci as usize)
+            .and_then(|c| b.names.get(c.name_idx as usize))
+            .cloned()
+            .unwrap_or_else(|| "<类>".to_string()),
+    }
+}
+
+/// 严格模式：标注的类型名必须是内建类型或已定义的类。
+fn check_ann(b: &Builder, name: &str, line: u32, col: u32) -> Result<()> {
+    if !b.strict || resolve_ty(b, name).is_some() {
+        return Ok(());
+    }
+    Err(CompileError::new(
+        "E143",
+        line,
+        col,
+        format!(
+            "类型标注「{}」不认识；可用：整数/小数/文本/布尔/空/列表/字典/字节/集合/范围/函数，或已定义的类/枚举（跨包用 包名.类名）",
+            name
+        ),
+    ))
+}
+
+/// 实际类型能否传给标注类型：整数可当小数；`空` 可给引用类型；子类实例可给父类。
+fn assignable(b: &Builder, actual: Ty, expected: Ty) -> bool {
+    if actual == expected {
+        return true;
+    }
+    match (actual, expected) {
+        (Ty::Int, Ty::Dec) => true,
+        (Ty::Nil, Ty::Class(_) | Ty::List | Ty::Dict | Ty::Bytes | Ty::Set | Ty::Func) => true,
+        (Ty::Class(a), Ty::Class(e)) => {
+            let mut k = a;
+            let mut hops = 0usize;
+            while k != 255 {
+                if k == e {
+                    return true;
+                }
+                hops += 1;
+                if hops > b.classes.len() {
+                    return false;
+                }
+                k = match b.classes.get(k as usize) {
+                    Some(c) => c.parent,
+                    None => return false,
+                };
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
+/// 沿父链找方法签名（`本.方法` 与 `超.方法` 的实参检查用）。
+fn method_sig<'a>(b: &'a Builder, class_idx: u8, name: &str) -> Option<&'a FuncSig> {
+    let mut ci = class_idx;
+    let mut hops = 0usize;
+    while ci != 255 {
+        if let Some(sig) = b.method_sigs.get(&(ci, name.to_string())) {
+            return Some(sig);
+        }
+        hops += 1;
+        if hops > b.classes.len() {
+            return None;
+        }
+        ci = b.classes.get(ci as usize)?.parent;
+    }
+    None
+}
+
+/// 少数内建的返回类型（够严格模式做保守推断）。
+fn builtin_ret(name: &str) -> Option<Ty> {
+    Some(match name {
+        "字节" => Ty::Bytes,
+        "集合" => Ty::Set,
+        "范围" => Ty::Range,
+        "文本" | "字节文本" | "字节十六进制" | "十六进制字节" | "子串" | "替换" | "连接"
+        | "去空白" | "转大写" | "转小写" => Ty::Str,
+        "分割" | "切片" | "反转" | "排序" | "键列表" | "字节列表" => Ty::List,
+        "整数" | "长度" | "查找" | "字节取" => Ty::Int,
+        _ => return None,
+    })
+}
+
+fn numeric_ty(a: Ty, b: Ty) -> Option<Ty> {
+    match (a, b) {
+        (Ty::Int, Ty::Int) => Some(Ty::Int),
+        (Ty::Int, Ty::Dec) | (Ty::Dec, Ty::Int) | (Ty::Dec, Ty::Dec) => Some(Ty::Dec),
+        _ => None,
+    }
+}
+
+fn bin_ty(op: BinOp, a: Ty, c: Ty) -> Option<Ty> {
+    match op {
+        BinOp::Add => match (a, c) {
+            (Ty::Str, Ty::Str) => Some(Ty::Str),
+            (Ty::List, Ty::List) => Some(Ty::List),
+            (Ty::Bytes, Ty::Bytes) => Some(Ty::Bytes),
+            _ => numeric_ty(a, c),
+        },
+        BinOp::And | BinOp::Or => Some(Ty::Bool),
+        BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr => {
+            if a == Ty::Int && c == Ty::Int {
+                Some(Ty::Int)
+            } else {
+                None
+            }
+        }
+        _ => numeric_ty(a, c),
+    }
+}
+
+/// 严格模式下“能静态看出”的表达式类型；看不出来返回 `None`（不报错）。
+fn obvious_ty(b: &Builder, fs: &FnState, e: &Expr) -> Option<Ty> {
+    match &e.kind {
+        ExprKind::Int(_) => Some(Ty::Int),
+        ExprKind::Dec(_) => Some(Ty::Dec),
+        ExprKind::Str(_) => Some(Ty::Str),
+        ExprKind::True | ExprKind::False => Some(Ty::Bool),
+        ExprKind::Nil => Some(Ty::Nil),
+        ExprKind::List(_) => Some(Ty::List),
+        ExprKind::Dict(_) => Some(Ty::Dict),
+        ExprKind::New(cls, _) => b.class_map.get(cls).map(|&ci| Ty::Class(ci)),
+        ExprKind::AnonFunc(..) => Some(Ty::Func),
+        ExprKind::SelfRef => fs.current_class.map(Ty::Class),
+        ExprKind::Member(obj, _) => match &obj.kind {
+            ExprKind::Name(en) if b.enums.contains_key(en) => Some(Ty::Int),
+            _ => None,
+        },
+        ExprKind::Unary(op, x) => match op {
+            UnOp::Neg => match obvious_ty(b, fs, x)? {
+                Ty::Int => Some(Ty::Int),
+                Ty::Dec => Some(Ty::Dec),
+                _ => None,
+            },
+            UnOp::Not => Some(Ty::Bool),
+            UnOp::Bnot => Some(Ty::Int),
+        },
+        ExprKind::Bin(op, x, y) => {
+            let a = obvious_ty(b, fs, x)?;
+            let c = obvious_ty(b, fs, y)?;
+            bin_ty(*op, a, c)
+        }
+        ExprKind::Compare(..) => Some(Ty::Bool),
+        ExprKind::Call(callee, _) => match &callee.kind {
+            ExprKind::Name(n) => builtin_ret(n).or_else(|| {
+                b.func_sigs
+                    .get(n)
+                    .and_then(|s| s.ret_type.as_deref())
+                    .and_then(|t| resolve_ty(b, t))
+            }),
+            _ => None,
+        },
+        ExprKind::MethodCall(obj, name, _) if matches!(obj.kind, ExprKind::SelfRef) => fs
+            .current_class
+            .and_then(|ci| method_sig(b, ci, name))
+            .and_then(|s| s.ret_type.as_deref())
+            .and_then(|t| resolve_ty(b, t)),
+        ExprKind::SuperCall(name, _) => {
+            let ci = fs.current_class?;
+            let parent = b.classes.get(ci as usize)?.parent;
+            if parent == 255 {
+                return None;
+            }
+            method_sig(b, parent, name)
+                .and_then(|s| s.ret_type.as_deref())
+                .and_then(|t| resolve_ty(b, t))
+        }
+        ExprKind::Match(_, arms, else_value) => {
+            let mut found: Option<Ty> = None;
+            for (_, v) in arms {
+                let t = obvious_ty(b, fs, v)?;
+                match found {
+                    Some(prev) if prev != t => return None,
+                    _ => found = Some(t),
+                }
+            }
+            let t = obvious_ty(b, fs, else_value)?;
+            match found {
+                Some(prev) if prev != t => None,
+                _ => Some(t),
+            }
+        }
+        _ => None,
+    }
+}
+
+/// 严格模式：按签名逐项检查能静态看出的实参。
+fn check_call_args(
+    b: &Builder,
+    fs: &FnState,
+    sig: &FuncSig,
+    args: &[Expr],
+    line: u32,
+) -> Result<()> {
+    if !b.strict {
+        return Ok(());
+    }
+    for (i, ann) in sig.param_types.iter().enumerate() {
+        let Some(ann) = ann else { continue };
+        let Some(arg) = args.get(i) else { break };
+        let Some(actual) = obvious_ty(b, fs, arg) else {
+            continue;
+        };
+        let Some(expected) = resolve_ty(b, ann) else {
+            continue;
+        };
+        if !assignable(b, actual, expected) {
+            return Err(CompileError::new(
+                "E143",
+                line,
+                arg.col,
+                format!(
+                    "第 {} 个实参标注为「{}」，实际是「{}」",
+                    i + 1,
+                    ann,
+                    ty_name(b, actual)
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// 模块顶层声明/赋值：这些名字优先于同名标准库函数。
+fn collect_declared(stmts: &[Stmt]) -> HashSet<String> {
+    let mut out = HashSet::new();
+    for s in stmts {
+        match &s.kind {
+            StmtKind::Let(n, _) | StmtKind::Assign(n, _) | StmtKind::ForEach(n, _, _) => {
+                out.insert(n.clone());
+            }
+            StmtKind::FuncDef { name, .. } => {
+                out.insert(name.clone());
+            }
+            StmtKind::Class(c) => {
+                out.insert(c.name.clone());
+            }
+            StmtKind::Enum(e) => {
+                out.insert(e.name.clone());
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// 收集顶层函数签名（严格模式下调用点检查用）。
+fn collect_func_sigs(b: &mut Builder, stmts: &[Stmt]) {
+    for s in stmts {
+        if let StmtKind::FuncDef {
+            name,
+            param_types,
+            ret_type,
+            ..
+        } = &s.kind
+        {
+            b.func_sigs.insert(
+                name.clone(),
+                FuncSig {
+                    param_types: param_types.clone(),
+                    ret_type: ret_type.clone(),
+                },
+            );
+        }
+    }
+}
+
 struct LoopCtx {
     is_foreach: bool,
     continue_target: usize,
@@ -301,6 +653,8 @@ struct FnState {
     self_blocked: bool,
     /// 当前帧是 `初始化`：禁止显式 `返回`（E120）。
     in_init: bool,
+    /// 当前函数/方法的返回类型标注（`--strict-type` 用来校验 `返回`）。
+    ret_ann: Option<String>,
     /// 当前语句所属的源文件（调试表 `file_id`）。
     file_id: u8,
     /// 语句级调试标记（偏移 → 行号）。
@@ -490,9 +844,42 @@ fn store_name(fs: &mut FnState, b: &mut Builder, name: &str, line: u32, col: u32
 fn load_name(fs: &mut FnState, b: &mut Builder, name: &str, line: u32, col: u32) -> Result<()> {
     match resolve(fs, b, name, line, col)? {
         Res::Local(s) | Res::Capture(s) => fs.emit_u8(OP_LOAD_LOCAL, s),
-        Res::Global(g) => fs.emit_u8(OP_LOAD_GLOBAL, g),
+        Res::Global(g) => {
+            check_std_import(fs, b, name, line, col)?;
+            fs.emit_u8(OP_LOAD_GLOBAL, g);
+        }
     }
     Ok(())
+}
+
+/// 标准库函数必须先 `导入` 对应模块；用户自己声明的同名全局优先。
+fn check_std_import(
+    fs: &FnState,
+    b: &Builder,
+    name: &str,
+    line: u32,
+    col: u32,
+) -> Result<()> {
+    let mods = stdlib_spec::modules_for(name);
+    if mods.is_empty() || fs.imported.contains(name) || b.declared.contains(name) {
+        return Ok(());
+    }
+    let hint = if mods.len() == 1 {
+        format!("先写：导入 {}", mods[0])
+    } else {
+        format!("先写：导入 {} 或 导入 {}", mods[0], mods[1])
+    };
+    Err(CompileError::new(
+        "E112",
+        line,
+        col,
+        format!(
+            "标准库函数「{}」属于模块「{}」，还没有导入",
+            name,
+            mods.join("、")
+        ),
+    )
+    .with_hint(hint))
 }
 
 /// 装载 `本`：方法帧槽 0，或方法内闭包对槽 0 的捕获。
@@ -694,7 +1081,7 @@ fn collect_free_expr(e: &Expr, bound: &HashSet<String>, out: &mut Vec<String>) {
                 collect_free_expr(a, bound, out);
             }
         }
-        ExprKind::AnonFunc(params, body) => {
+        ExprKind::AnonFunc(params, _, _, body) => {
             // 匿名函数体里的自由名字冒泡到本层，供中间层提前建立捕获。
             let mut child_bound: HashSet<String> = params.iter().cloned().collect();
             let mut decls = Vec::new();
@@ -815,6 +1202,7 @@ pub fn compile(
     files: Vec<String>,
     spans: &[(usize, usize, u8)],
     no_assert: bool,
+    strict_type: bool,
 ) -> Result<Program> {
     // 先汇总顶层导入：`导入 模块` 是纯编译期声明，不生成字节码，
     // 但模块里的原生名字会进入本文件的名字作用域（供静态检查）。
@@ -827,6 +1215,12 @@ pub fn compile(
                 }
                 continue;
             }
+            if let Some(spec) = stdlib_spec::module(m) {
+                for f in spec.fns {
+                    imported.insert(f.to_string());
+                }
+                continue;
+            }
             let Some(spec) = native_spec::module(m) else {
                 return Err(CompileError::new(
                     "E112",
@@ -835,9 +1229,10 @@ pub fn compile(
                     format!("不认识的导入模块「{}」", m),
                 )
                 .with_hint(format!(
-                    "v0 可用：{}、{}",
+                    "v0 可用：{}、{}、{}",
                     native_spec::module_names(),
-                    vm_spec::module_names()
+                    vm_spec::module_names(),
+                    stdlib_spec::module_names()
                 )));
             };
             for e in spec.entries {
@@ -848,6 +1243,9 @@ pub fn compile(
 
     let mut b = Builder::new();
     b.no_assert = no_assert;
+    b.strict = strict_type;
+    b.declared = collect_declared(stmts);
+    collect_func_sigs(&mut b, stmts);
     let module_name = b.intern_name("<模块>", 1, 1)?;
     b.codes.push(CodeObj {
         name_idx: module_name,
@@ -882,6 +1280,7 @@ pub fn compile(
         current_class: None,
         self_blocked: false,
         in_init: false,
+        ret_ann: None,
         file_id: spans.last().map(|s| s.2).unwrap_or(0),
         marks: Vec::new(),
     };
@@ -1048,6 +1447,7 @@ fn compile_classes(
                 name_idx: 0,
                 init_code: 0,
                 parent: 255,
+                is_final: c.is_final,
                 fields: Vec::new(),
                 methods: Vec::new(),
             });
@@ -1074,6 +1474,14 @@ fn compile_classes(
                 decl_lines[ci],
                 1,
                 format!("类「{}」不能继承自己", c.name),
+            ));
+        }
+        if b.classes[pi as usize].is_final {
+            return Err(CompileError::new(
+                "E142",
+                decl_lines[ci],
+                1,
+                format!("类「{}」是最终类，不能继承", decls[pi as usize].0.name),
             ));
         }
         // LI012 没有「超」，父构造只能零实参自动调用。
@@ -1118,10 +1526,21 @@ fn compile_classes(
 
     // 第二遍：类名 / 字段名 / 方法名进全局名字表，做类内唯一性检查。
     let mut own_fields: Vec<Vec<u8>> = Vec::new();
-    let mut own_method_names: Vec<Vec<String>> = Vec::new();
+    let mut own_method_names: Vec<Vec<(String, bool)>> = Vec::new();
     for (ci, (c, _)) in decls.iter().enumerate() {
         let name_idx = b.intern_name(&c.name, 1, 1)?;
         b.classes[ci].name_idx = name_idx;
+        for m in &c.methods {
+            let sig = FuncSig {
+                param_types: m.param_types.clone(),
+                ret_type: m.ret_type.clone(),
+            };
+            if m.name == "初始化" {
+                b.init_sigs.insert(ci as u8, sig);
+            } else {
+                b.method_sigs.insert((ci as u8, m.name.clone()), sig);
+            }
+        }
         if c.fields.len() > 255 || c.methods.len() > 255 {
             return Err(CompileError::new("E105", 1, 1, "类的字段或方法超过 255 个"));
         }
@@ -1162,10 +1581,18 @@ fn compile_classes(
         let mut mnames = Vec::new();
         for m in &c.methods {
             if m.name == "初始化" {
+                if m.is_final {
+                    return Err(CompileError::new(
+                        "E142",
+                        m.line,
+                        1,
+                        "「初始化」不能标记为最终（构造走构造链，不参与覆写）",
+                    ));
+                }
                 continue;
             }
             b.intern_name(&m.name, m.line, 1)?;
-            mnames.push(m.name.clone());
+            mnames.push((m.name.clone(), m.is_final));
         }
         own_method_names.push(mnames);
     }
@@ -1193,10 +1620,14 @@ fn compile_classes(
             .map(|&ni| b.names[ni as usize].clone())
             .collect();
         let mut ancestor_methods: HashSet<String> = HashSet::new();
+        let mut ancestor_finals: HashSet<String> = HashSet::new();
         let mut k = parents[ci];
         while k != 255 {
-            for n in &own_method_names[k as usize] {
+            for (n, fin) in &own_method_names[k as usize] {
                 ancestor_methods.insert(n.clone());
+                if *fin {
+                    ancestor_finals.insert(n.clone());
+                }
             }
             k = parents[k as usize];
         }
@@ -1219,13 +1650,21 @@ fn compile_classes(
             }
             flat.push(own_fields[ci][i]);
         }
-        for mname in &own_method_names[ci] {
+        for (mname, _) in &own_method_names[ci] {
             if ancestor_fields.iter().any(|n| n == mname) {
                 return Err(CompileError::new(
                     "E140",
                     decl_lines[ci],
                     1,
                     format!("「{}」在父类里是字段，子类不能当方法", mname),
+                ));
+            }
+            if ancestor_finals.contains(mname) {
+                return Err(CompileError::new(
+                    "E142",
+                    decl_lines[ci],
+                    1,
+                    format!("父类的最终方法「{}」不能被覆写", mname),
                 ));
             }
         }
@@ -1255,7 +1694,18 @@ fn compile_classes(
         let ci = ci as u8;
         for (k, m) in c.methods.iter().filter(|m| m.name != "初始化").enumerate() {
             let midx = b.classes[ci as usize].methods[k].0;
-            let code = compile_method(b, ci, midx, &m.params, &m.body, imported, m.line, fid)?;
+            let code = compile_method(
+                b,
+                ci,
+                midx,
+                &m.params,
+                &m.param_types,
+                m.ret_type.as_deref(),
+                &m.body,
+                imported,
+                m.line,
+                fid,
+            )?;
             b.classes[ci as usize].methods[k].1 = code;
         }
         let init_code = compile_class_init(b, c, ci, imported, fid)?;
@@ -1270,11 +1720,21 @@ fn compile_method(
     class_idx: u8,
     name_idx: u8,
     params: &[String],
+    param_types: &[Option<String>],
+    ret_type: Option<&str>,
     body: &[Stmt],
     imported: &HashSet<String>,
     line: u32,
     file_id: u8,
 ) -> Result<u8> {
+    if b.strict {
+        for t in param_types.iter().flatten() {
+            check_ann(b, t, line, 1)?;
+        }
+        if let Some(t) = ret_type {
+            check_ann(b, t, line, 1)?;
+        }
+    }
     let idx = b.codes.len();
     if idx >= 255 {
         return Err(CompileError::new("E106", line, 1, "函数超过 255 个"));
@@ -1307,6 +1767,7 @@ fn compile_method(
         current_class: Some(class_idx),
         self_blocked: false,
         in_init: false,
+        ret_ann: ret_type.map(|s| s.to_string()),
         file_id,
         marks: Vec::new(),
     };
@@ -1364,6 +1825,16 @@ fn compile_class_init(
 ) -> Result<u8> {
     let user = c.methods.iter().find(|m| m.name == "初始化");
     let params: Vec<String> = user.map(|m| m.params.clone()).unwrap_or_default();
+    if b.strict {
+        if let Some(u) = user {
+            for t in u.param_types.iter().flatten() {
+                check_ann(b, t, u.line, 1)?;
+            }
+            if let Some(t) = &u.ret_type {
+                check_ann(b, t, u.line, 1)?;
+            }
+        }
+    }
 
     let idx = b.codes.len();
     if idx >= 255 {
@@ -1398,6 +1869,7 @@ fn compile_class_init(
         current_class: Some(class_idx),
         self_blocked: false,
         in_init: true,
+        ret_ann: None,
         file_id,
         marks: Vec::new(),
     };
@@ -1479,6 +1951,8 @@ fn compile_function(
     name: &str,
     self_name: Option<&str>,
     params: &[String],
+    param_types: &[Option<String>],
+    ret_type: Option<&str>,
     body: &[Stmt],
     parent_slots: HashMap<String, u8>,
     imported: &HashSet<String>,
@@ -1487,6 +1961,14 @@ fn compile_function(
     col: u32,
     file_id: u8,
 ) -> Result<u8> {
+    if b.strict {
+        for t in param_types.iter().flatten() {
+            check_ann(b, t, line, col)?;
+        }
+        if let Some(t) = ret_type {
+            check_ann(b, t, line, col)?;
+        }
+    }
     let idx = b.codes.len();
     if idx >= 255 {
         return Err(CompileError::new("E106", line, col, "函数超过 255 个"));
@@ -1520,6 +2002,7 @@ fn compile_function(
         current_class,
         self_blocked: false,
         in_init: false,
+        ret_ann: ret_type.map(|s| s.to_string()),
         file_id,
         marks: Vec::new(),
     };
@@ -1579,6 +2062,8 @@ fn emit_function_value(
     name: &str,
     self_name: Option<&str>,
     params: &[String],
+    param_types: &[Option<String>],
+    ret_type: Option<&str>,
     body: &[Stmt],
     line: u32,
     col: u32,
@@ -1611,6 +2096,8 @@ fn emit_function_value(
         name,
         self_name,
         params,
+        param_types,
+        ret_type,
         body,
         visible,
         &fs.imported,
@@ -1861,8 +2348,26 @@ fn compile_stmt(fs: &mut FnState, b: &mut Builder, s: &Stmt) -> Result<()> {
             let end = fs.here();
             fs.patch(skip, end);
         }
-        StmtKind::FuncDef { name, params, body } => {
-            emit_function_value(fs, b, name, Some(name), params, body, s.line, 1)?;
+        StmtKind::FuncDef {
+            name,
+            params,
+            param_types,
+            ret_type,
+            body,
+            ..
+        } => {
+            emit_function_value(
+                fs,
+                b,
+                name,
+                Some(name),
+                params,
+                param_types,
+                ret_type.as_deref(),
+                body,
+                s.line,
+                1,
+            )?;
             store_name(fs, b, name, s.line, 1)?;
         }
         StmtKind::Return(e) => {
@@ -1873,6 +2378,25 @@ fn compile_stmt(fs: &mut FnState, b: &mut Builder, s: &Stmt) -> Result<()> {
                     e.as_ref().map(|x| x.col).unwrap_or(1),
                     "「初始化」里不能写「返回」；构造结果固定为「本」",
                 ));
+            }
+            if b.strict {
+                if let Some(ann) = fs.ret_ann.clone() {
+                    let expected = resolve_ty(b, &ann).unwrap();
+                    let actual = match &e {
+                        Some(x) => obvious_ty(b, fs, x),
+                        None => Some(Ty::Nil),
+                    };
+                    if let Some(a) = actual {
+                        if !assignable(b, a, expected) {
+                            return Err(CompileError::new(
+                                "E143",
+                                s.line,
+                                e.as_ref().map(|x| x.col).unwrap_or(1),
+                                format!("返回值标注为「{}」，实际是「{}」", ann, ty_name(b, a)),
+                            ));
+                        }
+                    }
+                }
             }
             for _ in 0..fs.try_stack.len() {
                 fs.emit(OP_TRY_END);
@@ -2255,10 +2779,21 @@ fn compile_expr(fs: &mut FnState, b: &mut Builder, e: &Expr) -> Result<()> {
         ExprKind::Match(subject, arms, else_value) => {
             compile_match_value(fs, b, subject, arms, else_value, e.line, e.col)?;
         }
-        ExprKind::AnonFunc(params, body) => {
+        ExprKind::AnonFunc(params, param_types, ret_type, body) => {
             // 匿名函数没有可递归引用的名字，所以 self_name 传 None。
             let name = format!("匿名函数{}", e.line);
-            emit_function_value(fs, b, &name, None, params, body, e.line, e.col)?;
+            emit_function_value(
+                fs,
+                b,
+                &name,
+                None,
+                params,
+                param_types,
+                ret_type.as_deref(),
+                body,
+                e.line,
+                e.col,
+            )?;
         }
         ExprKind::List(items) => {
             for it in items {
@@ -2339,6 +2874,13 @@ fn compile_expr(fs: &mut FnState, b: &mut Builder, e: &Expr) -> Result<()> {
             fs.free_temp(t0);
         }
         ExprKind::Call(callee, args) => {
+            if b.strict {
+                if let ExprKind::Name(n) = &callee.kind {
+                    if let Some(sig) = b.func_sigs.get(n).cloned() {
+                        check_call_args(&*b, fs, &sig, args, e.line)?;
+                    }
+                }
+            }
             match &callee.kind {
                 ExprKind::Name(name) => {
                     if let Some(tf) = vm_spec::task_entry(name) {
@@ -2445,6 +2987,11 @@ fn compile_expr(fs: &mut FnState, b: &mut Builder, e: &Expr) -> Result<()> {
                     format!("类「{}」没有定义", cls),
                 ));
             };
+            if b.strict {
+                if let Some(sig) = b.init_sigs.get(&ci).cloned() {
+                    check_call_args(&*b, fs, &sig, args, e.line)?;
+                }
+            }
             fs.emit_u8(OP_NEW_INSTANCE, ci);
             for a in args {
                 compile_expr(fs, b, a)?;
@@ -2480,6 +3027,13 @@ fn compile_expr(fs: &mut FnState, b: &mut Builder, e: &Expr) -> Result<()> {
             fs.emit_u8(OP_GET_FIELD, ni);
         }
         ExprKind::MethodCall(obj, name, args) => {
+            if b.strict {
+                if let (ExprKind::SelfRef, Some(ci)) = (&obj.kind, fs.current_class) {
+                    if let Some(sig) = method_sig(b, ci, name).cloned() {
+                        check_call_args(&*b, fs, &sig, args, e.line)?;
+                    }
+                }
+            }
             let ni = method_name_idx(fs, b, obj, name, e.line, e.col)?;
             compile_expr(fs, b, obj)?;
             for a in args {
@@ -2525,6 +3079,11 @@ fn compile_expr(fs: &mut FnState, b: &mut Builder, e: &Expr) -> Result<()> {
                     format!("父类里没有方法「{}」", name),
                 ));
             };
+            if b.strict {
+                if let Some(sig) = method_sig(b, parent, name).cloned() {
+                    check_call_args(&*b, fs, &sig, args, e.line)?;
+                }
+            }
             load_self(fs, e.line, e.col)?;
             for a in args {
                 compile_expr(fs, b, a)?;

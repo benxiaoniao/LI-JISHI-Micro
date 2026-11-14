@@ -263,6 +263,17 @@ static void task_peer(void *arg)
 #endif
 
 /* 砾程序作为独立 JMK 任务运行：让语言层 让出()/延时() 真正落到调度器上。 */
+#if JM_MSP_WATERMARK
+static void log_msp(void)
+{
+    port_log("[内核] MSP 峰值=");
+    port_log_u32(port_msp_watermark_used());
+    port_log(" B / ");
+    port_log_u32(port_msp_watermark_total());
+    port_log(" B\r\n");
+}
+#endif
+
 static void task_vm(void *arg)
 {
 #if JM_STACK_DIAG
@@ -277,6 +288,13 @@ static void task_vm(void *arg)
         port_log(jm_last_error());
         port_log("\r\n");
     }
+
+#if JM_ISR_DIRECT_DEMO
+    f103_isr_direct_demo_report();
+#endif
+#if JM_MSP_WATERMARK
+    log_msp();
+#endif
 
 #if JM_STACK_WATERMARK
     /* 值栈高水位（观测构建专用）：与主机同一份运行时统计。 */
@@ -339,6 +357,18 @@ int main(void)
         port_log(F103_BUS_TABLE_NAME);
         port_log("\r\n");
     }
+#if JM_ISR_DIRECT_DEMO
+    f103_isr_direct_demo_init();
+#endif
+#if JM_IRQ_NEST_DEMO
+    port_irq_nest_demo_run();
+#endif
+#if JM_MSP_WATERMARK
+    log_msp();   /* 嵌套压力后的 MSP 峰值 */
+#endif
+#if JM_FAULT_DEMO
+    port_fault_demo_trigger();
+#endif
     port_log("\r\n");
 
 #if JMK_IPC_DEMO

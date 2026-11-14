@@ -31,8 +31,19 @@ pub struct DebugInfo {
     pub codes: Vec<CodeDebug>,
 }
 
+/// 类表的一项（字段已按继承扁平化）。
+pub struct ClassEntry {
+    pub name: String,
+    pub fields: Vec<String>,
+    /// `(方法名, 代码对象下标)`；不含构造方法。
+    pub methods: Vec<(String, u8)>,
+    /// 构造方法代码下标。
+    pub init_code: u8,
+}
+
 pub struct Image {
     pub codes: Vec<CodeEntry>,
+    pub classes: Vec<ClassEntry>,
     /// `None` 表示没有调试段、被剥离或已损坏。
     pub debug: Option<DebugInfo>,
 }
@@ -95,15 +106,69 @@ pub fn parse(bytes: &[u8]) -> Result<Image, String> {
     }
 
     // 名字表里存的是**绝对**文件偏移（与加载器一致），直接按偏移取字符串。
-    for c in codes.iter_mut() {
-        if c.name_idx < nnames {
-            let np = name_start + 2 * c.name_idx;
-            if let Some(off) = u16_at(bytes, np) {
-                if let Some(n) = read_cstr(bytes, off as usize, bytes.len()) {
-                    c.name = n;
-                }
-            }
+    let name_at = |idx: usize| -> Option<String> {
+        if idx >= nnames {
+            return None;
         }
+        let off = u16_at(bytes, name_start + 2 * idx)?;
+        read_cstr(bytes, off as usize, bytes.len())
+    };
+    for c in codes.iter_mut() {
+        if let Some(n) = name_at(c.name_idx) {
+            c.name = n;
+        }
+    }
+
+    // 类表：定长 10 B 记录，随后是字段名数组与方法(name,code)数组。
+    // 起点要先跳过捕获表（每项 2 B，数量在代码记录 p+8）。
+    // v5 起才有 10 B 类记录（带父类下标）；更老的产物不解析类表。
+    let nclasses = if bytes.get(4).copied().unwrap_or(0) >= 5 {
+        bytes.get(10).copied().unwrap_or(0) as usize
+    } else {
+        0
+    };
+    let cap_start = code_start + 10 * ncodes;
+    let mut ncap_total = 0usize;
+    for i in 0..ncodes {
+        ncap_total += bytes.get(code_start + 10 * i + 8).copied().unwrap_or(0) as usize;
+    }
+    let class_start = cap_start + 2 * ncap_total;
+    let mut classes = Vec::new();
+    if class_start + 10 * nclasses > bytes.len() {
+        return Err("JMB 类表越界".into());
+    }
+    for i in 0..nclasses {
+        let p = class_start + 10 * i;
+        let name_idx = bytes[p] as usize;
+        let nfields = bytes[p + 1] as usize;
+        let nmethods = bytes[p + 2] as usize;
+        let init_code = bytes[p + 3];
+        let foff = class_start + u16_at(bytes, p + 4).unwrap_or(0) as usize;
+        let moff = class_start + u16_at(bytes, p + 6).unwrap_or(0) as usize;
+        if foff + nfields > bytes.len() || moff + 2 * nmethods > bytes.len() {
+            return Err("JMB 类成员表越界".into());
+        }
+        let name = name_at(name_idx).ok_or_else(|| "JMB 类名下标越界".to_string())?;
+        let mut fields = Vec::new();
+        for k in 0..nfields {
+            let fi = bytes[foff + k] as usize;
+            fields.push(name_at(fi).ok_or_else(|| "JMB 字段名下标越界".to_string())?);
+        }
+        let mut methods = Vec::new();
+        for k in 0..nmethods {
+            let ni = bytes[moff + 2 * k] as usize;
+            let ci = bytes[moff + 2 * k + 1];
+            methods.push((
+                name_at(ni).ok_or_else(|| "JMB 方法名下标越界".to_string())?,
+                ci,
+            ));
+        }
+        classes.push(ClassEntry {
+            name,
+            fields,
+            methods,
+            init_code,
+        });
     }
 
     let debug = if flags & 1 == 0 {
@@ -112,7 +177,11 @@ pub fn parse(bytes: &[u8]) -> Result<Image, String> {
         parse_debug(bytes, ncodes, max_code_end)
     };
 
-    Ok(Image { codes, debug })
+    Ok(Image {
+        codes,
+        classes,
+        debug,
+    })
 }
 
 /// 读 varint：<255 单字节，255 后跟 u16。

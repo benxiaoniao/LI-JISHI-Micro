@@ -15,7 +15,23 @@ use std::path::PathBuf;
 
 /// Native ABI 版本，与 `runtime/include/jm_native.h` 的 `JM_NATIVE_ABI_VERSION` 一致。
 /// 语言卡与打包都校验这一处；`micc --check-langcard` 会比对两边是否漂移。
-pub const NATIVE_ABI_VERSION: u8 = 1;
+pub const NATIVE_ABI_VERSION: u8 = 2;
+
+/// ISR-safe 子集：只有这些表项可以由 `jm_native_isr_call` 在中断上下文直接调用。
+///
+/// 逐项准入审计见 `docs/设计-ABI-v2-中断直调.md` §5；这里是**唯一清单**，
+/// 生成表头时据此写出 `JM_NATIVE_ISR_SAFE` 标志位。
+pub const ISR_SAFE_ENTRIES: &[&str] = &[
+    "引脚读",
+    "引脚写",
+    "引脚翻转",
+    "定时器计数",
+    "PWM占空比",
+];
+
+pub fn is_isr_safe(name: &str) -> bool {
+    ISR_SAFE_ENTRIES.contains(&name)
+}
 
 pub struct NativeEntrySpec {
     pub name: &'static str,
@@ -378,6 +394,15 @@ fn edit_distance(a: &str, b: &str) -> usize {
 fn validate() -> Result<(), String> {
     let mut module_names_seen = HashSet::new();
     let mut entry_names_seen = HashSet::new();
+    let mut isr_names_seen = HashSet::new();
+    for name in ISR_SAFE_ENTRIES {
+        if !isr_names_seen.insert(*name) {
+            return Err(format!("ISR-safe 清单里「{}」重复", name));
+        }
+        if entry(name).is_none() {
+            return Err(format!("ISR-safe 清单里的「{}」不是已登记的原生函数", name));
+        }
+    }
     for m in MODULES {
         if !module_names_seen.insert(m.name) {
             return Err(format!("模块名「{}」重复", m.name));
@@ -433,12 +458,18 @@ pub fn render_c_header() -> Result<String, String> {
         s.push_str(&format!("#define {}_TABLE_INIT \\\n", m.c_prefix));
         let n = m.entries.len();
         for (i, e) in m.entries.iter().enumerate() {
+            let flags = if is_isr_safe(e.name) {
+                "JM_NATIVE_ISR_SAFE"
+            } else {
+                "0u"
+            };
             s.push_str(&format!(
-                "    {{\"{}\", {}, {}u, {}u, 0u, 0u}}{}\n",
+                "    {{\"{}\", {}, {}u, {}u, {}, 0u}}{}\n",
                 e.name,
                 e.c_fn,
                 e.min_args,
                 e.max_args,
+                flags,
                 if i + 1 < n { ", \\" } else { "" }
             ));
         }

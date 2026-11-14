@@ -214,6 +214,65 @@ try {
         $fail++
     }
 
+    # ---------- LI015：--strict-type ----------
+    $strictGold = ((Get-Content "tests\expected\类型标注.txt" -Raw -Encoding UTF8).TrimEnd() -replace "`r`n", "`n")
+    & $micc "examples\类型标注.jsh" -o "build\类型标注-strict.jmb" --strict-type | Out-Null
+    $strictCode = $LASTEXITCODE
+    $strictOut = ""
+    if ($strictCode -eq 0) {
+        $strictOut = ((& $jmrun "build\类型标注-strict.jmb" 2>&1 | Out-String).TrimEnd() -replace "`r`n", "`n")
+    }
+    $total++
+    if (($strictCode -eq 0) -and ($strictOut -eq $strictGold)) {
+        Write-Host "[通过] --strict-type 接受合法标注并正常执行"
+    } else {
+        Write-Host "[不通过] --strict-type 接受合法标注并正常执行"
+        Write-Host $strictOut
+        $fail++
+    }
+
+    $strictBad = @(
+        @{ file = "strict-arg.jsh"; src = "函数 取(x: 整数) -> 整数:`n    返回 x`n打印(取(""坏""))`n"; why = "实参类型不符" },
+        @{ file = "strict-ret.jsh"; src = "函数 坏() -> 整数:`n    返回 ""文本""`n"; why = "返回值类型不符" },
+        @{ file = "strict-unknown.jsh"; src = "函数 未知(x: 数字):`n    返回 x`n"; why = "类型名未知" },
+        @{ file = "strict-new.jsh"; src = "类 甲:`n    令 v = 0`n    函数 初始化(a: 整数):`n        本.v = a`n令 c = 新建 甲(""坏"")`n"; why = "构造实参类型不符" }
+    )
+    foreach ($c in $strictBad) {
+        [IO.File]::WriteAllText((Join-Path $root ("build\" + $c.file)), $c.src, $enc)
+        $o = (& $micc ("build\" + $c.file) -o "build\strict.jmb" --strict-type 2>&1 | Out-String)
+        $total++
+        if (($LASTEXITCODE -ne 0) -and $o.Contains("E143")) {
+            Write-Host ("[通过] --strict-type " + $c.why + " 报 E143")
+        } else {
+            Write-Host ("[不通过] --strict-type " + $c.why + " 报 E143")
+            Write-Host $o
+            $fail++
+        }
+    }
+
+    # 默认保持宽松：同样的“实参类型不符”不加开关仍能编过
+    [IO.File]::WriteAllText((Join-Path $root "build\strict-lax.jsh"), "函数 取(x: 整数) -> 整数:`n    返回 x`n打印(取(""坏""))`n", $enc)
+    & $micc "build\strict-lax.jsh" -o "build\strict-lax.jmb" | Out-Null
+    $total++
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "[通过] 不加 --strict-type 时标注仍被忽略"
+    } else {
+        Write-Host "[不通过] 不加 --strict-type 时标注仍被忽略"
+        $fail++
+    }
+
+    # 子类实例可以传给父类标注
+    [IO.File]::WriteAllText((Join-Path $root "build\strict-sub.jsh"), "类 父:`n    令 v = 0`n类 子 继承 父:`n    令 w = 0`n函数 收(x: 父) -> 整数:`n    返回 1`n打印(收(新建 子()))`n", $enc)
+    $o = (& $micc "build\strict-sub.jsh" -o "build\strict-sub.jmb" --strict-type 2>&1 | Out-String)
+    $total++
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "[通过] --strict-type 允许子类实例传给父类标注"
+    } else {
+        Write-Host "[不通过] --strict-type 允许子类实例传给父类标注"
+        Write-Host $o
+        $fail++
+    }
+
     Write-Host ("共 " + $total + " 个用例，失败 " + $fail + " 个")
     if ($fail -gt 0) { exit 1 }
     exit 0

@@ -65,7 +65,8 @@ pub enum ExprKind {
     /// `对象.方法(实参...)`
     MethodCall(Box<Expr>, String, Vec<Expr>),
     /// 匿名函数：`函数(参数): 表达式` 或 `函数(参数):` + 缩进块。
-    AnonFunc(Vec<String>, Vec<Stmt>),
+    /// 参数名、参数类型标注（与参数一一对应）、返回类型标注、函数体。
+    AnonFunc(Vec<String>, Vec<Option<String>>, Option<String>, Vec<Stmt>),
     /// 匹配表达式：每个分支体是单行表达式，必须有 `情形 其他` 兜底。
     Match(Box<Expr>, Vec<(Vec<MatchPattern>, Expr)>, Box<Expr>),
     /// `超.方法(实参...)`：显式调用父类实现，编译期确定目标代码对象。
@@ -79,7 +80,12 @@ pub enum ExprKind {
 pub struct MethodDecl {
     pub name: String,
     pub params: Vec<String>,
+    /// 与 `params` 一一对应的类型标注；没写为 `None`（`--strict-type` 才校验）。
+    pub param_types: Vec<Option<String>>,
+    pub ret_type: Option<String>,
     pub body: Vec<Stmt>,
+    /// `最终 函数`：子类不能覆写这个方法。
+    pub is_final: bool,
     pub line: u32,
 }
 
@@ -88,6 +94,10 @@ pub struct ClassDecl {
     pub name: String,
     /// `继承 父类`；没有父类时为 `None`（单继承）。
     pub parent: Option<String>,
+    /// `最终 类`：不能被继承。
+    pub is_final: bool,
+    /// `私有 类`：不导出到包外。
+    pub is_private: bool,
     pub fields: Vec<(String, Expr)>,
     pub methods: Vec<MethodDecl>,
 }
@@ -97,6 +107,8 @@ pub struct ClassDecl {
 pub struct EnumDecl {
     pub name: String,
     pub members: Vec<EnumMember>,
+    /// `私有 枚举`：不导出到包外。
+    pub is_private: bool,
 }
 
 /// 枚举成员：`名字` 或 `名字 = 显式值`；没写显式值时取上一个值 +1（首个为 0）。
@@ -123,6 +135,8 @@ pub enum MatchPattern {
 pub struct Stmt {
     pub kind: StmtKind,
     pub line: u32,
+    /// 顶层声明前的 `私有`：只在 `micc pack` 的跨包可见性里生效。
+    pub is_private: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -146,7 +160,11 @@ pub enum StmtKind {
     FuncDef {
         name: String,
         params: Vec<String>,
+        param_types: Vec<Option<String>>,
+        ret_type: Option<String>,
         body: Vec<Stmt>,
+        /// `私有 函数`：不导出到包外。
+        is_private: bool,
     },
     /// 顶层类声明；类体只允许字段与函数。
     Class(ClassDecl),

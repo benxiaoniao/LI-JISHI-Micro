@@ -80,7 +80,7 @@ void jm_builtin_install(JmState *st) {
                 break;
             }
         }
-        /* 内建没占用的名字，交给原生函数表（Native ABI v1） */
+        /* 内建没占用的名字，交给原生函数表（Native ABI v2） */
         if (st->globals[i] == JM_UNDEF) {
             jm_native_bind_name(st, i, nm);
         }

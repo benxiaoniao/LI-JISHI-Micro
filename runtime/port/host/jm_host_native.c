@@ -10,6 +10,14 @@
  * 所以这里没有任务表，也不要主机自己的 yield/sleep 实现（统一走 jm_port_*）。
  */
 
+/* 有 JmState 时走 VM 错误通道；ISR 上下文（st == NULL）直接返回正数错误码。 */
+static int n_fail(JmStateRef st, int code, const char *detail) {
+    if (!st) {
+        return code;
+    }
+    return jm_native_fail(st, code, detail);
+}
+
 /* ---- 主机端「队列」「信号量」：与板级同句柄编号、同可见语义 ----
  * 主机只有一个执行流，没有别的任务能在这期间发送/给出，所以“等不到”时
  * 睡满超时再返回 假 / 空；超时为 0 则立即返回。同一份 .jsh 的输出因此与
@@ -509,13 +517,13 @@ static int n_pwm_set_duty(JmStateRef st, const JmValue *args, uint8_t nargs,
                           JmValue *out) {
     int32_t duty = 0;
     if (nargs != 1 || jm_value_to_int(args[0], &duty) != 0) {
-        return jm_native_fail(st, JM_NE_TYPE, "PWM占空比需要一个整数参数：千分比");
+        return n_fail(st, JM_NE_TYPE, "PWM占空比需要一个整数参数：千分比");
     }
     if (duty < 0 || duty > 1000) {
-        return jm_native_fail(st, JM_NE_PARAM, "PWM 占空比范围 0–1000（千分比）");
+        return n_fail(st, JM_NE_PARAM, "PWM 占空比范围 0–1000（千分比）");
     }
     if (g_host_pwm_on == 0u) {
-        return jm_native_fail(st, JM_NE_STATE, "PWM 未启动，先调用 PWM启动()");
+        return n_fail(st, JM_NE_STATE, "PWM 未启动，先调用 PWM启动()");
     }
     *out = jm_value_nil();
     return JM_NATIVE_OK;
@@ -802,11 +810,13 @@ static int n_spi_write_block(JmStateRef st, const JmValue *args, uint8_t nargs,
  * 引脚编码与板上一致：0–15=PA，16–31=PB，32–47=PC。
  */
 static uint8_t g_host_pin_level[48];
+/* 主机替身：任务上下文「引脚写/引脚翻转」后视为已配成输出；ISR 路径要求先配置。 */
+static uint8_t g_host_pin_output[48];
 
 static int host_pin_check(JmStateRef st, int32_t pin) {
     if (pin < 0 || pin > 47) {
-        return jm_native_fail(st, JM_NE_PARAM,
-                              "引脚编码 0–47（0–15=PA0–PA15，16–31=PB0–PB15，32–47=PC0–PC15）");
+        return n_fail(st, JM_NE_PARAM,
+                      "引脚编码 0–47（0–15=PA0–PA15，16–31=PB0–PB15，32–47=PC0–PC15）");
     }
     return 0;
 }
@@ -815,19 +825,25 @@ static int n_pin_write(JmStateRef st, const JmValue *args, uint8_t nargs,
                        JmValue *out) {
     int32_t pin = 0;
     int32_t level = 0;
+    int rc;
 
     if (nargs != 2) {
-        return jm_native_fail(st, JM_NE_PARAM, "引脚写需要两个参数：引脚, 电平");
+        return n_fail(st, JM_NE_PARAM, "引脚写需要两个参数：引脚, 电平");
     }
     if (jm_value_to_int(args[0], &pin) != 0 || jm_value_to_int(args[1], &level) != 0) {
-        return jm_native_fail(st, JM_NE_TYPE, "引脚写：参数必须是整数");
+        return n_fail(st, JM_NE_TYPE, "引脚写：参数必须是整数");
     }
-    if (host_pin_check(st, pin) != 0) {
-        return -1;
+    rc = host_pin_check(st, pin);
+    if (rc != 0) {
+        return rc;
     }
     if (level != 0 && level != 1) {
-        return jm_native_fail(st, JM_NE_PARAM, "电平只能是 0 或 1");
+        return n_fail(st, JM_NE_PARAM, "电平只能是 0 或 1");
     }
+    if (!st && !g_host_pin_output[pin]) {
+        return JM_NE_STATE;
+    }
+    g_host_pin_output[pin] = 1u;
     g_host_pin_level[pin] = (uint8_t)level;
     *out = jm_value_nil();
     return JM_NATIVE_OK;
@@ -836,12 +852,14 @@ static int n_pin_write(JmStateRef st, const JmValue *args, uint8_t nargs,
 static int n_pin_read(JmStateRef st, const JmValue *args, uint8_t nargs,
                       JmValue *out) {
     int32_t pin = 0;
+    int rc;
 
     if (nargs != 1 || jm_value_to_int(args[0], &pin) != 0) {
-        return jm_native_fail(st, JM_NE_TYPE, "引脚读需要一个整数参数：引脚");
+        return n_fail(st, JM_NE_TYPE, "引脚读需要一个整数参数：引脚");
     }
-    if (host_pin_check(st, pin) != 0) {
-        return -1;
+    rc = host_pin_check(st, pin);
+    if (rc != 0) {
+        return rc;
     }
     *out = jm_value_int((int32_t)g_host_pin_level[pin]);
     return JM_NATIVE_OK;
@@ -850,13 +868,19 @@ static int n_pin_read(JmStateRef st, const JmValue *args, uint8_t nargs,
 static int n_pin_toggle(JmStateRef st, const JmValue *args, uint8_t nargs,
                         JmValue *out) {
     int32_t pin = 0;
+    int rc;
 
     if (nargs != 1 || jm_value_to_int(args[0], &pin) != 0) {
-        return jm_native_fail(st, JM_NE_TYPE, "引脚翻转需要一个整数参数：引脚");
+        return n_fail(st, JM_NE_TYPE, "引脚翻转需要一个整数参数：引脚");
     }
-    if (host_pin_check(st, pin) != 0) {
-        return -1;
+    rc = host_pin_check(st, pin);
+    if (rc != 0) {
+        return rc;
     }
+    if (!st && !g_host_pin_output[pin]) {
+        return JM_NE_STATE;
+    }
+    g_host_pin_output[pin] = 1u;
     g_host_pin_level[pin] = (uint8_t)(g_host_pin_level[pin] ? 0u : 1u);
     *out = jm_value_nil();
     return JM_NATIVE_OK;

@@ -11,6 +11,7 @@ use crate::pack_manifest;
 use crate::pack_merge::{self, Unit};
 use crate::pack_resolve::{self, Resolved, Tree};
 use crate::parser::Parser;
+use crate::stdlib_spec;
 use crate::writer;
 use crate::zip;
 use std::collections::HashSet;
@@ -28,6 +29,8 @@ struct Opts {
     offline: bool,
     strip_debug: bool,
     no_assert: bool,
+    /// `--strict-type`：编译时校验类型标注。
+    strict_type: bool,
     index: Option<String>,
     archive: bool,
     /// `--源码`：归档内容换成源码包（`砾包.toml` + `.jsh`），供 `micc install` 消费。
@@ -42,6 +45,7 @@ fn parse_opts(args: &[String], allow_out: bool, allow_index: bool) -> Result<Opt
     let mut source_archive = false;
     let mut strip_debug = false;
     let mut no_assert = false;
+    let mut strict_type = false;
     let mut index = None;
     let mut i = 0;
     while i < args.len() {
@@ -75,6 +79,7 @@ fn parse_opts(args: &[String], allow_out: bool, allow_index: bool) -> Result<Opt
             }
             "--strip-debug" => strip_debug = true,
             "--no-assert" => no_assert = true,
+            "--strict-type" => strict_type = true,
             "-h" | "--help" => {
                 return Err(usage_err("micc pack / micc install / micc hash / micc verify"))
             }
@@ -88,6 +93,7 @@ fn parse_opts(args: &[String], allow_out: bool, allow_index: bool) -> Result<Opt
         offline,
         strip_debug,
         no_assert,
+        strict_type,
         index,
         archive,
         source_archive,
@@ -156,11 +162,23 @@ fn do_pack(args: &[String]) -> Result<()> {
             false,
             stmts,
             dep.manifest.exports.clone(),
+            dep.manifest.export_types.clone(),
             entry_display(dep),
         );
         pack_merge::check_dependency_top_level(&unit)?;
         if let Some(exports) = &unit.exports {
             for n in exports {
+                if unit.private.contains(n) {
+                    return Err(CompileError::new(
+                        "E144",
+                        1,
+                        1,
+                        format!(
+                            "包「{}」的 [导出] 名字 列了私有声明「{}」；私有名字不能导出",
+                            unit.name, n
+                        ),
+                    ));
+                }
                 if !unit.globals.contains(n) {
                     return Err(CompileError::new(
                         "E125",
@@ -168,6 +186,32 @@ fn do_pack(args: &[String]) -> Result<()> {
                         1,
                         format!(
                             "包「{}」的 [导出] 列了「{}」，但它的顶层没有这个名字",
+                            unit.name, n
+                        ),
+                    ));
+                }
+            }
+        }
+        if let Some(types) = &unit.export_types {
+            for n in types {
+                if unit.private.contains(n) {
+                    return Err(CompileError::new(
+                        "E144",
+                        1,
+                        1,
+                        format!(
+                            "包「{}」的 [导出] 类型 列了私有声明「{}」；私有类型不能导出",
+                            unit.name, n
+                        ),
+                    ));
+                }
+                if !unit.classes.contains(n) && !unit.enums.contains(n) {
+                    return Err(CompileError::new(
+                        "E125",
+                        1,
+                        1,
+                        format!(
+                            "包「{}」的 [导出] 类型 列了「{}」，但它的顶层没有这个类或枚举",
                             unit.name, n
                         ),
                     ));
@@ -182,6 +226,7 @@ fn do_pack(args: &[String]) -> Result<()> {
         true,
         root_stmts,
         None,
+        None,
         entry_display(&tree.root),
     ));
 
@@ -191,6 +236,10 @@ fn do_pack(args: &[String]) -> Result<()> {
     let mut imports: HashSet<String> = HashSet::new();
     pack_merge::collect_imports(&merged.stmts, &mut imports);
     for m in &imports {
+        // 标准库模块（LI018）不需要写进 [包] 原生。
+        if stdlib_spec::module(m).is_some() {
+            continue;
+        }
         if !native_union.contains(m) {
             return Err(CompileError::new(
                 "E129",
@@ -213,6 +262,7 @@ fn do_pack(args: &[String]) -> Result<()> {
         merged.files.clone(),
         &merged.spans,
         opts.no_assert,
+        opts.strict_type,
     )?;
 
     let class_fields = pack_merge::class_field_counts(&merged.stmts);
@@ -535,9 +585,10 @@ fn verify_entries(entries: &[zip::Entry]) -> Result<String> {
             1,
             1,
             format!(
-                "原生ABI 不一致：清单 v{}，砾包 v{}，编译器 v{}",
+                "原生ABI 不一致：清单 v{}，砾包 v{}，编译器 v{}；ABI v2 要求重新打包（原生ABI = {}）",
                 abi,
                 m.native_abi,
+                native_spec::NATIVE_ABI_VERSION,
                 native_spec::NATIVE_ABI_VERSION
             ),
         ));
@@ -561,7 +612,7 @@ fn verify_entries(entries: &[zip::Entry]) -> Result<String> {
     if let Some(iface) = find(IFACE_NAME) {
         let text = std::str::from_utf8(iface).map_err(|_| e137("接口.toml 不是 UTF-8 文本"))?;
         let text = text.strip_prefix('\u{feff}').unwrap_or(text);
-        let (ikv, funcs) = parse_iface(text)?;
+        let (ikv, funcs, iclasses, _ienums) = parse_iface(text)?;
         let iver = kv_get(&ikv, "接口版本")?;
         if iver != "1" {
             return Err(e137(format!("接口版本 只认 1，实测 {}", iver)));
@@ -606,6 +657,52 @@ fn verify_entries(entries: &[zip::Entry]) -> Result<String> {
                     )))
                 }
                 _ => {}
+            }
+        }
+        // 类：名字必须在类表里，字段与方法的参数个数要能对上。
+        for c in &iclasses {
+            let Some(ce) = img.classes.iter().find(|x| x.name == c.name) else {
+                return Err(e137(format!(
+                    "接口列了类「{}」，但产物类表里没有这个类",
+                    c.name
+                )));
+            };
+            for f in &c.fields {
+                if !ce.fields.iter().any(|x| x == f) {
+                    return Err(e137(format!(
+                        "类「{}」的字段「{}」在产物里不存在",
+                        c.name, f
+                    )));
+                }
+            }
+            for (name, arity) in &c.methods {
+                let code_idx = if name == "初始化" {
+                    ce.init_code
+                } else {
+                    match ce.methods.iter().find(|(n, _)| n == name) {
+                        Some((_, ci)) => *ci,
+                        None => {
+                            return Err(e137(format!(
+                                "类「{}」的方法「{}」在产物里不存在",
+                                c.name, name
+                            )))
+                        }
+                    }
+                };
+                let nparams = img
+                    .codes
+                    .get(code_idx as usize)
+                    .map(|x| x.nparams)
+                    .unwrap_or(0);
+                if nparams as u16 != *arity as u16 + 1 {
+                    return Err(e137(format!(
+                        "类「{}」的方法「{}」参数个数不符：接口 {}，产物 {}",
+                        c.name,
+                        name,
+                        arity,
+                        nparams.saturating_sub(1)
+                    )));
+                }
             }
         }
     }
@@ -849,9 +946,10 @@ fn pack_binary(opts: &Opts, tree: &Tree, product: &str) -> Result<()> {
             1,
             1,
             format!(
-                "包「{}」要求 Native ABI v{}，当前编译器是 v{}",
+                "包「{}」要求 Native ABI v{}，当前编译器是 v{}；ABI v2 要求重新打包（原生ABI = {}）",
                 m.name,
                 m.native_abi,
+                native_spec::NATIVE_ABI_VERSION,
                 native_spec::NATIVE_ABI_VERSION
             ),
         ));
@@ -966,16 +1064,60 @@ fn do_interface(args: &[String]) -> Result<()> {
         .map_err(|e| in_pkg(e, &m.name))?;
 
     let mut funcs: Vec<(String, usize)> = Vec::new();
+    let mut classes: Vec<(String, Vec<String>, Vec<(String, usize)>)> = Vec::new();
+    let mut enums: Vec<(String, Vec<String>)> = Vec::new();
+    let mut private: HashSet<String> = HashSet::new();
     for s in &stmts {
-        if let crate::ast::StmtKind::FuncDef { name, params, .. } = &s.kind {
-            funcs.push((name.clone(), params.len()));
+        match &s.kind {
+            crate::ast::StmtKind::FuncDef { name, params, .. } => {
+                funcs.push((name.clone(), params.len()));
+                if s.is_private {
+                    private.insert(name.clone());
+                }
+            }
+            crate::ast::StmtKind::Class(c) => {
+                let fields = c.fields.iter().map(|(n, _)| n.clone()).collect();
+                let methods = c
+                    .methods
+                    .iter()
+                    .map(|md| (md.name.clone(), md.params.len()))
+                    .collect();
+                classes.push((c.name.clone(), fields, methods));
+                if s.is_private {
+                    private.insert(c.name.clone());
+                }
+            }
+            crate::ast::StmtKind::Enum(e) => {
+                enums.push((
+                    e.name.clone(),
+                    e.members.iter().map(|m| m.name.clone()).collect(),
+                ));
+                if s.is_private {
+                    private.insert(e.name.clone());
+                }
+            }
+            _ => {}
         }
     }
-    // 有 [导出] 就只列导出的那些；导出里的非函数名字（例如 `令 基 = 1`）不进接口。
-    if let Some(exports) = &m.exports {
-        funcs.retain(|(n, _)| exports.contains(n));
-    }
+    // 私有声明不导出；有 [导出] 时再按清单过滤。
+    funcs.retain(|(n, _)| !private.contains(n) && m.exports.as_ref().map(|e| e.contains(n)).unwrap_or(true));
+    classes.retain(|(n, _, _)| {
+        !private.contains(n)
+            && m.export_types
+                .as_ref()
+                .map(|t| t.contains(n))
+                .unwrap_or(true)
+    });
+    enums.retain(|(n, _)| {
+        !private.contains(n)
+            && m.export_types
+                .as_ref()
+                .map(|t| t.contains(n))
+                .unwrap_or(true)
+    });
     funcs.sort_by(|a, b| a.0.cmp(&b.0));
+    classes.sort_by(|a, b| a.0.cmp(&b.0));
+    enums.sort_by(|a, b| a.0.cmp(&b.0));
 
     let mut text = String::new();
     text.push_str("# 本文件由 micc interface 生成，不要手改\n");
@@ -988,25 +1130,75 @@ fn do_interface(args: &[String]) -> Result<()> {
     for (n, k) in &funcs {
         text.push_str(&format!("{} = {}\n", n, k));
     }
+    for (name, fields, methods) in &classes {
+        text.push_str(&format!("\n[类.{}]\n", name));
+        text.push_str(&format!("字段 = {}\n", iface_array(fields)));
+        let ms: Vec<String> = methods.iter().map(|(n, k)| format!("{}/{}", n, k)).collect();
+        text.push_str(&format!("方法 = {}\n", iface_array(&ms)));
+    }
+    for (name, members) in &enums {
+        text.push_str(&format!("\n[枚举.{}]\n", name));
+        text.push_str(&format!("成员 = {}\n", iface_array(members)));
+    }
 
     let path = out.unwrap_or_else(|| dir.join(IFACE_NAME));
     std::fs::write(&path, text)
         .map_err(|e| usage_err(format!("写不了 {}：{}", path.display(), e)))?;
     println!(
-        "接口清单：{} {} → {}（函数 {} 个）",
+        "接口清单：{} {} → {}（函数 {} 个，类 {} 个，枚举 {} 个）",
         m.name,
         ver_text(&m.version),
         path.display(),
-        funcs.len()
+        funcs.len(),
+        classes.len(),
+        enums.len()
     );
     Ok(())
 }
 
+/// 接口里的字符串数组：`["a", "b"]`（空数组写 `[]`）。
+fn iface_array(items: &[String]) -> String {
+    let list = items
+        .iter()
+        .map(|s| format!("\"{}\"", s))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("[{}]", list)
+}
+
+/// 接口里的类：只存名字、字段值与方法签名（名字 + 源码参数个数）。
+struct IfaceClass {
+    name: String,
+    fields: Vec<String>,
+    methods: Vec<(String, u8)>,
+}
+
+/// 接口里的枚举：只存名字与成员列表。
+struct IfaceEnum {
+    name: String,
+    members: Vec<String>,
+}
+
 /// 解析接口清单：头部键值 + `[函数]` 段（名字 = 参数个数）。
-fn parse_iface(text: &str) -> Result<(Vec<(String, String)>, Vec<(String, u8)>)> {
+type IfaceParsed = (
+    Vec<(String, String)>,
+    Vec<(String, u8)>,
+    Vec<IfaceClass>,
+    Vec<IfaceEnum>,
+);
+
+fn parse_iface(text: &str) -> Result<IfaceParsed> {
     let mut kv: Vec<(String, String)> = Vec::new();
     let mut funcs: Vec<(String, u8)> = Vec::new();
-    let mut section = "";
+    let mut classes: Vec<IfaceClass> = Vec::new();
+    let mut enums: Vec<IfaceEnum> = Vec::new();
+    enum Sec {
+        Head,
+        Fn,
+        Class(usize),
+        Enum(usize),
+    }
+    let mut section = Sec::Head;
     for (idx, raw) in text.lines().enumerate() {
         let line = pack_manifest::strip_comment(raw).trim();
         if line.is_empty() {
@@ -1016,15 +1208,34 @@ fn parse_iface(text: &str) -> Result<(Vec<(String, String)>, Vec<(String, u8)>)>
             let Some(inner) = line.strip_prefix('[').and_then(|s| s.strip_suffix(']')) else {
                 return Err(e137(format!("接口第 {} 行的表头缺少右方括号", idx + 1)));
             };
-            match inner.trim() {
-                "函数" => section = "函数",
-                other => {
-                    return Err(e137(format!(
-                        "接口里不认识的表「{}」；只支持 [函数]",
-                        other
-                    )))
+            let inner = inner.trim();
+            section = if inner == "函数" {
+                Sec::Fn
+            } else if let Some(name) = inner.strip_prefix("类.") {
+                if name.is_empty() {
+                    return Err(e137(format!("接口第 {} 行的类名为空", idx + 1)));
                 }
-            }
+                classes.push(IfaceClass {
+                    name: name.to_string(),
+                    fields: Vec::new(),
+                    methods: Vec::new(),
+                });
+                Sec::Class(classes.len() - 1)
+            } else if let Some(name) = inner.strip_prefix("枚举.") {
+                if name.is_empty() {
+                    return Err(e137(format!("接口第 {} 行的枚举名为空", idx + 1)));
+                }
+                enums.push(IfaceEnum {
+                    name: name.to_string(),
+                    members: Vec::new(),
+                });
+                Sec::Enum(enums.len() - 1)
+            } else {
+                return Err(e137(format!(
+                    "接口里不认识的表「{}」；只支持 [函数] / [类.名字] / [枚举.名字]",
+                    inner
+                )));
+            };
             continue;
         }
         let Some((k, v)) = line.split_once('=') else {
@@ -1040,22 +1251,102 @@ fn parse_iface(text: &str) -> Result<(Vec<(String, String)>, Vec<(String, u8)>)>
         if key.is_empty() || val.is_empty() {
             return Err(e137(format!("接口第 {} 行的键或值为空", idx + 1)));
         }
-        if section == "函数" {
-            let arity: u8 = val
-                .parse()
-                .map_err(|_| e137(format!("函数「{}」的参数个数不是 0~255：{}", key, val)))?;
-            if funcs.iter().any(|(n, _)| *n == key) {
-                return Err(e137(format!("接口里函数「{}」重复", key)));
+        match &mut section {
+            Sec::Fn => {
+                let arity: u8 = val
+                    .parse()
+                    .map_err(|_| e137(format!("函数「{}」的参数个数不是 0~255：{}", key, val)))?;
+                if funcs.iter().any(|(n, _)| *n == key) {
+                    return Err(e137(format!("接口里函数「{}」重复", key)));
+                }
+                funcs.push((key, arity));
             }
-            funcs.push((key, arity));
-        } else {
-            if kv.iter().any(|(a, _)| *a == key) {
-                return Err(e137(format!("接口字段「{}」重复", key)));
+            Sec::Class(ci) => {
+                let c = &mut classes[*ci];
+                match key.as_str() {
+                    "字段" => {
+                        if !c.fields.is_empty() {
+                            return Err(e137(format!("类「{}」的字段重复声明", c.name)));
+                        }
+                        c.fields = iface_list(&val, idx + 1)?;
+                    }
+                    "方法" => {
+                        if !c.methods.is_empty() {
+                            return Err(e137(format!("类「{}」的方法重复声明", c.name)));
+                        }
+                        for item in iface_list(&val, idx + 1)? {
+                            let Some((name, arity)) = item.rsplit_once('/') else {
+                                return Err(e137(format!(
+                                    "类「{}」的方法「{}」要写成 名字/参数个数",
+                                    c.name, item
+                                )));
+                            };
+                            let arity: u8 = arity.parse().map_err(|_| {
+                                e137(format!("方法「{}」的参数个数不是 0~255：{}", name, arity))
+                            })?;
+                            if c.methods.iter().any(|(n, _)| n == name) {
+                                return Err(e137(format!("类「{}」的方法「{}」重复", c.name, name)));
+                            }
+                            c.methods.push((name.to_string(), arity));
+                        }
+                    }
+                    other => {
+                        return Err(e137(format!(
+                            "类「{}」里不认识的字段「{}」；只支持 字段 / 方法",
+                            c.name, other
+                        )))
+                    }
+                }
             }
-            kv.push((key, val));
+            Sec::Enum(ei) => {
+                let e = &mut enums[*ei];
+                if key != "成员" {
+                    return Err(e137(format!(
+                        "枚举「{}」里不认识的字段「{}」；只支持 成员",
+                        e.name, key
+                    )));
+                }
+                if !e.members.is_empty() {
+                    return Err(e137(format!("枚举「{}」的成员重复声明", e.name)));
+                }
+                e.members = iface_list(&val, idx + 1)?;
+            }
+            Sec::Head => {
+                if kv.iter().any(|(a, _)| *a == key) {
+                    return Err(e137(format!("接口字段「{}」重复", key)));
+                }
+                kv.push((key, val));
+            }
         }
     }
-    Ok((kv, funcs))
+    Ok((kv, funcs, classes, enums))
+}
+
+/// 接口里的字符串数组：`["a", "b"]` / `[]`。
+fn iface_list(raw: &str, line_no: usize) -> Result<Vec<String>> {
+    let Some(body) = raw
+        .trim()
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+    else {
+        return Err(e137(format!("接口第 {} 行应为字符串数组", line_no)));
+    };
+    if body.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    for part in body.split(',') {
+        let p = part.trim();
+        let p = p
+            .strip_prefix('"')
+            .and_then(|s| s.strip_suffix('"'))
+            .unwrap_or(p);
+        if p.is_empty() {
+            return Err(e137(format!("接口第 {} 行的数组里有空项", line_no)));
+        }
+        out.push(p.to_string());
+    }
+    Ok(out)
 }
 
 fn load_tree(opts: &Opts) -> Result<Tree> {
@@ -1122,7 +1413,7 @@ fn check_native(tree: &Tree) -> Result<HashSet<String>> {
                 1,
                 1,
                 format!(
-                    "包「{}」要求 Native ABI v{}，当前编译器/运行时是 v{}；ABI 不一致不能打包",
+                    "包「{}」要求 Native ABI v{}，当前编译器/运行时是 v{}；ABI 不一致不能打包（ABI v2 要求重新打包）",
                     name,
                     pkg.manifest.native_abi,
                     native_spec::NATIVE_ABI_VERSION

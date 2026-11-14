@@ -400,7 +400,7 @@ int jm_builtin_call(JmState *st, uint8_t id, JmValue *args, uint8_t nargs,
 void jm_builtin_install(JmState *st);
 int jm_type_name(JmValue v, const char **name);
 
-/* ---------------- 原生函数表（Native ABI v1，公开头见 jm_native.h） ---------------- */
+/* ---------------- 原生函数表（Native ABI v2，公开头见 jm_native.h） ---------------- */
 #define JM_NATIVE_ID_BASE 64u   /* 内建 id 0..63；原生函数从 64 起，最多 64 个 */
 int jm_native_bind_name(JmState *st, uint8_t name_idx, const char *name);
 uint8_t jm_native_find(const char *name);

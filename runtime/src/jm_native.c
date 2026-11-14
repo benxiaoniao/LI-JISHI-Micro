@@ -2,7 +2,7 @@
 #include "jm_native.h"
 
 /*
- * 原生函数表（Native ABI v1）的实现。
+ * 原生函数表（Native ABI v2）的实现。
  * 公开契约在 jm_native.h 与 docs/原生函数表.md；这里只做登记、绑定、分派与值读写。
  */
 
@@ -35,7 +35,7 @@ int jm_native_register(const JmNativeEntry *entries, uint8_t count) {
         if (e->max_args > JM_NATIVE_MAX_ARGS || e->min_args > e->max_args) {
             return -1;
         }
-        if (e->flags != 0 || e->reserved != 0) {
+        if ((e->flags & (uint8_t)~JM_NATIVE_ISR_SAFE) != 0 || e->reserved != 0) {
             return -1;
         }
         for (uint8_t k = 0; k < g_nentries; k++) {
@@ -59,6 +59,56 @@ int jm_native_register(const JmNativeEntry *entries, uint8_t count) {
 
 unsigned jm_native_abi_version(void) {
     return JM_NATIVE_ABI_VERSION;
+}
+
+/* ---------------- ISR 直调 ---------------- */
+
+int jm_native_isr_resolve(const char *name, uint8_t *id) {
+    if (!name || !id) {
+        return JM_NATIVE_ISR_E_PARAM;
+    }
+    for (uint8_t i = 0; i < g_nentries; i++) {
+        if (strcmp(g_entries[i]->name, name) == 0) {
+            if ((g_entries[i]->flags & JM_NATIVE_ISR_SAFE) == 0) {
+                return JM_NATIVE_ISR_E_NOT_SAFE;
+            }
+            *id = i;
+            return JM_NATIVE_ISR_OK;
+        }
+    }
+    return JM_NATIVE_ISR_E_ID;
+}
+
+int jm_native_isr_call(uint8_t id, const JmValue *args, uint8_t nargs,
+                       JmValue *out) {
+    const JmNativeEntry *e;
+    JmValue tmp;
+    int rc;
+
+    if (id >= g_nentries) {
+        return JM_NATIVE_ISR_E_ID;
+    }
+    e = g_entries[id];
+    if ((e->flags & JM_NATIVE_ISR_SAFE) == 0) {
+        return JM_NATIVE_ISR_E_NOT_SAFE;
+    }
+    if (nargs < e->min_args || nargs > e->max_args) {
+        return JM_NATIVE_ISR_E_ARGC;
+    }
+    if (args == NULL && nargs != 0) {
+        return JM_NATIVE_ISR_E_PARAM;
+    }
+
+    /* st == NULL 是 ISR 上下文的唯一信号；这里不碰 JmState。 */
+    tmp = JM_NIL;
+    rc = e->fn(NULL, args, nargs, &tmp);
+    if (rc != 0) {
+        return rc;
+    }
+    if (out) {
+        *out = tmp;
+    }
+    return JM_NATIVE_ISR_OK;
 }
 
 /* ---------------- 绑定到名字表 ---------------- */

@@ -8,9 +8,9 @@
 
 /* 在 JmNativeEntry 数组初始化处展开；名字、参数个数、C 函数名都来自同一份规格。 */
 #define F103_NATIVE_TABLE_INIT \
-    {"引脚写", n_pin_write, 2u, 2u, 0u, 0u}, \
-    {"引脚读", n_pin_read, 1u, 1u, 0u, 0u}, \
-    {"引脚翻转", n_pin_toggle, 1u, 1u, 0u, 0u}, \
+    {"引脚写", n_pin_write, 2u, 2u, JM_NATIVE_ISR_SAFE, 0u}, \
+    {"引脚读", n_pin_read, 1u, 1u, JM_NATIVE_ISR_SAFE, 0u}, \
+    {"引脚翻转", n_pin_toggle, 1u, 1u, JM_NATIVE_ISR_SAFE, 0u}, \
     {"串口写", n_uart_write, 1u, 1u, 0u, 0u}, \
     {"等待毫秒", n_delay, 1u, 1u, 0u, 0u}
 
@@ -41,9 +41,9 @@
 #define F103_TIMER_TABLE_INIT \
     {"定时器初始化", n_timer_init, 0u, 0u, 0u, 0u}, \
     {"定时器延时", n_timer_delay, 1u, 1u, 0u, 0u}, \
-    {"定时器计数", n_timer_count, 0u, 0u, 0u, 0u}, \
+    {"定时器计数", n_timer_count, 0u, 0u, JM_NATIVE_ISR_SAFE, 0u}, \
     {"PWM启动", n_pwm_start, 3u, 3u, 0u, 0u}, \
-    {"PWM占空比", n_pwm_set_duty, 1u, 1u, 0u, 0u}, \
+    {"PWM占空比", n_pwm_set_duty, 1u, 1u, JM_NATIVE_ISR_SAFE, 0u}, \
     {"PWM停止", n_pwm_stop, 0u, 0u, 0u, 0u}
 
 #endif /* F103_TIMER_TABLE_H */

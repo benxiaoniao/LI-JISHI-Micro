@@ -8,18 +8,27 @@
 /*
  * F103C8T6 板级原生函数表。
  * 约束（与 docs/原生函数表.md 一致）：
- *   - 只在任务/主上下文调用，不得进 ISR
- *   - 不分配、不保存借用指针
+ *   - 任务上下文：不分配、不保存借用指针
+ *   - ISR 上下文（st == NULL，仅 v2 的 ISR-safe 项）：不碰 JmState、不分配、
+ *     不阻塞、不做惰性初始化；错误只能返回正数 JM_NE_*
  *   - PC13 低电平点亮板载 LED，所以「引脚写(13, 0)」= 亮
  */
+
+/* 有 JmState 时走 VM 错误通道；ISR 上下文（st == NULL）直接返回正数错误码。 */
+static int n_fail(JmStateRef st, int code, const char *detail) {
+    if (!st) {
+        return code;
+    }
+    return jm_native_fail(st, code, detail);
+}
 
 static int arg_int(JmStateRef st, const JmValue *args, uint8_t nargs, int32_t *v,
                    const char *what) {
     if (nargs != 1) {
-        return jm_native_fail(st, JM_NE_PARAM, what);
+        return n_fail(st, JM_NE_PARAM, what);
     }
     if (jm_value_to_int(args[0], v) != 0) {
-        return jm_native_fail(st, JM_NE_TYPE, "参数必须是整数");
+        return n_fail(st, JM_NE_TYPE, "参数必须是整数");
     }
     return 0;
 }
@@ -29,17 +38,25 @@ static int n_pin_write(JmStateRef st, const JmValue *args, uint8_t nargs,
     int32_t pin = 0;
     int32_t level = 0;
     if (nargs != 2) {
-        return jm_native_fail(st, JM_NE_PARAM, "引脚写需要两个参数：引脚, 电平");
+        return n_fail(st, JM_NE_PARAM, "引脚写需要两个参数：引脚, 电平");
     }
     if (jm_value_to_int(args[0], &pin) != 0 || jm_value_to_int(args[1], &level) != 0) {
-        return jm_native_fail(st, JM_NE_TYPE, "引脚写：参数必须是整数");
+        return n_fail(st, JM_NE_TYPE, "引脚写：参数必须是整数");
     }
     if (pin < 0 || pin > 47) {
-        return jm_native_fail(st, JM_NE_PARAM,
-                              "引脚编码 0–47（0–15=PA0–PA15，16–31=PB0–PB15，32–47=PC0–PC15）");
+        return n_fail(st, JM_NE_PARAM,
+                      "引脚编码 0–47（0–15=PA0–PA15，16–31=PB0–PB15，32–47=PC0–PC15）");
     }
     if (level != 0 && level != 1) {
-        return jm_native_fail(st, JM_NE_PARAM, "电平只能是 0 或 1");
+        return n_fail(st, JM_NE_PARAM, "电平只能是 0 或 1");
+    }
+    if (!st) {
+        /* ISR：不做惰性配置；该脚必须已由任务上下文配成推挽输出。 */
+        if (!port_gpio_is_output((uint32_t)pin)) {
+            return JM_NE_STATE;
+        }
+        port_gpio_write_fast((uint32_t)pin, (int)level);
+        return JM_NATIVE_OK;
     }
     port_gpio_write((uint32_t)pin, (int)level);
     *out = jm_value_nil();
@@ -49,12 +66,13 @@ static int n_pin_write(JmStateRef st, const JmValue *args, uint8_t nargs,
 static int n_pin_read(JmStateRef st, const JmValue *args, uint8_t nargs,
                       JmValue *out) {
     int32_t pin = 0;
-    if (arg_int(st, args, nargs, &pin, "引脚读需要一个参数：引脚") != 0) {
-        return -1;
+    int rc = arg_int(st, args, nargs, &pin, "引脚读需要一个参数：引脚");
+    if (rc != 0) {
+        return rc;
     }
     if (pin < 0 || pin > 47) {
-        return jm_native_fail(st, JM_NE_PARAM,
-                              "引脚编码 0–47（0–15=PA0–PA15，16–31=PB0–PB15，32–47=PC0–PC15）");
+        return n_fail(st, JM_NE_PARAM,
+                      "引脚编码 0–47（0–15=PA0–PA15，16–31=PB0–PB15，32–47=PC0–PC15）");
     }
     *out = jm_value_int(port_gpio_read((uint32_t)pin) ? 1 : 0);
     return JM_NATIVE_OK;
@@ -63,12 +81,20 @@ static int n_pin_read(JmStateRef st, const JmValue *args, uint8_t nargs,
 static int n_pin_toggle(JmStateRef st, const JmValue *args, uint8_t nargs,
                         JmValue *out) {
     int32_t pin = 0;
-    if (arg_int(st, args, nargs, &pin, "引脚翻转需要一个参数：引脚") != 0) {
-        return -1;
+    int rc = arg_int(st, args, nargs, &pin, "引脚翻转需要一个参数：引脚");
+    if (rc != 0) {
+        return rc;
     }
     if (pin < 0 || pin > 47) {
-        return jm_native_fail(st, JM_NE_PARAM,
-                              "引脚编码 0–47（0–15=PA0–PA15，16–31=PB0–PB15，32–47=PC0–PC15）");
+        return n_fail(st, JM_NE_PARAM,
+                      "引脚编码 0–47（0–15=PA0–PA15，16–31=PB0–PB15，32–47=PC0–PC15）");
+    }
+    if (!st) {
+        if (!port_gpio_is_output((uint32_t)pin)) {
+            return JM_NE_STATE;
+        }
+        port_gpio_toggle_fast((uint32_t)pin);
+        return JM_NATIVE_OK;
     }
     (void)port_gpio_toggle((uint32_t)pin);
     *out = jm_value_nil();
@@ -164,10 +190,10 @@ static int n_timer_count(JmStateRef st, const JmValue *args, uint8_t nargs,
     uint32_t ms = 0;
     (void)args;
     if (nargs != 0) {
-        return jm_native_fail(st, JM_NE_PARAM, "定时器计数不接受参数");
+        return n_fail(st, JM_NE_PARAM, "定时器计数不接受参数");
     }
     if (port_timer_count(&ms) != 0) {
-        return jm_native_fail(st, JM_NE_STATE, "定时器未初始化，先调用 定时器初始化()");
+        return n_fail(st, JM_NE_STATE, "定时器未初始化，先调用 定时器初始化()");
     }
     *out = jm_value_int((int32_t)ms);
     return JM_NATIVE_OK;
@@ -207,14 +233,15 @@ static int n_pwm_start(JmStateRef st, const JmValue *args, uint8_t nargs,
 static int n_pwm_set_duty(JmStateRef st, const JmValue *args, uint8_t nargs,
                           JmValue *out) {
     int32_t duty = 0;
-    if (arg_int(st, args, nargs, &duty, "PWM占空比需要一个参数：千分比") != 0) {
-        return -1;
+    int rc = arg_int(st, args, nargs, &duty, "PWM占空比需要一个参数：千分比");
+    if (rc != 0) {
+        return rc;
     }
     if (duty < 0 || duty > 1000) {
-        return jm_native_fail(st, JM_NE_PARAM, "PWM 占空比范围 0–1000（千分比）");
+        return n_fail(st, JM_NE_PARAM, "PWM 占空比范围 0–1000（千分比）");
     }
     if (port_pwm_set_duty((uint32_t)duty) != 0) {
-        return jm_native_fail(st, JM_NE_STATE, "PWM 未启动，先调用 PWM启动()");
+        return n_fail(st, JM_NE_STATE, "PWM 未启动，先调用 PWM启动()");
     }
     *out = jm_value_nil();
     return JM_NATIVE_OK;
@@ -753,14 +780,70 @@ static int n_sem_post(JmStateRef st, const JmValue *args, uint8_t nargs,
 /* ---- 语言层中断（JM7）：中断只投递，不跑字节码 ----
  * 数据路径：EXTI_IRQHandler（port 层）→ irq_post_from_isr → jmk_queue_send_from_isr
  *          → 任务里的 队列接收 → .jsh 逻辑。
- * 中断上下文里既不进 VM，也不调用任何 native 函数；ABI v1 的「ISR 不得直调 native」
- * 因此仍然成立。
+ * ABI v2 起另有一个可选路径：ISR 里用 jm_native_isr_call 直调 ISR-safe 表项
+ * （引脚读/引脚写/引脚翻转/定时器计数/PWM占空比），不经过 VM 与队列。
  */
 #define JM_IRQ_LINES 16u   /* EXTI 线号 0–15 */
 #define JM_IRQ_PINS  48u   /* 编码引脚：0–15 = PA，16–31 = PB，32–47 = PC */
 
 static JmkQueue *g_irq_queue[JM_IRQ_LINES];
 static uint8_t g_irq_pin[JM_IRQ_LINES];   /* 该线当前绑定的编码引脚 + 1；0 = 未绑定 */
+
+#if JM_ISR_DIRECT_DEMO
+/* 直调样例（默认关闭）：任务上下文先解析 id 并配置 PC13；ISR 里直接翻转。
+ * 这不是生产路径，只用来上板核对 ABI v2 的直调链路与错误计数。 */
+static uint8_t g_isr_direct_id;
+static volatile uint8_t g_isr_direct_ready;
+static volatile uint32_t g_isr_direct_calls;
+static volatile uint32_t g_isr_direct_errors;
+/* DWT CYCCNT：只量 ISR 内函数体，不含异常入/出栈与端到端唤醒。
+ * 量程含两次 CYCCNT 读与计数/分支插桩，未做开销扣除。 */
+#define JM_DEMCR     (*(volatile uint32_t *)0xE000EDFCu)
+#define JM_DWT_CTRL  (*(volatile uint32_t *)0xE0001000u)
+#define JM_DWT_CYCCNT (*(volatile uint32_t *)0xE0001004u)
+static volatile uint32_t g_isr_direct_sum;
+static volatile uint32_t g_isr_direct_max;
+static volatile uint32_t g_isr_queue_calls;
+static volatile uint32_t g_isr_queue_sum;
+static volatile uint32_t g_isr_queue_max;
+
+void f103_isr_direct_demo_init(void)
+{
+    uint8_t id = 0u;
+
+    if (jm_native_isr_resolve("引脚翻转", &id) != 0) {
+        port_log("[直调] 解析 引脚翻转 失败（不是 ISR-safe 或未登记）\r\n");
+        return;
+    }
+    port_gpio_write(13u, 1);   /* 任务上下文预配置：推挽输出，高电平（LED 灭） */
+    JM_DEMCR |= (1u << 24);    /* TRCENA */
+    JM_DWT_CYCCNT = 0u;
+    JM_DWT_CTRL |= 1u;         /* CYCCNTENA */
+    g_isr_direct_id = id;
+    g_isr_direct_ready = 1u;
+    port_log("[直调] ISR 直调样例就绪：每次 EXTI 翻转 PC13\r\n");
+}
+
+void f103_isr_direct_demo_report(void)
+{
+    uint32_t dcalls = g_isr_direct_calls;
+    uint32_t qcalls = g_isr_queue_calls;
+
+    port_log("[直调] 成功 ");
+    port_log_u32(dcalls);
+    port_log(" 次，失败 ");
+    port_log_u32(g_isr_direct_errors);
+    port_log(" 次；CYCCNT 直调 avg=");
+    port_log_u32(dcalls ? g_isr_direct_sum / dcalls : 0u);
+    port_log(" max=");
+    port_log_u32(g_isr_direct_max);
+    port_log("，队列 avg=");
+    port_log_u32(qcalls ? g_isr_queue_sum / qcalls : 0u);
+    port_log(" max=");
+    port_log_u32(g_isr_queue_max);
+    port_log("（含插桩，未扣除）\r\n");
+}
+#endif
 
 /* 由 port 层的中断服务函数调用：只做计数与入队，不做别的事。 */
 static void irq_post_from_isr(uint32_t line)
@@ -770,8 +853,43 @@ static void irq_post_from_isr(uint32_t line)
     if (line >= JM_IRQ_LINES || g_irq_queue[line] == 0) {
         return;
     }
+#if JM_ISR_DIRECT_DEMO
+    if (g_isr_direct_ready) {
+        JmValue args[1];
+        uint32_t t0;
+        uint32_t dt;
+
+        args[0] = jm_value_int(13);
+        t0 = JM_DWT_CYCCNT;
+        if (jm_native_isr_call(g_isr_direct_id, args, 1u, 0) != 0) {
+            g_isr_direct_errors++;   /* ISR 里只计数，不打印 */
+        } else {
+            g_isr_direct_calls++;
+        }
+        dt = JM_DWT_CYCCNT - t0;
+        g_isr_direct_sum += dt;
+        if (dt > g_isr_direct_max) {
+            g_isr_direct_max = dt;
+        }
+    }
+#endif
     payload = (uint32_t)g_irq_pin[line] - 1u;
+#if JM_ISR_DIRECT_DEMO
+    {
+        uint32_t t0 = JM_DWT_CYCCNT;
+        (void)jmk_queue_send_from_isr(g_irq_queue[line], &payload, 0);
+        {
+            uint32_t dt = JM_DWT_CYCCNT - t0;
+            g_isr_queue_calls++;
+            g_isr_queue_sum += dt;
+            if (dt > g_isr_queue_max) {
+                g_isr_queue_max = dt;
+            }
+        }
+    }
+#else
     (void)jmk_queue_send_from_isr(g_irq_queue[line], &payload, 0);
+#endif
 }
 
 static int n_irq_bind(JmStateRef st, const JmValue *args, uint8_t nargs,

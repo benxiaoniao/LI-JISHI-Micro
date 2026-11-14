@@ -599,7 +599,8 @@ void jmk_start(void)
                idle_entry, 0, 0u, "idle", 0xFFu);
     ready_push(&jmk_idle_tcb);
 
-    /* SysTick 与 PendSV 都设为最低优先级（0xFF），互相不可抢占 */
+    /* SysTick 与 PendSV 都设为最低优先级（0xFF），互相不可抢占。
+     * 端口层已在 port_init 里设置过；这里复核一次，防止启动路径被改回默认 0x00。 */
     SCB_SHPR3 = (SCB_SHPR3 & 0x0000FFFFu) | (0xFFu << 16) | (0xFFu << 24);
 
     first = take_highest();

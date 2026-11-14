@@ -10,8 +10,55 @@
  * 时基：SysTick 1 ms
  */
 
-/* 一次性初始化：时钟 → UART → SysTick → LED */
+/* 一次性初始化：时钟 → UART → 中断优先级 → SysTick → LED */
 void port_init(void);
+
+/* ---- 中断优先级（Cortex-M3，4 位抢占优先级，数值越小越急） ----
+ * 分层与规则见 docs/设计-中断嵌套与优先级.md：
+ *   故障 0x00 / 紧急 0x10 / 普通 0x40 / 慢速 0x80 / 内核 0xFF。
+ * 外部 IRQ 只允许 0x10 / 0x40 / 0x80；0x00 与 0xFF 留给故障与内核向量。 */
+#define PORT_PRIO_FAULT     0x00u
+#define PORT_PRIO_CRITICAL  0x10u
+#define PORT_PRIO_NORMAL    0x40u
+#define PORT_PRIO_SLOW      0x80u
+#define PORT_PRIO_KERNEL    0xFFu
+
+/* 受控写入：irq 为 NVIC 中断号（0..67）；返回 0 成功，-1 非法 irq 或非法层。 */
+int port_irq_set_priority(uint32_t irq, uint8_t prio);
+/* 只读：返回高 4 位优先级；irq 越界返回 0xFF。 */
+uint8_t port_irq_get_priority(uint32_t irq);
+
+/* 调试构建：启动时打印内核向量优先级；绑定时打印 EXTI 优先级。 */
+#ifndef JM_IRQ_DEBUG
+#define JM_IRQ_DEBUG 0
+#endif
+
+/* 上板自检构建：用 PA0(0x40) 与 PA1(0x10) 验证跨层抢占，详见设计文档 §8.3。 */
+#ifndef JM_IRQ_NEST_DEMO
+#define JM_IRQ_NEST_DEMO 0
+#endif
+#if JM_IRQ_NEST_DEMO
+void port_irq_nest_demo_run(void);
+#endif
+
+/* MSP 哨兵水位：启动时用 0xA5 填满主栈未使用区，任务上下文扫描峰值。
+ * 需要配合 JM_IRQ_NEST_DEMO=1 才有 10 000 次嵌套压力。 */
+#ifndef JM_MSP_WATERMARK
+#define JM_MSP_WATERMARK 0
+#endif
+#if JM_MSP_WATERMARK
+void port_msp_watermark_init(void);
+uint32_t port_msp_watermark_used(void);
+uint32_t port_msp_watermark_total(void);
+#endif
+
+/* 故障现场测试：故意执行 UDF，验证 HardFault 打印后停机。默认关闭。 */
+#ifndef JM_FAULT_DEMO
+#define JM_FAULT_DEMO 0
+#endif
+#if JM_FAULT_DEMO
+void port_fault_demo_trigger(void);
+#endif
 
 /* 当前系统时钟（Hz） */
 uint32_t port_sysclk(void);
@@ -34,6 +81,10 @@ void port_led_toggle(void);
 void port_gpio_write(uint32_t pin, int level);
 int  port_gpio_read(uint32_t pin);
 int  port_gpio_toggle(uint32_t pin);
+/* ISR 快路径：要求调用方已由任务上下文把该脚配成推挽输出；port_gpio_is_output 只读判断。 */
+int  port_gpio_is_output(uint32_t pin);
+void port_gpio_write_fast(uint32_t pin, int level);
+void port_gpio_toggle_fast(uint32_t pin);
 
 /* 忙等延时（不带调度，供 native 函数使用） */
 void port_delay_ms(uint32_t ms);

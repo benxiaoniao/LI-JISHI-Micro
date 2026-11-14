@@ -5,11 +5,17 @@ use crate::lexer::{tokenize, Kw, Tok, Token};
 pub struct Parser {
     tokens: Vec<Token>,
     pos: usize,
+    /// 块嵌套深度：0 = 模块顶层；`私有` 只允许在顶层。
+    depth: usize,
 }
 
 impl Parser {
     pub fn new(tokens: Vec<Token>) -> Self {
-        Self { tokens, pos: 0 }
+        Self {
+            tokens,
+            pos: 0,
+            depth: 0,
+        }
     }
 
     pub fn parse_program(&mut self) -> Result<Vec<Stmt>> {
@@ -97,6 +103,7 @@ impl Parser {
             return Err(self.err("E109", "这里应该换行并缩进"));
         }
         self.pos += 1;
+        self.depth += 1;
         let mut stmts = Vec::new();
         while !matches!(self.peek().tok, Tok::Dedent | Tok::Eof) {
             if matches!(self.peek().tok, Tok::Newline) {
@@ -105,23 +112,28 @@ impl Parser {
             }
             stmts.push(self.parse_stmt()?);
         }
+        self.depth -= 1;
         if matches!(self.peek().tok, Tok::Dedent) {
             self.pos += 1;
         }
         Ok(stmts)
     }
 
-    /// 解析 `(参数, ...)` 与可选的 `-> 类型`；类型标注只读掉、不参与运行。
-    fn parse_params(&mut self) -> Result<Vec<String>> {
+    /// 解析 `(参数, ...)` 与可选的 `-> 类型`。
+    /// 返回（参数名、与参数一一对应的类型标注、返回类型标注）。
+    fn parse_params(
+        &mut self,
+    ) -> Result<(Vec<String>, Vec<Option<String>>, Option<String>)> {
         self.expect_op("(")?;
         let mut params = Vec::new();
+        let mut types = Vec::new();
         if !matches!(self.peek().tok, Tok::Op(")")) {
             loop {
                 let (p, pl, pc) = self.expect_ident()?;
+                let mut ty = None;
                 if matches!(self.peek().tok, Tok::Op(":")) {
-                    // 类型标注：读掉类型名，不参与运行
                     self.pos += 1;
-                    let _ = self.expect_ident()?;
+                    ty = Some(self.parse_type_name()?);
                 }
                 if matches!(self.peek().tok, Tok::Op("=")) {
                     return Err(CompileError::new(
@@ -132,6 +144,7 @@ impl Parser {
                     ));
                 }
                 params.push(p);
+                types.push(ty);
                 if matches!(self.peek().tok, Tok::Op(",")) {
                     self.pos += 1;
                     continue;
@@ -140,11 +153,25 @@ impl Parser {
             }
         }
         self.expect_op(")")?;
-        if matches!(self.peek().tok, Tok::Op("->")) {
+        let ret = if matches!(self.peek().tok, Tok::Op("->")) {
             self.pos += 1;
-            let _ = self.expect_ident()?;
+            Some(self.parse_type_name()?)
+        } else {
+            None
+        };
+        Ok((params, types, ret))
+    }
+
+    /// 类型名：允许 `包名.类名` 两段（跨包类型），单段与原来一致。
+    fn parse_type_name(&mut self) -> Result<String> {
+        let (mut name, _, _) = self.expect_ident()?;
+        while matches!(self.peek().tok, Tok::Op(".")) {
+            self.pos += 1;
+            let (seg, _, _) = self.expect_ident()?;
+            name.push('.');
+            name.push_str(&seg);
         }
-        Ok(params)
+        Ok(name)
     }
 
     /// 函数体：`函数 f(x):` + 缩进块，或 `函数 f(x): 表达式` 的单行写法。
@@ -163,6 +190,7 @@ impl Parser {
             return Ok(vec![Stmt {
                 kind: StmtKind::Return(Some(e)),
                 line,
+                is_private: false,
             }]);
         }
         self.pos += 1;
@@ -170,6 +198,7 @@ impl Parser {
             return Err(self.err("E109", "这里应该换行并缩进"));
         }
         self.pos += 1;
+        self.depth += 1;
         let mut stmts = Vec::new();
         while !matches!(self.peek().tok, Tok::Dedent | Tok::Eof) {
             if matches!(self.peek().tok, Tok::Newline) {
@@ -178,6 +207,7 @@ impl Parser {
             }
             stmts.push(self.parse_stmt()?);
         }
+        self.depth -= 1;
         self.close_block();
         Ok(stmts)
     }
@@ -213,17 +243,133 @@ impl Parser {
         }
     }
 
+    /// `私有` 开头：只允许修饰模块顶层的 `令/函数/类/枚举`（可带 `最终 类`）。
+    fn parse_private_decl(&mut self, line: u32, col: u32) -> Result<Stmt> {
+        const MSG: &str = "「私有」只能修饰模块顶层的 令/函数/类/枚举";
+        if self.depth > 0 {
+            return Err(CompileError::new("E144", line, col, MSG));
+        }
+        self.pos += 1;
+        if matches!(self.peek().tok, Tok::Kw(Kw::Private)) {
+            return Err(CompileError::new("E144", line, col, "「私有」重复"));
+        }
+        let ok = match self.peek().tok {
+            Tok::Kw(Kw::Ling) | Tok::Kw(Kw::Class) | Tok::Kw(Kw::Enum) | Tok::Kw(Kw::Final) => true,
+            Tok::Kw(Kw::Func) => !matches!(self.peek_at(1).tok, Tok::Op("(")),
+            _ => false,
+        };
+        if !ok {
+            return Err(CompileError::new("E144", line, col, MSG));
+        }
+        let mut stmt = self.parse_stmt()?;
+        stmt.is_private = true;
+        match &mut stmt.kind {
+            StmtKind::FuncDef { is_private, .. } => *is_private = true,
+            StmtKind::Class(c) => c.is_private = true,
+            StmtKind::Enum(e) => e.is_private = true,
+            _ => {}
+        }
+        Ok(stmt)
+    }
+
+    /// 类体：调用前已经吃掉 `类`（或 `最终 类`）。
+    fn parse_class_body(&mut self, line: u32, is_final: bool) -> Result<Stmt> {
+        let (name, _, _) = self.expect_ident()?;
+        let parent = if matches!(self.peek().tok, Tok::Kw(Kw::Inherit)) {
+            self.pos += 1;
+            Some(self.expect_ident()?.0)
+        } else {
+            None
+        };
+        self.expect_op(":")?;
+        self.expect_newline()?;
+        if !matches!(self.peek().tok, Tok::Indent) {
+            return Err(self.err("E109", "这里应该换行并缩进"));
+        }
+        self.pos += 1;
+        let mut fields: Vec<(String, Expr)> = Vec::new();
+        let mut methods: Vec<MethodDecl> = Vec::new();
+        while !matches!(self.peek().tok, Tok::Dedent | Tok::Eof) {
+            if matches!(self.peek().tok, Tok::Newline) {
+                self.pos += 1;
+                continue;
+            }
+            match self.peek().tok {
+                Tok::Kw(Kw::Ling) => {
+                    self.pos += 1;
+                    let (fname, _, _) = self.expect_ident()?;
+                    self.expect_op("=")?;
+                    let e = self.parse_expr()?;
+                    self.expect_newline()?;
+                    fields.push((fname, e));
+                }
+                Tok::Kw(Kw::Func) => methods.push(self.parse_func_decl()?),
+                Tok::Kw(Kw::Private) => {
+                    let bad = self.peek().clone();
+                    return Err(CompileError::new(
+                        "E144",
+                        bad.line,
+                        bad.col,
+                        "「私有」只能修饰模块顶层的 令/函数/类/枚举，不能写在类体里",
+                    ));
+                }
+                Tok::Kw(Kw::Final) => {
+                    let bad = self.peek().clone();
+                    self.pos += 1;
+                    if !matches!(self.peek().tok, Tok::Kw(Kw::Func)) {
+                        return Err(CompileError::new(
+                            "E142",
+                            bad.line,
+                            bad.col,
+                            "「最终」只能修饰类（最终 类）或类方法（最终 函数）",
+                        ));
+                    }
+                    let mut m = self.parse_func_decl()?;
+                    m.is_final = true;
+                    methods.push(m);
+                }
+                _ => {
+                    let bad = self.peek().clone();
+                    return Err(CompileError::new(
+                        "E118",
+                        bad.line,
+                        bad.col,
+                        "类体里只能写字段（令 名 = 默认值）或函数（函数 名(...):）",
+                    ));
+                }
+            }
+        }
+        if matches!(self.peek().tok, Tok::Dedent) {
+            self.pos += 1;
+        }
+        Ok(Stmt {
+            kind: StmtKind::Class(ClassDecl {
+                name,
+                parent,
+                is_final,
+                is_private: false,
+                fields,
+                methods,
+            }),
+            line,
+            is_private: false,
+        })
+    }
+
     fn parse_func_decl(&mut self) -> Result<MethodDecl> {
         let t = self.peek().clone();
         let line = t.line;
         self.pos += 1;
         let (name, _, _) = self.expect_ident()?;
-        let params = self.parse_params()?;
+        let (params, param_types, ret_type) = self.parse_params()?;
         let body = self.parse_func_body()?;
         Ok(MethodDecl {
             name,
             params,
+            param_types,
+            ret_type,
             body,
+            is_final: false,
             line,
         })
     }
@@ -349,6 +495,16 @@ impl Parser {
                 }
                 self.pos += 1;
                 let (member, _, _) = self.expect_ident()?;
+                // `包名.枚举名.成员`：三段式模式，枚举名先拼成 `包名.枚举名`，
+                // 由跨包合并阶段改写成 `包名::枚举名`。
+                if matches!(self.peek().tok, Tok::Op(".")) {
+                    self.pos += 1;
+                    let (member2, _, _) = self.expect_ident()?;
+                    return Ok(MatchPattern::EnumMember(
+                        format!("{}.{}", name, member),
+                        member2,
+                    ));
+                }
                 Ok(MatchPattern::EnumMember(name, member))
             }
             _ => Err(CompileError::new(
@@ -548,6 +704,9 @@ impl Parser {
     fn parse_stmt(&mut self) -> Result<Stmt> {
         let t = self.peek().clone();
         let line = t.line;
+        if matches!(t.tok, Tok::Kw(Kw::Private)) {
+            return self.parse_private_decl(t.line, t.col);
+        }
         match t.tok {
             Tok::Kw(Kw::Ling) => {
                 self.pos += 1;
@@ -558,6 +717,7 @@ impl Parser {
                 Ok(Stmt {
                     kind: StmtKind::Let(name, e),
                     line,
+                    is_private: false,
                 })
             }
             Tok::Kw(Kw::If) => {
@@ -586,6 +746,7 @@ impl Parser {
                 Ok(Stmt {
                     kind: StmtKind::If { branches, else_body },
                     line,
+                    is_private: false,
                 })
             }
             Tok::Kw(Kw::While) => {
@@ -595,6 +756,7 @@ impl Parser {
                 Ok(Stmt {
                     kind: StmtKind::While(cond, body),
                     line,
+                    is_private: false,
                 })
             }
             Tok::Kw(Kw::Loop) => {
@@ -607,6 +769,7 @@ impl Parser {
                 Ok(Stmt {
                     kind: StmtKind::Repeat(count, body),
                     line,
+                    is_private: false,
                 })
             }
             Tok::Kw(Kw::ForEach) => {
@@ -618,6 +781,7 @@ impl Parser {
                 Ok(Stmt {
                     kind: StmtKind::ForEach(name, iterable, body),
                     line,
+                    is_private: false,
                 })
             }
             Tok::Kw(Kw::Func) if !matches!(self.peek_at(1).tok, Tok::Op("(")) => {
@@ -626,66 +790,31 @@ impl Parser {
                     kind: StmtKind::FuncDef {
                         name: m.name,
                         params: m.params,
+                        param_types: m.param_types,
+                        ret_type: m.ret_type,
                         body: m.body,
+                        is_private: false,
                     },
                     line,
+                    is_private: false,
                 })
             }
             Tok::Kw(Kw::Class) => {
                 self.pos += 1;
-                let (name, _, _) = self.expect_ident()?;
-                let parent = if matches!(self.peek().tok, Tok::Kw(Kw::Inherit)) {
-                    self.pos += 1;
-                    Some(self.expect_ident()?.0)
-                } else {
-                    None
-                };
-                self.expect_op(":")?;
-                self.expect_newline()?;
-                if !matches!(self.peek().tok, Tok::Indent) {
-                    return Err(self.err("E109", "这里应该换行并缩进"));
-                }
+                self.parse_class_body(line, false)
+            }
+            Tok::Kw(Kw::Final) => {
                 self.pos += 1;
-                let mut fields: Vec<(String, Expr)> = Vec::new();
-                let mut methods: Vec<MethodDecl> = Vec::new();
-                while !matches!(self.peek().tok, Tok::Dedent | Tok::Eof) {
-                    if matches!(self.peek().tok, Tok::Newline) {
-                        self.pos += 1;
-                        continue;
-                    }
-                    match self.peek().tok {
-                        Tok::Kw(Kw::Ling) => {
-                            self.pos += 1;
-                            let (fname, _, _) = self.expect_ident()?;
-                            self.expect_op("=")?;
-                            let e = self.parse_expr()?;
-                            self.expect_newline()?;
-                            fields.push((fname, e));
-                        }
-                        Tok::Kw(Kw::Func) => methods.push(self.parse_func_decl()?),
-                        _ => {
-                            let bad = self.peek().clone();
-                            return Err(CompileError::new(
-                                "E118",
-                                bad.line,
-                                bad.col,
-                                "类体里只能写字段（令 名 = 默认值）或函数（函数 名(...):）",
-                            ));
-                        }
-                    }
+                if matches!(self.peek().tok, Tok::Kw(Kw::Func)) {
+                    return Err(CompileError::new(
+                        "E142",
+                        line,
+                        t.col,
+                        "「最终 函数」只能写在类体里（修饰类方法）",
+                    ));
                 }
-                if matches!(self.peek().tok, Tok::Dedent) {
-                    self.pos += 1;
-                }
-                Ok(Stmt {
-                    kind: StmtKind::Class(ClassDecl {
-                        name,
-                        parent,
-                        fields,
-                        methods,
-                    }),
-                    line,
-                })
+                self.expect_kw(Kw::Class, "类")?;
+                self.parse_class_body(line, true)
             }
             Tok::Kw(Kw::Enum) => {
                 self.pos += 1;
@@ -746,8 +875,13 @@ impl Parser {
                     ));
                 }
                 Ok(Stmt {
-                    kind: StmtKind::Enum(EnumDecl { name, members }),
+                    kind: StmtKind::Enum(EnumDecl {
+                        name,
+                        members,
+                        is_private: false,
+                    }),
                     line,
+                    is_private: false,
                 })
             }
             Tok::Kw(Kw::Match) => {
@@ -809,6 +943,7 @@ impl Parser {
                         else_body,
                     },
                     line,
+                    is_private: false,
                 })
             }
             Tok::Kw(Kw::Case) => Err(CompileError::new(
@@ -830,6 +965,7 @@ impl Parser {
                 Ok(Stmt {
                     kind: StmtKind::Assert(cond, msg),
                     line,
+                    is_private: false,
                 })
             }
             Tok::Kw(Kw::Return) => {
@@ -843,6 +979,7 @@ impl Parser {
                 Ok(Stmt {
                     kind: StmtKind::Return(e),
                     line,
+                    is_private: false,
                 })
             }
             Tok::Kw(Kw::Throw) => {
@@ -852,6 +989,7 @@ impl Parser {
                 Ok(Stmt {
                     kind: StmtKind::Throw(e),
                     line,
+                    is_private: false,
                 })
             }
             Tok::Kw(Kw::Try) => {
@@ -878,6 +1016,7 @@ impl Parser {
                         catch_body,
                     },
                     line,
+                    is_private: false,
                 })
             }
             Tok::Kw(Kw::Catch) => Err(self.err(
@@ -890,6 +1029,7 @@ impl Parser {
                 Ok(Stmt {
                     kind: StmtKind::Break,
                     line,
+                    is_private: false,
                 })
             }
             Tok::Kw(Kw::Continue) => {
@@ -898,6 +1038,7 @@ impl Parser {
                 Ok(Stmt {
                     kind: StmtKind::Continue,
                     line,
+                    is_private: false,
                 })
             }
             Tok::Kw(Kw::Import) => {
@@ -907,13 +1048,14 @@ impl Parser {
                 Ok(Stmt {
                     kind: StmtKind::Import(module),
                     line,
+                    is_private: false,
                 })
             }
             Tok::Kw(Kw::Unsupported(name)) => Err(CompileError::new(
                 "E103",
                 line,
                 t.col,
-                format!("使用了 v0 不支持的关键字「{}」（如最终/用等）", name),
+                format!("使用了 v0 不支持的关键字「{}」（如用等）", name),
             )),
             _ => {
                 let e = self.parse_expr()?;
@@ -943,6 +1085,7 @@ impl Parser {
                                 },
                             ),
                             line,
+                            is_private: false,
                         }),
                         ExprKind::Index(obj, idx) => Ok(Stmt {
                             kind: StmtKind::AssignIndex(
@@ -955,6 +1098,7 @@ impl Parser {
                                 }),
                             ),
                             line,
+                            is_private: false,
                         }),
                         ExprKind::Member(obj, name) => Ok(Stmt {
                             kind: StmtKind::AssignMember(
@@ -967,6 +1111,7 @@ impl Parser {
                                 }),
                             ),
                             line,
+                            is_private: false,
                         }),
                         ExprKind::SelfRef => Err(CompileError::new(
                             "E120",
@@ -989,14 +1134,17 @@ impl Parser {
                         ExprKind::Name(n) => Ok(Stmt {
                             kind: StmtKind::Assign(n, rhs),
                             line,
+                            is_private: false,
                         }),
                         ExprKind::Index(obj, idx) => Ok(Stmt {
                             kind: StmtKind::AssignIndex(*obj, idx, Box::new(rhs)),
                             line,
+                            is_private: false,
                         }),
                         ExprKind::Member(obj, name) => Ok(Stmt {
                             kind: StmtKind::AssignMember(*obj, name, Box::new(rhs)),
                             line,
+                            is_private: false,
                         }),
                         ExprKind::SelfRef => Err(CompileError::new(
                             "E120",
@@ -1016,6 +1164,7 @@ impl Parser {
                     Ok(Stmt {
                         kind: StmtKind::Expr(e),
                         line,
+                        is_private: false,
                     })
                 }
             }
@@ -1424,9 +1573,21 @@ impl Parser {
                     col,
                 })
             }
+            Tok::Kw(Kw::Final) => Err(CompileError::new(
+                "E142",
+                line,
+                col,
+                "「最终」只能修饰类（最终 类）或类方法（最终 函数）",
+            )),
+            Tok::Kw(Kw::Private) => Err(CompileError::new(
+                "E144",
+                line,
+                col,
+                "「私有」只能修饰模块顶层的 令/函数/类/枚举",
+            )),
             Tok::Kw(Kw::New) => {
                 self.pos += 1;
-                let (cls, _, _) = self.expect_ident()?;
+                let cls = self.parse_type_name()?;
                 self.expect_op("(")?;
                 let mut args = Vec::new();
                 if !matches!(self.peek().tok, Tok::Op(")")) {
@@ -1456,10 +1617,10 @@ impl Parser {
             Tok::Kw(Kw::Func) => {
                 // 表达式位置的 `函数(...)` 是匿名函数。
                 self.pos += 1;
-                let params = self.parse_params()?;
+                let (params, param_types, ret_type) = self.parse_params()?;
                 let body = self.parse_func_body()?;
                 Ok(Expr {
-                    kind: ExprKind::AnonFunc(params, body),
+                    kind: ExprKind::AnonFunc(params, param_types, ret_type, body),
                     line,
                     col,
                 })

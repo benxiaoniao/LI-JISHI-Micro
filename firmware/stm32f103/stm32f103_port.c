@@ -175,7 +175,16 @@
 #define EXTI_IRQ_FIRST      6u    /* EXTI0 的 IRQ 号；EXTI1–4 依次 +1 */
 #define EXTI_IRQ_5_9        23u   /* EXTI9_5 */
 #define EXTI_IRQ_10_15      40u   /* EXTI15_10 */
-#define EXTI_IRQ_PRIO       0x40u /* 低于 SysTick（默认 0），不比内核 tick 更急 */
+#define EXTI_IRQ_PRIO       PORT_PRIO_NORMAL /* 普通层：低于紧急层，高于慢速层与内核 tick */
+
+/* 内核向量优先级寄存器：SVC 在 SHPR2 最高字节；PendSV/SysTick 在 SHPR3 高两字节。 */
+#define SCB_SHPR2       REG32(0xE000ED1Cu)
+#define SCB_SHPR3       REG32(0xE000ED20u)
+/* 故障状态寄存器；HardFault 现场打印用。 */
+#define SCB_CFSR        REG32(0xE000ED28u)
+#define SCB_HFSR        REG32(0xE000ED2Cu)
+#define SCB_MMFAR       REG32(0xE000ED34u)
+#define SCB_BFAR        REG32(0xE000ED38u)
 
 #define UART_BAUD       115200u
 
@@ -252,6 +261,105 @@ static void uart_init(uint32_t pclk2, uint32_t baud)
     USART1_CR1 = USART_CR1_UE | USART_CR1_TE | USART_CR1_RE;
 }
 
+/* ---------------- 中断优先级 ---------------- */
+
+int port_irq_set_priority(uint32_t irq, uint8_t prio)
+{
+    /* 外部 IRQ 只允许三层；0x00 留给故障/SVC，0xFF 留给 SysTick/PendSV。 */
+    if (prio != PORT_PRIO_CRITICAL && prio != PORT_PRIO_NORMAL &&
+        prio != PORT_PRIO_SLOW) {
+        return -1;
+    }
+    if (irq >= 68u) {
+        return -1;
+    }
+    NVIC_IPR_BYTE(irq) = (uint8_t)(prio & 0xF0u);
+    return 0;
+}
+
+uint8_t port_irq_get_priority(uint32_t irq)
+{
+    if (irq >= 68u) {
+        return 0xFFu;
+    }
+    return (uint8_t)(NVIC_IPR_BYTE(irq) & 0xF0u);
+}
+
+/* 启动期先设好内核向量，再使能 tick；避免 SysTick 以复位默认 0x00 运行。 */
+static void irq_init_priorities(void)
+{
+    SCB_SHPR2 = (SCB_SHPR2 & ~(0xFFu << 24)) | ((uint32_t)PORT_PRIO_FAULT << 24);
+    SCB_SHPR3 = (SCB_SHPR3 & ~((0xFFu << 16) | (0xFFu << 24)))
+              | ((uint32_t)PORT_PRIO_KERNEL << 16)
+              | ((uint32_t)PORT_PRIO_KERNEL << 24);
+#if JM_IRQ_DEBUG
+    port_log("[中断] SysTick/PendSV 优先级 = ");
+    port_log_hex((SCB_SHPR3 >> 16) & 0xFFu);
+    port_log(" / ");
+    port_log_hex((SCB_SHPR3 >> 24) & 0xFFu);
+    port_log("，SVC = ");
+    port_log_hex((SCB_SHPR2 >> 24) & 0xFFu);
+    port_log("\r\n");
+#endif
+}
+
+/* ---------------- MSP 哨兵水位 ---------------- */
+
+#if JM_MSP_WATERMARK
+extern uint32_t _ebss;
+extern uint32_t _estack;
+
+#define MSP_PATTERN 0xA5A5A5A5u
+#define MSP_GUARD   256u   /* 给填充函数自身与可能的中断留出的安全区 */
+
+static uint32_t *g_msp_lo;
+static uint32_t *g_msp_hi;
+static uint8_t g_msp_ready;
+
+void port_msp_watermark_init(void)
+{
+    uint32_t sp;
+    uint32_t *lo = &_ebss;
+    uint32_t *hi;
+    uint32_t *p;
+
+    __asm volatile ("mrs %0, msp" : "=r"(sp));
+    hi = (uint32_t *)((sp - MSP_GUARD) & ~3u);
+    if ((uint32_t)hi <= (uint32_t)lo) {
+        return;
+    }
+    g_msp_lo = lo;
+    g_msp_hi = hi;
+    for (p = lo; p < hi; p++) {
+        *p = MSP_PATTERN;
+    }
+    g_msp_ready = 1u;
+}
+
+uint32_t port_msp_watermark_used(void)
+{
+    uint32_t top = (uint32_t)&_estack;
+    uint32_t *p;
+
+    if (!g_msp_ready) {
+        return 0u;
+    }
+    /* 栈向低地址生长：从低往高扫，第一个被改写的字就是最深水位。 */
+    for (p = g_msp_lo; p < g_msp_hi; p++) {
+        if (*p != MSP_PATTERN) {
+            return top - (uint32_t)p;
+        }
+    }
+    /* 填充区内没被用到：返回可测区上界（含 256 B 保护带，偏保守）。 */
+    return top - (uint32_t)g_msp_hi;
+}
+
+uint32_t port_msp_watermark_total(void)
+{
+    return (uint32_t)&_estack - (uint32_t)&_ebss;
+}
+#endif
+
 /* ---------------- SysTick ---------------- */
 
 static void systick_init(uint32_t clk)
@@ -272,8 +380,13 @@ void SysTick_Handler(void)
 
 void port_init(void)
 {
-    uint32_t clk = clock_init();
+    uint32_t clk;
+#if JM_MSP_WATERMARK
+    port_msp_watermark_init();   /* 最早调用：从第一条栈用起就能被哨兵记录 */
+#endif
+    clk = clock_init();
     uart_init(clk, UART_BAUD);
+    irq_init_priorities();   /* 必须先于 systick_init：tick 从第一条起就是最低优先级 */
     systick_init(clk);
 
     /* PC13 推挽输出，默认熄灭（高电平） */
@@ -320,6 +433,61 @@ void port_log_hex(uint32_t v)
     for (i = 28; i >= 0; i -= 4) {
         uint32_t d = (v >> (uint32_t)i) & 0xFu;
         uart_putc((char)(d < 10u ? ('0' + d) : ('a' + (d - 10u))));
+    }
+}
+
+/*
+ * HardFault 现场打印：由 startup_stm32f103c8.s 的 HardFault_Handler 调用，不返回。
+ * EXC_RETURN 的 bit2=1 表示异常帧在 PSP（任务栈），否则在 MSP（主栈）。
+ */
+void hardfault_report(uint32_t exc_return, uint32_t msp, uint32_t psp)
+{
+    uint32_t frame = (exc_return & 4u) ? psp : msp;
+    uint32_t *f = (uint32_t *)frame;
+    uint32_t cfsr;
+
+    /* UART 尚未初始化时不要卡在 uart_putc 的等待里。 */
+    if ((USART1_CR1 & USART_CR1_UE) == 0u) {
+        for (;;) {
+        }
+    }
+
+    cfsr = SCB_CFSR;
+    port_log("\r\n[故障] HardFault\r\n");
+    port_log("EXC_RETURN=");
+    port_log_hex(exc_return);
+    port_log(" MSP=");
+    port_log_hex(msp);
+    port_log(" PSP=");
+    port_log_hex(psp);
+    port_log("\r\n");
+    port_log("CFSR=");
+    port_log_hex(cfsr);
+    port_log(" HFSR=");
+    port_log_hex(SCB_HFSR);
+    port_log(" MMFAR=");
+    if ((cfsr & (1u << 7)) != 0u) {   /* MMARVALID */
+        port_log_hex(SCB_MMFAR);
+    } else {
+        port_log("-");
+    }
+    port_log(" BFAR=");
+    if ((cfsr & (1u << 15)) != 0u) {  /* BFARVALID */
+        port_log_hex(SCB_BFAR);
+    } else {
+        port_log("-");
+    }
+    port_log("\r\n");
+    port_log("PC=");
+    port_log_hex(f[6]);
+    port_log(" LR=");
+    port_log_hex(f[5]);
+    port_log(" xPSR=");
+    port_log_hex(f[7]);
+    port_log("\r\n");
+    port_log("[故障] 已停机，复位后重新运行\r\n");
+
+    for (;;) {
     }
 }
 
@@ -401,6 +569,49 @@ int port_gpio_toggle(uint32_t pin)
     }
     port_gpio_write(pin, g_pin_out[pin] ? 0 : 1);
     return (int)g_pin_out[pin];
+}
+
+/* ---- ISR 快路径：不改引脚配置，只写 BSRR/BRR 与 g_pin_out ----
+ * 前置条件是任务上下文已把该脚配成通用推挽输出；未配置时由调用方返回 E033。
+ * 这里只做单寄存器写与单字节读写，可在中断里与任务并发。
+ */
+int port_gpio_is_output(uint32_t pin)
+{
+    uint32_t line;
+    uint32_t nibble;
+
+    if (pin > 47u) {
+        return 0;
+    }
+    line = pin % 16u;
+    nibble = (*gpio_reg(pin / 16u, (line < 8u) ? 0x00u : 0x04u)
+              >> ((line & 7u) * 4u)) & 0xFu;
+    return ((nibble & 0x3u) != 0u) && ((nibble & 0xCu) == 0u);
+}
+
+void port_gpio_write_fast(uint32_t pin, int level)
+{
+    uint32_t bit;
+
+    if (pin > 47u) {
+        return;
+    }
+    bit = 1u << (pin % 16u);
+    if (level) {
+        *gpio_reg(pin / 16u, 0x10u) = bit;   /* BSRR */
+        g_pin_out[pin] = 1u;
+    } else {
+        *gpio_reg(pin / 16u, 0x14u) = bit;   /* BRR */
+        g_pin_out[pin] = 0u;
+    }
+}
+
+void port_gpio_toggle_fast(uint32_t pin)
+{
+    if (pin > 47u) {
+        return;
+    }
+    port_gpio_write_fast(pin, g_pin_out[pin] ? 0 : 1);
 }
 
 void port_delay_ms(uint32_t ms)
@@ -1252,7 +1463,16 @@ void port_exti_bind(uint32_t pin, uint32_t edge)
     EXTI_EMR &= ~bit;
 
     irq = exti_irq_of_line(line);
-    NVIC_IPR_BYTE(irq) = EXTI_IRQ_PRIO;
+    (void)port_irq_set_priority(irq, EXTI_IRQ_PRIO);
+#if JM_IRQ_DEBUG
+    port_log("[中断] EXTI 线 ");
+    port_log_u32(line);
+    port_log(" IRQ=");
+    port_log_u32(irq);
+    port_log(" 优先级=");
+    port_log_hex(port_irq_get_priority(irq));
+    port_log("\r\n");
+#endif
     if (irq < 32u) {
         NVIC_ISER0 = (1u << irq);
     } else {
@@ -1328,6 +1548,16 @@ uint32_t port_exti_count(uint32_t pin)
     return g_exti_count[pin];
 }
 
+#if JM_IRQ_NEST_DEMO
+/* 跨层抢占自检：只在上板自检构建里启用。
+ * trace 值：低 7 位是线号+1，最高位 0=进入 / 1=退出。 */
+static volatile uint8_t g_irq_depth;
+static volatile uint8_t g_irq_depth_max;
+static volatile uint8_t g_irq_trace[16];
+static volatile uint8_t g_irq_trace_len;
+static volatile uint8_t g_irq_nest_demo_active;
+#endif
+
 /* 三组中断共用同一套处理：只处理本组的挂起位，避免误清别组事件。
  * 这里只允许「计数 + 回调」，回调由板级层实现，只做 jmk_queue_send_from_isr；
  * 任何情况下都不进 VM、不跑砾字节码。 */
@@ -1342,10 +1572,34 @@ static void exti_serve(uint32_t first, uint32_t last)
             uint8_t v = g_exti_line_pin[line];
             EXTI_PR = bit;      /* 写 1 清挂起，同时清掉 SWIER 对应位 */
             if (v != 0u) {
+#if JM_IRQ_NEST_DEMO
+                if (g_irq_depth < 0xFFu) {
+                    g_irq_depth++;
+                }
+                if (g_irq_depth > g_irq_depth_max) {
+                    g_irq_depth_max = g_irq_depth;
+                }
+                if (g_irq_trace_len < (uint8_t)sizeof(g_irq_trace)) {
+                    g_irq_trace[g_irq_trace_len++] = (uint8_t)(line + 1u);
+                }
+                if (line == 0u && g_irq_nest_demo_active) {
+                    /* PA1/IRQ7 已设为 0x10：应在这里立即抢占当前 0x40 的 ISR。
+                     * 自检结束后 active=0，不影响后续砾程序的中断语义。 */
+                    port_exti_sw_trigger(1u);
+                }
+#endif
                 g_exti_count[(uint32_t)v - 1u]++;
                 if (g_exti_hook) {
                     g_exti_hook(line);
                 }
+#if JM_IRQ_NEST_DEMO
+                if (g_irq_trace_len < (uint8_t)sizeof(g_irq_trace)) {
+                    g_irq_trace[g_irq_trace_len++] = (uint8_t)(0x80u | (line + 1u));
+                }
+                if (g_irq_depth > 0u) {
+                    g_irq_depth--;
+                }
+#endif
             }
         }
     }
@@ -1365,6 +1619,72 @@ void EXTI15_10_IRQHandler(void)
 {
     exti_serve(10u, 15u);
 }
+
+#if JM_IRQ_NEST_DEMO
+void port_irq_nest_demo_run(void)
+{
+    uint8_t i;
+    uint8_t ok;
+
+    g_irq_depth = 0u;
+    g_irq_depth_max = 0u;
+    g_irq_trace_len = 0u;
+    g_irq_nest_demo_active = 0u;
+
+    port_exti_bind(0u, 0u);   /* PA0 -> IRQ6，普通层 0x40 */
+    port_exti_bind(1u, 0u);   /* PA1 -> IRQ7，先按普通层绑定 */
+    if (port_irq_set_priority(EXTI_IRQ_FIRST + 1u, PORT_PRIO_CRITICAL) != 0) {
+        port_log("[嵌套] 设置 PA1 为紧急层失败\r\n");
+        port_exti_unbind(0u);
+        port_exti_unbind(1u);
+        return;
+    }
+
+    g_irq_nest_demo_active = 1u;
+#if JM_MSP_WATERMARK
+    {
+        uint32_t r;
+        for (r = 0u; r < 10000u; r++) {
+            port_exti_sw_trigger(0u);   /* 10 000 次嵌套压力，供 MSP 水位扫描 */
+        }
+    }
+#else
+    port_exti_sw_trigger(0u);   /* PA0 处理中会触发 PA1，应被抢占 */
+#endif
+    g_irq_nest_demo_active = 0u;
+
+    port_log("[嵌套] 深度峰值=");
+    port_log_u32(g_irq_depth_max);
+    port_log(" 顺序=");
+    for (i = 0u; i < g_irq_trace_len && i < 4u; i++) {
+        if (i != 0u) {
+            port_log(",");
+        }
+        port_log_u32(g_irq_trace[i]);
+    }
+    if (g_irq_trace_len > 4u) {
+        port_log(",...");
+    }
+    port_log("\r\n");
+
+    ok = (g_irq_depth_max == 2u && g_irq_trace_len >= 4u &&
+          g_irq_trace[0] == 1u && g_irq_trace[1] == 2u &&
+          g_irq_trace[2] == (uint8_t)(0x80u | 2u) &&
+          g_irq_trace[3] == (uint8_t)(0x80u | 1u)) ? 1u : 0u;
+    port_log(ok ? "[嵌套] 通过：PA1 抢占 PA0\r\n" : "[嵌套] 不通过\r\n");
+
+    port_exti_unbind(0u);
+    port_exti_unbind(1u);
+}
+#endif
+
+#if JM_FAULT_DEMO
+void port_fault_demo_trigger(void)
+{
+    port_log("[故障] 自检：执行 UDF 触发 HardFault\r\n");
+    __asm volatile ("udf #0");
+}
+#endif
 
 /* ---------------- 运行时端口（jm_port.h） ---------------- */
 

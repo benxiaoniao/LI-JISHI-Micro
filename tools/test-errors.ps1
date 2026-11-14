@@ -70,6 +70,7 @@ try {
         @{ file = "文本插值缺右括号.jsh"; code = "E139"; stage = "编译" },
         @{ file = "文本插值空.jsh"; code = "E139"; stage = "编译" },
         @{ file = "文本插值表达式错.jsh"; code = "E109"; stage = "编译" },
+        @{ file = "标准库未导入.jsh"; code = "E112"; stage = "编译" },
         @{ file = "文本库参数类型.jsh"; code = "E010"; stage = "运行" },
         @{ file = "文本库下标类型.jsh"; code = "E013"; stage = "运行" },
         @{ file = "连接元素类型.jsh"; code = "E010"; stage = "运行" },
@@ -91,7 +92,16 @@ try {
         @{ file = "超初始化.jsh"; code = "E141"; stage = "编译" },
         @{ file = "超当值.jsh"; code = "E141"; stage = "编译" },
         @{ file = "超漏括号.jsh"; code = "E141"; stage = "编译" },
-        @{ file = "最终类.jsh"; code = "E103"; stage = "编译" }
+        @{ file = "最终类被继承.jsh"; code = "E142"; stage = "编译" },
+        @{ file = "最终方法被覆写.jsh"; code = "E142"; stage = "编译" },
+        @{ file = "最终初始化.jsh"; code = "E142"; stage = "编译" },
+        @{ file = "最终顶层函数.jsh"; code = "E142"; stage = "编译" },
+        @{ file = "最终修饰字段.jsh"; code = "E142"; stage = "编译" },
+        @{ file = "最终当值.jsh"; code = "E142"; stage = "编译" },
+        @{ file = "私有位置.jsh"; code = "E144"; stage = "编译" },
+        @{ file = "私有重复.jsh"; code = "E144"; stage = "编译" },
+        @{ file = "私有当值.jsh"; code = "E144"; stage = "编译" },
+        @{ file = "用.jsh"; code = "E103"; stage = "编译" }
     )
     $fail = 0
     foreach ($c in $cases) {

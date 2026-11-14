@@ -28,6 +28,8 @@ pub enum Kw {
     Class,
     Inherit,
     Super,
+    Final,
+    Private,
     New,
     SelfRef,
     Enum,
@@ -127,7 +129,8 @@ pub const KEYWORDS: &[(&str, Kw)] = &[
     ("情形", Kw::Case),
     ("断言", Kw::Assert),
     ("继承", Kw::Inherit),
-    ("最终", Kw::Unsupported("最终")),
+    ("最终", Kw::Final),
+    ("私有", Kw::Private),
     ("用", Kw::Unsupported("用")),
     ("超", Kw::Super),
 ];

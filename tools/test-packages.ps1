@@ -92,7 +92,7 @@ try {
 函数 问候(名)：
     返回 "你好，" + 名
 
-令 私有 = 99
+令 内部 = 99
 "@
     New-Pkg $tool $toml $src
     $toml = @"
@@ -157,6 +157,248 @@ try {
     $r = Invoke-Pack (Join-Path $root3 "应用")
     $out = Run-Jmb (Join-Path $root3 "应用\应用.jmb")
     Check "同名函数在不同包内共存" (($r.code -eq 0) -and ($out -eq "甲 乙")) ($r.out + "`n实际输出：" + $out)
+
+    # ---------- 3b. 跨包类型导出（LI016）：类/枚举显式写 [导出] 类型 ----------
+    $rootTypes = Join-Path $sandbox "类型导出"
+    $typeLib = Join-Path $rootTypes "类型库"
+    $toml = @"
+[包]
+名字 = "类型库"
+版本 = "1.0.0"
+
+[导出]
+名字 = ["描述"]
+类型 = ["计数器", "状态"]
+"@
+    $libSrc = @"
+类 计数器:
+    令 值 = 0
+    函数 初始化(起点):
+        本.值 = 起点
+    函数 加(n):
+        本.值 = 本.值 + n
+        返回 本.值
+    函数 读():
+        返回 本.值
+
+枚举 状态:
+    空闲
+    运行
+
+函数 描述():
+    返回 "库"
+"@
+    New-Pkg $typeLib $toml $libSrc
+    $typeApp = Join-Path $rootTypes "应用"
+    $toml = @"
+[包]
+名字 = "应用"
+版本 = "1.0.0"
+
+[依赖]
+类型库 = { 路径 = "../类型库", 版本 = "^1.0.0" }
+"@
+    $src = @"
+函数 使用(c: 类型库.计数器) -> 整数:
+    返回 c.读()
+
+令 c = 新建 类型库.计数器(10)
+打印("新建:", 使用(c))
+打印("加:", c.加(5))
+
+令 s = 类型库.状态.运行
+打印("枚举:", s)
+
+匹配 s:
+    情形 类型库.状态.空闲:
+        打印("匹配:空闲")
+    情形 类型库.状态.运行:
+        打印("匹配:运行")
+    情形 其他:
+        打印("匹配:其他")
+"@
+    New-Pkg $typeApp $toml $src
+    $o = (& $micc pack --目录 $typeApp --strict-type 2>&1 | Out-String)
+    $code = $LASTEXITCODE
+    $out = Run-Jmb (Join-Path $typeApp "应用.jmb")
+    $expect = "新建: 10`n加: 15`n枚举: 1`n匹配:运行"
+    Check "跨包类型：新建类 + 枚举 + 跨包类型标注（--strict-type）" (($code -eq 0) -and ($out -eq $expect)) ($o + "`n实际输出：" + $out)
+
+    # LI017：默认公开 —— 没写 [导出] 也能跨包用类/枚举/函数
+    $pubLib = Join-Path $rootTypes "公开库"
+    $toml = @"
+[包]
+名字 = "公开库"
+版本 = "1.0.0"
+"@
+    New-Pkg $pubLib $toml $libSrc
+    $pubApp = Join-Path $rootTypes "公开应用"
+    $toml = @"
+[包]
+名字 = "公开应用"
+版本 = "1.0.0"
+
+[依赖]
+公开库 = { 路径 = "../公开库", 版本 = "^1.0.0" }
+"@
+    $src = @"
+令 c = 新建 公开库.计数器(3)
+打印("默认公开:", c.读(), 公开库.状态.运行, 公开库.描述())
+"@
+    New-Pkg $pubApp $toml $src
+    $r = Invoke-Pack $pubApp
+    $out = Run-Jmb (Join-Path $pubApp "公开应用.jmb")
+    Check "默认公开：没写 [导出] 的类/枚举/函数可跨包" (($r.code -eq 0) -and ($out -eq "默认公开: 3 1 库")) ($r.out + "`n实际输出：" + $out)
+
+    # LI017：私有类/枚举/函数/令 一律不能跨包
+    $privLib = Join-Path $rootTypes "私有库"
+    $toml = @"
+[包]
+名字 = "私有库"
+版本 = "1.0.0"
+"@
+    $privSrc = @"
+类 公开类:
+    令 值 = 0
+
+私有 类 隐藏类:
+    令 值 = 0
+
+私有 枚举 隐藏状态:
+    甲
+    乙
+
+私有 函数 内部():
+    返回 1
+
+私有 令 秘密 = 42
+"@
+    New-Pkg $privLib $toml $privSrc
+    $privCases = @(
+        @{ name = "私有类"; src = "令 c = 新建 私有库.隐藏类()" },
+        @{ name = "私有枚举"; src = "打印(私有库.隐藏状态.甲)" },
+        @{ name = "私有函数"; src = "打印(私有库.内部())" },
+        @{ name = "私有令"; src = "打印(私有库.秘密)" }
+    )
+    foreach ($case in $privCases) {
+        $d = Join-Path $rootTypes ("私有应用-" + $case.name)
+        $toml = @"
+[包]
+名字 = "私有应用"
+版本 = "1.0.0"
+
+[依赖]
+私有库 = { 路径 = "../私有库", 版本 = "^1.0.0" }
+"@
+        New-Pkg $d $toml $case.src
+        $r = Invoke-Pack $d
+        Check-Error ($case.name + "不能跨包：E128") $r "E128" "私有声明"
+    }
+
+    # 私有声明写进 [导出]：E144
+    $conflict = Join-Path $rootTypes "冲突库"
+    $toml = @"
+[包]
+名字 = "冲突库"
+版本 = "1.0.0"
+
+[导出]
+名字 = ["内部"]
+类型 = ["隐藏类"]
+"@
+    New-Pkg $conflict $toml $privSrc
+    $conflictApp = Join-Path $rootTypes "冲突应用"
+    $toml = @"
+[包]
+名字 = "冲突应用"
+版本 = "1.0.0"
+
+[依赖]
+冲突库 = { 路径 = "../冲突库", 版本 = "^1.0.0" }
+"@
+    New-Pkg $conflictApp $toml '打印("x")'
+    $r = Invoke-Pack $conflictApp
+    Check-Error "私有声明写进 [导出]：E144" $r "E144" "私有"
+
+    # 接口清单：默认公开的类型/函数入清单，私有声明不入
+    $o = (& $micc interface --目录 $pubLib 2>&1 | Out-String)
+    $pubIf = Join-Path $pubLib "接口.toml"
+    $pubText = if (Test-Path $pubIf) { [IO.File]::ReadAllText($pubIf) } else { "" }
+    Check "interface：默认公开的类/枚举/函数都列出" (($LASTEXITCODE -eq 0) -and $pubText.Contains("[类.计数器]") -and $pubText.Contains("[枚举.状态]") -and $pubText.Contains("描述 = 0")) ($o + "`n" + $pubText)
+
+    $o = (& $micc interface --目录 $privLib 2>&1 | Out-String)
+    $privIf = Join-Path $privLib "接口.toml"
+    $privText = if (Test-Path $privIf) { [IO.File]::ReadAllText($privIf) } else { "" }
+    $privOk = ($LASTEXITCODE -eq 0) -and $privText.Contains("[类.公开类]") -and
+              (-not $privText.Contains("隐藏类")) -and (-not $privText.Contains("隐藏状态")) -and
+              (-not $privText.Contains("内部")) -and (-not $privText.Contains("秘密"))
+    Check "interface：私有类/枚举/函数不入清单" $privOk ($o + "`n" + $privText)
+
+    # LI018：标准库模块（导入 文本）不需要写进 [包] 原生
+    $stdLib = Join-Path $rootTypes "标准库包"
+    $toml = @"
+[包]
+名字 = "标准库包"
+版本 = "1.0.0"
+"@
+    New-Pkg $stdLib $toml @"
+导入 文本
+
+函数 首字(s):
+    返回 子串(s, 0, 1)
+"@
+    $stdApp = Join-Path $rootTypes "标准库应用"
+    $toml = @"
+[包]
+名字 = "标准库应用"
+版本 = "1.0.0"
+
+[依赖]
+标准库包 = { 路径 = "../标准库包", 版本 = "^1.0.0" }
+"@
+    New-Pkg $stdApp $toml '打印(标准库包.首字("砾石"))'
+    $r = Invoke-Pack $stdApp
+    $out = Run-Jmb (Join-Path $stdApp "标准库应用.jmb")
+    Check "标准库模块：导入 文本 不需要 [包] 原生" (($r.code -eq 0) -and ($out -eq "砾")) ($r.out + "`n实际输出：" + $out)
+
+    # 类名不能当值用
+    $valApp = Join-Path $rootTypes "值引用应用"
+    $toml = @"
+[包]
+名字 = "值引用应用"
+版本 = "1.0.0"
+
+[依赖]
+类型库 = { 路径 = "../类型库", 版本 = "^1.0.0" }
+"@
+    New-Pkg $valApp $toml "令 c = 类型库.计数器"
+    $r = Invoke-Pack $valApp
+    Check-Error "类名当值用：E128 提示改用 新建" $r "E128" "不能当值用"
+
+    # 接口清单：类 / 字段 / 方法 / 枚举；归档 verify 对照类表
+    $o = (& $micc interface --目录 $typeLib 2>&1 | Out-String)
+    $ifPath = Join-Path $typeLib "接口.toml"
+    $ifText = if (Test-Path $ifPath) { [IO.File]::ReadAllText($ifPath) } else { "" }
+    $ifOk = ($LASTEXITCODE -eq 0) -and $ifText.Contains("[类.计数器]") -and
+            $ifText.Contains('字段 = ["值"]') -and
+            $ifText.Contains('方法 = ["初始化/1", "加/1", "读/0"]') -and
+            $ifText.Contains("[枚举.状态]") -and $ifText.Contains('成员 = ["空闲", "运行"]')
+    Check "interface：表达类/字段/方法与枚举" $ifOk ($o + "`n" + $ifText)
+
+    & $micc pack --目录 $typeLib --归档 | Out-Null
+    $typeZip = Join-Path $typeLib "类型库-1.0.0.zip"
+    $v = (& $micc verify $typeZip 2>&1 | Out-String)
+    Check "verify 归档：接口里的类/方法对照类表通过" (($LASTEXITCODE -eq 0) -and $v.Contains("校验通过")) $v
+
+    $badIface = $ifText -replace "加/1", "加/2"
+    [IO.File]::WriteAllText($ifPath, $badIface, (New-Object System.Text.UTF8Encoding($false)))
+    $v = (& $micc verify $typeLib 2>&1 | Out-String)
+    $code = $LASTEXITCODE
+    Check-Error "接口方法参数个数不符：E137" @{ code = $code; out = $v } "E137" "参数个数不符"
+
+    & $micc interface --目录 $typeLib | Out-Null
+    $v = (& $micc verify $typeLib 2>&1 | Out-String)
+    Check "重新生成接口后类校验恢复通过" (($LASTEXITCODE -eq 0) -and $v.Contains("校验通过")) $v
 
     # ---------- 4. 菱形依赖（基础只装一份） ----------
     $root4 = Join-Path $sandbox "菱形"
@@ -267,7 +509,7 @@ try {
 [包]
 名字 = "工具"
 版本 = "1.0.0"
-原生ABI = 2
+原生ABI = 3
 "@
     $src = @"
 令 值 = 1
@@ -355,7 +597,7 @@ try {
 函数 加一(数)：
     返回 数 + 1
 
-令 私有 = 99
+令 内部 = 99
 "@
     New-Pkg (Join-Path $root10 "工具") $toml $src
     $toml = @"
@@ -367,7 +609,7 @@ try {
 工具 = { 路径 = "../工具", 版本 = "^1.0.0" }
 "@
     $src = @"
-打印(工具.私有)
+打印(工具.内部)
 "@
     New-Pkg (Join-Path $root10 "应用") $toml $src
     $r = Invoke-Pack (Join-Path $root10 "应用")
@@ -845,7 +1087,7 @@ try {
     Check-Error "接口列了不存在的函数：E137" @{ code = $code; out = $o } "E137" "没有这个代码对象"
 
     # 接口 ABI 不符
-    [IO.File]::WriteAllText($ifPath, ($ifText -replace "原生ABI = 1", "原生ABI = 2"), (New-Object System.Text.UTF8Encoding($false)))
+    [IO.File]::WriteAllText($ifPath, ($ifText -replace "原生ABI = 2", "原生ABI = 3"), (New-Object System.Text.UTF8Encoding($false)))
     $o = (& $micc verify $libDir 2>&1 | Out-String)
     $code = $LASTEXITCODE
     Check-Error "接口 ABI 不符：E137" @{ code = $code; out = $o } "E137" "原生ABI"

@@ -105,6 +105,8 @@ pub struct Manifest {
     pub product: Option<String>,
     /// `None` = 顶层名字全部导出。
     pub exports: Option<Vec<String>>,
+    /// `[导出] 类型`：可跨包的类/枚举名；`None` = 不导出任何类型。
+    pub export_types: Option<Vec<String>>,
     pub deps: Vec<(String, DepSpec)>,
 }
 
@@ -326,6 +328,7 @@ pub fn parse_manifest(path: &Path, text: &str) -> Result<Manifest> {
     let mut bytecode_limit: Option<usize> = None;
     let mut heap_budget: Option<usize> = None;
     let mut exports: Option<Vec<String>> = None;
+    let mut export_types: Option<Vec<String>> = None;
     let mut deps: Vec<(String, DepSpec)> = Vec::new();
 
     for (idx, raw) in text.lines().enumerate() {
@@ -458,19 +461,30 @@ pub fn parse_manifest(path: &Path, text: &str) -> Result<Manifest> {
                     },
                 ));
             }
-            "导出" => {
-                if key != "名字" {
+            "导出" => match key.as_str() {
+                "名字" => {
+                    if exports.is_some() {
+                        return Err(err(path, line_no, "[导出] 名字 重复声明"));
+                    }
+                    exports = Some(as_array(path, line_no, &key, value)?);
+                }
+                "类型" => {
+                    if export_types.is_some() {
+                        return Err(err(path, line_no, "[导出] 类型 重复声明"));
+                    }
+                    export_types = Some(as_array(path, line_no, &key, value)?);
+                }
+                other => {
                     return Err(err(
                         path,
                         line_no,
-                        format!("[导出] 里只写「名字 = [\"函数名\", ...]」，不认识的字段「{}」", key),
+                        format!(
+                            "[导出] 里只写「名字 = [...]」或「类型 = [...]」，不认识的字段「{}」",
+                            other
+                        ),
                     ));
                 }
-                if exports.is_some() {
-                    return Err(err(path, line_no, "[导出] 名字 重复声明"));
-                }
-                exports = Some(as_array(path, line_no, &key, value)?);
-            }
+            },
             _ => return Err(err(path, line_no, "键值对必须写在 [包] / [依赖] / [导出] 里")),
         }
     }
@@ -504,6 +518,7 @@ pub fn parse_manifest(path: &Path, text: &str) -> Result<Manifest> {
         heap_budget: heap_budget.unwrap_or(DEFAULT_HEAP_BUDGET),
         product,
         exports,
+        export_types,
         deps,
     })
 }
