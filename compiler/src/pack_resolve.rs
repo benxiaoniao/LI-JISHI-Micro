@@ -286,6 +286,7 @@ fn visit_index_online(
             ),
         ));
     }
+    manifest.check_native_abi()?;
     let got = dir_hash(&dir)?;
     if got != entry.hash {
         return Err(pkg_err(
@@ -355,6 +356,7 @@ pub fn resolve_offline(root_dir: &Path) -> Result<Tree> {
     }
 
     let root_manifest = Manifest::load(root_dir)?;
+    root_manifest.check_native_abi()?;
     let mut loaded: BTreeMap<String, Resolved> = BTreeMap::new();
     for (name, spec) in sorted_deps(&root_manifest.deps) {
         load_cached(root_dir, &name, &by_name, &mut loaded)?;
@@ -460,6 +462,7 @@ fn load_cached(
             ),
         ));
     }
+    manifest.check_native_abi()?;
     let got = dir_hash(&dir)?;
     if got != entry.hash {
         return Err(pkg_err(
@@ -541,6 +544,7 @@ fn topo_offline(
 /// 所有依赖都落到 `.砾/包/<名字>-<版本>`，最后写锁文件。
 pub fn install(root_dir: &Path, index_source: Option<&str>) -> Result<Vec<LockEntry>> {
     let root_manifest = Manifest::load(root_dir)?;
+    root_manifest.check_native_abi()?;
     let mut st = Installer {
         root_dir,
         cache_root: root_dir.join(LOCK_DIR).join(CACHE_DIR),
@@ -669,6 +673,7 @@ impl<'a> Installer<'a> {
         let dest = self
             .cache_root
             .join(format!("{}-{}", manifest.name, manifest.version));
+        manifest.check_native_abi()?;
         copy_package(&staging, &dest)?;
         let hash = dir_hash(&dest)?;
 

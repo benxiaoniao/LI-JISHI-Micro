@@ -116,6 +116,24 @@ impl Manifest {
         let text = read_text(&path)?;
         parse_manifest(&path, &text)
     }
+
+    /// 校验清单声明的 `原生ABI` 与当前编译器一致（E129）。
+    /// `install` 与 `pack` 共用同一口径与文案。
+    pub fn check_native_abi(&self) -> Result<()> {
+        let cur = crate::native_spec::NATIVE_ABI_VERSION;
+        if self.native_abi != cur {
+            return Err(CompileError::new(
+                "E129",
+                1,
+                1,
+                format!(
+                    "包「{}」要求 Native ABI v{}，当前编译器是 v{}；ABI 不一致，请用 v{} 重新打包（原生ABI = {}）",
+                    self.name, self.native_abi, cur, cur, cur
+                ),
+            ));
+        }
+        Ok(())
+    }
 }
 
 fn read_text(path: &Path) -> Result<String> {

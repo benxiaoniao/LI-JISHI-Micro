@@ -527,6 +527,34 @@ try {
     $r = Invoke-Pack (Join-Path $root7 "应用")
     Check-Error "native ABI 不一致：E129 拒绝" $r "E129" "ABI"
 
+    # ---------- 7.1 install 阶段 ABI 校验（LI022） ----------
+    $io = (& $micc install --目录 (Join-Path $root7 "应用") 2>&1 | Out-String)
+    Check-Error "install：路径依赖 ABI 不一致 → E129" @{ code = $LASTEXITCODE; out = $io } "E129" "ABI"
+
+    # 先按 ABI 2 正常安装，再把缓存里的清单改成 ABI 3，离线校验必须拒绝
+    $root7b = Join-Path $sandbox "ABI-offline"
+    $tomlOk = @"
+[包]
+名字 = "工具"
+版本 = "1.0.0"
+原生ABI = 2
+"@
+    New-Pkg (Join-Path $root7b "工具") $tomlOk $src
+    New-Pkg (Join-Path $root7b "应用") $toml $src
+    $app7b = Join-Path $root7b "应用"
+    $io = (& $micc install --目录 $app7b 2>&1 | Out-String)
+    $installed7b = ($LASTEXITCODE -eq 0)
+    Check "install：ABI 2 正常安装" $installed7b $io
+    if ($installed7b) {
+        $cached7b = Join-Path $app7b ".砾\包\工具-1.0.0\砾包.toml"
+        [IO.File]::WriteAllText($cached7b, $tomlBad, (New-Object System.Text.UTF8Encoding($true)))
+        $io = (& $micc install --目录 $app7b --离线 2>&1 | Out-String)
+        Check-Error "install --离线：缓存 ABI 不一致 → E129" @{ code = $LASTEXITCODE; out = $io } "E129" "ABI"
+    }
+    else {
+        Check-Error "install --离线：缓存 ABI 不一致 → E129" @{ code = 1; out = $io } "E129" "ABI"
+    }
+
     # ---------- 8. native 需求并集（依赖声明的模块对根包生效） ----------
     $root8 = Join-Path $sandbox "原生并集"
     $toml = @"

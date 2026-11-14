@@ -38,7 +38,7 @@
 | `docs/原生函数表.md:202` | 「7 张表登记成功」 | 6 张表 | 该行记录的是外部中断轮次，保留历史写法 |
 | `docs/原生函数表.md:220` | §11 表格里含 `task` 表 2 项 | 任务表已删除，改为操作码 | 已删掉 `task` 表 |
 | `docs/原生函数表.md:224` | 「七张表共 23 项（5+2+3+2+4+3+4）」 | 6 张表 / 21 项 | 已改为 **7 张表 / 28 项（5+2+6+4+3+4+4）** |
-| `docs/原生函数表.md:183` | 「锁文件记录该表的 ABI 版本……安装时若运行时不等于依赖声明，直接拒绝安装」 | 锁文件只有 `name/version/source/hash`，没有 abi；检查发生在**编译**（`compiler/src/pack.rs:159,345`，E129），`micc install` 不校验（`pack.rs:374-404`） | 已按实际改写 |
+| `docs/原生函数表.md:183` | 「锁文件记录该表的 ABI 版本……安装时若运行时不等于依赖声明，直接拒绝安装」 | 锁文件只有 `name/version/source/hash`，没有 abi；检查发生在**编译**（`compiler/src/pack.rs` 的 `check_native`，E129）与**安装**（`pack_resolve::install` / `verify_offline`，LI022） | 已按实际改写 |
 
 **2026-11-08 JM8 收尾更新**：`ipc_queue` 新增 1 项 `队列销毁`，基线为 **7 张表 / 29 项**（5+2+6+5+3+4+4），余 1 张表 / 35 项。`.jmb` 只存原生名字、id 是运行期内部约定，因此这是一次**加项、不升 ABI**；`docs/原生函数表.md` §11.5 与 §12.3 已同步。
 
@@ -203,7 +203,7 @@
 - `runtime/include/jm_native.h:19`（ABI=1）、`:31`（`MAX_ARGS 8`）、`:58-67`（签名与表项）、`:87-103`（值访问器）
 - `runtime/src/jm_internal.h:382`（`JM_NATIVE_ID_BASE 64`）
 - `compiler/src/native_spec.rs:18`（ABI 常量）、`:38` 起（`MODULES`）
-- `compiler/src/pack.rs:159, 341-355`（`check_native` / E129）、`:374-404`（install 不校验）
+- `compiler/src/pack.rs` 的 `check_native`（E129）、`pack_resolve::install` / `verify_offline`（LI022 起安装期也校验）
 - `compiler/src/pack_manifest.rs:101, 321, 480`（`native_abi` 字段与缺省）
 - `compiler/src/langcard.rs:633-657, 728-750, 1051-1076`（三字段与漂移检查）
 - `firmware/stm32f103/f103_native.c`、`runtime/port/host/jm_host_native.c`（各端口登记）
