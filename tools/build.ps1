@@ -6,7 +6,7 @@ $root = Split-Path -Parent $PSScriptRoot
 
 Push-Location $root
 try {
-    Write-Host "== 1/6 构建 micc（Rust）"
+    Write-Host "== 1/7 构建 micc（Rust）"
     # cargo 把进度（含 Finished）写到 stderr；Stop 会把任意 stderr 当成致命错误。
     # 这里只看退出码：成功时不打印噪声，失败时才把 cargo 输出带出来。
     $savedEap = $ErrorActionPreference
@@ -20,18 +20,18 @@ try {
     }
     $micc = "compiler/target/release/micc" + $ExeSuffix
 
-    Write-Host "== 2/6 校验原生表头（与 compiler/src/native_spec.rs 同源）"
+    Write-Host "== 2/7 校验原生表头（与 compiler/src/native_spec.rs 同源）"
     & $micc --check-native
     if ($LASTEXITCODE -ne 0) { throw "原生表头与规格不一致" }
 
-    Write-Host "== 3/6 生成操作码头文件"
+    Write-Host "== 3/7 生成操作码头文件"
     $header = & $micc --emit-header | Out-String
     [System.IO.File]::WriteAllText(
         "runtime/include/jm_opcodes.h",
         $header,
         (New-Object System.Text.UTF8Encoding($false)))
 
-    Write-Host "== 4/6 构建主机运行时"
+    Write-Host "== 4/7 构建主机运行时"
     if (-not $HostGcc) { throw "没有主机 gcc，无法构建 jmrun" }
     New-Item -ItemType Directory -Force -Path "build" | Out-Null
     # Linux/macOS 用 gnu99：-std=c99 会隐藏 POSIX 接口（popen / clock_gettime / nanosleep）。
@@ -47,7 +47,7 @@ try {
         -o ("build/jmrun" + $ExeSuffix)
     if ($LASTEXITCODE -ne 0) { throw "jmrun 构建失败" }
 
-    Write-Host "== 5/6 构建原生 ABI v2 主机回归"
+    Write-Host "== 5/7 构建原生 ABI v2 主机回归"
     & $HostGcc $stdFlag -Wall -Wextra -O2 `
         -I "runtime/include" -I "runtime/src" `
         "runtime/src/jm_heap.c" "runtime/src/jm_vm.c" "runtime/src/jm_builtin.c" `
@@ -59,7 +59,19 @@ try {
     & ("build/native-abi-v2" + $ExeSuffix)
     if ($LASTEXITCODE -ne 0) { throw "原生 ABI v2 回归失败" }
 
-    Write-Host "== 6/6 编译示例"
+    Write-Host "== 6/7 构建 native 表运行期主机回归"
+    & $HostGcc $stdFlag -Wall -Wextra -O2 `
+        -I "runtime/include" -I "runtime/src" `
+        "runtime/src/jm_heap.c" "runtime/src/jm_vm.c" "runtime/src/jm_builtin.c" `
+        "runtime/src/jm_loader.c" "runtime/src/jm_error.c" "runtime/src/jm_native.c" `
+        "runtime/src/jm_debug.c" "runtime/port/host/jm_port_host.c" `
+        "runtime/port/host/jm_host_native.c" "tests/native-host-runtime.c" `
+        -o ("build/native-host-runtime" + $ExeSuffix)
+    if ($LASTEXITCODE -ne 0) { throw "native 表运行期回归构建失败" }
+    & ("build/native-host-runtime" + $ExeSuffix)
+    if ($LASTEXITCODE -ne 0) { throw "native 表运行期回归失败" }
+
+    Write-Host "== 7/7 编译示例"
     Get-ChildItem "examples" -Filter "*.jsh" | ForEach-Object {
         $out = "build/" + $_.BaseName + ".jmb"
         & $micc ("examples/" + $_.Name) -o $out | Out-Null
