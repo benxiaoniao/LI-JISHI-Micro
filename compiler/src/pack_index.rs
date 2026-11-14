@@ -380,6 +380,25 @@ fn curl_download(url: &str, out: &Path) -> Result<()> {
     Ok(())
 }
 
+/// 是否 ZIP：按文件头「PK」+ 类型判断。
+///
+/// 不能只看扩展名——HTTP 索引下载的归档落在临时目录里叫 `包归档`，没有 `.zip` 后缀，
+/// 按扩展名会漏掉 Linux 上的 unzip 回退。
+fn is_zip_archive(path: &Path) -> bool {
+    use std::io::Read;
+    let mut magic = [0u8; 4];
+    match std::fs::File::open(path).and_then(|mut f| f.read_exact(&mut magic)) {
+        Ok(()) => {
+            magic[0] == b'P'
+                && magic[1] == b'K'
+                && ((magic[2] == 3 && magic[3] == 4)
+                    || (magic[2] == 5 && magic[3] == 6)
+                    || (magic[2] == 7 && magic[3] == 8))
+        }
+        Err(_) => false,
+    }
+}
+
 fn extract_archive(archive: &Path, dest: &Path) -> Result<()> {
     let tar_err = match std::process::Command::new("tar")
         .arg("-xf")
@@ -394,11 +413,7 @@ fn extract_archive(archive: &Path, dest: &Path) -> Result<()> {
     };
 
     // Linux 的 GNU tar 不能解 .zip（Windows/macOS 的 bsdtar 可以）；退回 unzip。
-    let is_zip = archive
-        .extension()
-        .map(|e| e.to_string_lossy().eq_ignore_ascii_case("zip"))
-        .unwrap_or(false);
-    if is_zip {
+    if is_zip_archive(archive) {
         match std::process::Command::new("unzip")
             .args(["-q", "-o"])
             .arg(archive)

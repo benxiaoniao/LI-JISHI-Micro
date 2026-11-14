@@ -13,54 +13,90 @@ int jm_host_native_register(void);
 
 #ifdef _WIN32
 #include <windows.h>
-/* argv 是系统 ANSI（中文 Windows 为 GBK）；输出前转成 UTF-8，避免中文路径乱码。 */
-static const char *u8arg(const char *s) {
-    static char buf[4][1024];
-    static int slot = 0;
-    char *out = buf[slot];
-    int wlen;
+#include <shellapi.h>
+
+/* UTF-8 → 宽字符；失败返回 NULL。 */
+static wchar_t *jm_wide(const char *s) {
+    int len = MultiByteToWideChar(CP_UTF8, 0, s, -1, NULL, 0);
     wchar_t *w;
-    int n;
-    slot = (slot + 1) & 3;
-    wlen = MultiByteToWideChar(CP_ACP, 0, s, -1, NULL, 0);
-    if (wlen <= 0) {
-        return s;
+    if (len <= 0) {
+        return NULL;
     }
-    w = (wchar_t *)malloc(sizeof(wchar_t) * (size_t)wlen);
+    w = (wchar_t *)malloc(sizeof(wchar_t) * (size_t)len);
     if (!w) {
-        return s;
+        return NULL;
     }
-    MultiByteToWideChar(CP_ACP, 0, s, -1, w, wlen);
-    n = WideCharToMultiByte(CP_UTF8, 0, w, -1, out, (int)sizeof buf[0], NULL, NULL);
-    free(w);
-    return n > 0 ? out : s;
+    if (MultiByteToWideChar(CP_UTF8, 0, s, -1, w, len) <= 0) {
+        free(w);
+        return NULL;
+    }
+    return w;
 }
 
-/* 反向：内部是 UTF-8（源码名、规格都是），交给 cmd.exe/micc 的马必须转回 ANSI。 */
-static const char *a8arg(const char *s) {
-    static char buf[2][1024];
-    static int slot = 0;
-    char *out = buf[slot];
-    int wlen;
-    wchar_t *w;
-    int n;
-    slot = (slot + 1) & 1;
-    wlen = MultiByteToWideChar(CP_UTF8, 0, s, -1, NULL, 0);
-    if (wlen <= 0) {
-        return s;
+/* 默认 main 的 argv 是系统 ANSI（CP_ACP）：en-US 的 runner 上中文路径会变成 '?'，
+   .jmb 直接打不开。这里用系统 Unicode 命令行重建一份 UTF-8 的 argv。 */
+static char **jm_utf8_argv(int *out_argc) {
+    int n = 0;
+    wchar_t **wargs = CommandLineToArgvW(GetCommandLineW(), &n);
+    char **out;
+    if (!wargs || n <= 0) {
+        return NULL;
     }
-    w = (wchar_t *)malloc(sizeof(wchar_t) * (size_t)wlen);
-    if (!w) {
-        return s;
+    out = (char **)calloc((size_t)n + 1, sizeof(char *));
+    if (!out) {
+        LocalFree(wargs);
+        return NULL;
     }
-    MultiByteToWideChar(CP_UTF8, 0, s, -1, w, wlen);
-    n = WideCharToMultiByte(CP_ACP, 0, w, -1, out, (int)sizeof buf[0], NULL, NULL);
-    free(w);
-    return n > 0 ? out : s;
+    for (int i = 0; i < n; i++) {
+        int len = WideCharToMultiByte(CP_UTF8, 0, wargs[i], -1, NULL, 0, NULL, NULL);
+        if (len > 0) {
+            out[i] = (char *)malloc((size_t)len);
+            if (out[i]) {
+                WideCharToMultiByte(CP_UTF8, 0, wargs[i], -1, out[i], len, NULL, NULL);
+            }
+        }
+        if (!out[i]) {
+            out[i] = (char *)"";
+        }
+    }
+    out[n] = NULL;
+    LocalFree(wargs);
+    *out_argc = n;
+    return out;
 }
+
+/* Windows 的 fopen 走 ANSI；中文文件名在非中文 locale 上打不开，先转宽字符。 */
+static FILE *jm_open_utf8(const char *path, const char *mode) {
+    wchar_t *wpath = jm_wide(path);
+    wchar_t *wmode = jm_wide(mode);
+    FILE *f = NULL;
+    if (wpath && wmode) {
+        f = _wfopen(wpath, wmode);
+    }
+    free(wpath);
+    free(wmode);
+    return f ? f : fopen(path, mode);
+}
+
+/* 管道调 micc：命令行里带中文路径，同样转宽字符走 _wpopen。 */
+static FILE *jm_popen_utf8(const char *cmd, const char *mode) {
+    wchar_t *wcmd = jm_wide(cmd);
+    wchar_t *wmode = jm_wide(mode);
+    FILE *p = NULL;
+    if (wcmd && wmode) {
+        p = _wpopen(wcmd, wmode);
+    }
+    free(wcmd);
+    free(wmode);
+    return p ? p : popen(cmd, mode);
+}
+
+/* argv 已经是 UTF-8，打印时不用再转。 */
+#define u8arg(s) (s)
 #else
 #define u8arg(s) (s)
-#define a8arg(s) (s)
+#define jm_open_utf8(path, mode) fopen((path), (mode))
+#define jm_popen_utf8(cmd, mode) popen((cmd), (mode))
 #endif
 
 #ifdef JM_HOST_DEBUG
@@ -92,7 +128,7 @@ static int micc_query(const char *args, char *out, size_t cap) {
     } else {
         snprintf(cmd, sizeof cmd, "%s %s 2>&1", mp, args);
     }
-    FILE *p = popen(cmd, "r");
+    FILE *p = jm_popen_utf8(cmd, "r");
     if (!p) {
         return -1;
     }
@@ -155,7 +191,7 @@ static int resolve_line(const char *spec, int *out_code, int *out_off) {
     }
     char args[768];
     char raw[1024];
-    snprintf(args, sizeof args, "--lines-of \"%s\" \"%s\" %d", g_jmb, a8arg(file), line);
+    snprintf(args, sizeof args, "--lines-of \"%s\" \"%s\" %d", g_jmb, file, line);
     if (micc_query(args, raw, sizeof raw) != 0) {
         return -1;
     }
@@ -972,7 +1008,18 @@ static int dbg_repl(void) {
 int main(int argc, char **argv) {
     const char *path = NULL;
     const char *brks[DBG_MAX_BP];
-    static char brk_store[DBG_MAX_BP][640]; /* argv 是 ANSI，先转 UTF-8 再解析规格 */
+    static char brk_store[DBG_MAX_BP][640]; /* 断点规格（UTF-8） */
+#ifdef _WIN32
+    /* 默认 argv 是 ANSI；换成 Unicode 命令行重建的 UTF-8 版本。 */
+    {
+        int u8argc = 0;
+        char **u8argv = jm_utf8_argv(&u8argc);
+        if (u8argv) {
+            argc = u8argc;
+            argv = u8argv;
+        }
+    }
+#endif
     int nbrks = 0;
     int task = -1;
     int dbg = 0;
@@ -1073,7 +1120,7 @@ int main(int argc, char **argv) {
             fprintf(stderr, "--break-file 只能与 --dbg 一起用\n");
             return 2;
         }
-        FILE *bf = fopen(bpfile, "rb");
+        FILE *bf = jm_open_utf8(bpfile, "rb");
         if (!bf) {
             fprintf(stderr, "打不开断点脚本 %s\n", u8arg(bpfile));
             return 2;
@@ -1117,7 +1164,7 @@ int main(int argc, char **argv) {
     }
 #endif
 
-    FILE *f = fopen(path, "rb");
+    FILE *f = jm_open_utf8(path, "rb");
     if (!f) {
         fprintf(stderr, "打不开 %s\n", u8arg(path));
         return 2;
