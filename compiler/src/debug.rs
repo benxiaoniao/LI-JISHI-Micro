@@ -362,19 +362,38 @@ impl Image {
 
     pub fn file_id(&self, name: &str) -> Option<u8> {
         let d = self.debug.as_ref()?;
-        let norm = name.replace('\\', "/");
-        let norm = norm.trim_start_matches("//?/");
+        let norm = norm_debug_path(name);
+        // 调试表里存的是编译期 `canonicalize` 后的路径（可能相对 cwd）；macOS 的
+        // /var 是指向 /private/var 的符号链接，Windows 也可能走 junction，
+        // 所以两边都规范化成 canonical 再比，找不到文件时退回字符串比较。
+        let canon = canonical_key(name);
+        // 绝对路径的尾部匹配要去掉开头 `/`，否则 `/private/var/x` 对 `/var/x`
+        // 会拼成 `//var/x` 而匹配不上（macOS 的 /var 正好是软链）。
+        let tail = norm.trim_start_matches('/');
         d.files
             .iter()
             .position(|f| {
-                let f = f.replace('\\', "/");
-                let f = f.trim_start_matches("//?/");
-                f == norm
-                    || f.ends_with(&format!("/{}", norm))
-                    || norm.ends_with(&format!("/{}", f))
+                let nf = norm_debug_path(f);
+                nf == norm
+                    || (canon.is_some() && canon == canonical_key(f))
+                    || nf.ends_with(&format!("/{}", tail))
+                    || norm.ends_with(&format!("/{}", nf))
             })
             .map(|i| i as u8)
     }
+}
+
+/// 调试表路径比较用：统一用 `/`，去掉 Windows 的 `//?/` 前缀。
+fn norm_debug_path(s: &str) -> String {
+    let s = s.replace('\\', "/");
+    s.strip_prefix("//?/").unwrap_or(&s).to_string()
+}
+
+/// 路径的 canonical 形式（解析符号链接 / junction）；文件不存在时返回 `None`。
+fn canonical_key(p: &str) -> Option<String> {
+    std::fs::canonicalize(p)
+        .ok()
+        .map(|q| norm_debug_path(&q.to_string_lossy()))
 }
 
 /// 某一行的指令范围（用于反查）。
