@@ -123,3 +123,31 @@ jobs:
         run: |
           [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
           ./tools/test-packages.ps1
+
+  cross-platform:
+    name: 跨平台回归（${{ matrix.os }}）
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - name: 检出
+        uses: actions/checkout@v4
+
+      - name: 安装 Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: 安装主机 gcc（Linux）
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y gcc unzip
+
+      - name: 主机构建 + 五套回归 + 规范校验
+        shell: pwsh
+        run: |
+          [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+          ./tools/build.ps1
+          ./compiler/target/release/micc --check-langcard
+          ./compiler/target/release/micc --check-native

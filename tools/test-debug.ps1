@@ -4,15 +4,16 @@
 #       就起不来（零输出，报 sandbox backend failed），与用例无关（见 docs/JM10 方案 §7.3）。
 $ErrorActionPreference = "Continue"
 $root = Split-Path -Parent $PSScriptRoot
+. (Join-Path $PSScriptRoot "toolchains.ps1")
 
 Push-Location $root
 try {
-    $micc = "compiler\target\release\micc.exe"
-    $jmrun = "build\jmrun.exe"
-    if (-not (Test-Path $micc)) { throw "先运行 tools\build.ps1" }
-    if (-not (Test-Path $jmrun)) { throw "先运行 tools\build.ps1（缺 build\jmrun.exe）" }
+    $micc = Join-Path $root ("compiler/target/release/micc" + $ExeSuffix)
+    $jmrun = Join-Path $root ("build/jmrun" + $ExeSuffix)
+    if (-not (Test-Path $micc)) { throw "先运行 tools/build.ps1" }
+    if (-not (Test-Path $jmrun)) { throw "先运行 tools/build.ps1（缺 build/jmrun）" }
 
-    $sandbox = Join-Path $env:TEMP ("li-debug-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
+    $sandbox = Join-Path ([IO.Path]::GetTempPath()) ("li-debug-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
     New-Item -ItemType Directory -Path $sandbox | Out-Null
     $script:fail = 0
     $script:total = 0
@@ -315,7 +316,7 @@ try {
     Check "断点超过 8 个明确拒绝" (($r.code -eq 2) -and ($r.text -match "断点最多 8 个")) $r.text
 
     # ---------- 10. M2：--task 会话过滤 ----------
-    $taskJmb = "build\任务.jmb"
+    $taskJmb = "build/任务.jmb"
     if (Test-Path $taskJmb) {
         $r = DbgRun "c`nq" @("--dbg", "--break", "任务.jsh:5", "--task", "1", $taskJmb)
         Check "--task 1 停在子任务（子甲）" `
@@ -331,7 +332,7 @@ try {
         Check "--task 1 已结束：提示一次且不再停" `
             (($r.code -eq 0) -and ($r.text -match "任务 1 已结束") -and ($r.text -notmatch "暂停：")) $r.text
     } else {
-        Check "--task 相关用例（缺 build\任务.jmb）" $false "先运行 tools\build.ps1"
+        Check "--task 相关用例（缺 build/任务.jmb）" $false "先运行 tools\build.ps1"
     }
 
     # ---------- 11. M3：条件断点 / 命中计数 / 断点脚本文件 ----------

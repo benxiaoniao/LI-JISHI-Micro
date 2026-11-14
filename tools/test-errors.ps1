@@ -1,10 +1,11 @@
 ﻿$ErrorActionPreference = "Continue"
 $root = Split-Path -Parent $PSScriptRoot
+. (Join-Path $PSScriptRoot "toolchains.ps1")
 
 Push-Location $root
 try {
-    $micc = "compiler\target\release\micc.exe"
-    $jmrun = "build\jmrun.exe"
+    $micc = Join-Path $root ("compiler/target/release/micc" + $ExeSuffix)
+    $jmrun = Join-Path $root ("build/jmrun" + $ExeSuffix)
     $cases = @(
         @{ file = "除零.jsh";       code = "E007"; stage = "运行" },
         @{ file = "小数除零.jsh";   code = "E007"; stage = "运行" },
@@ -105,8 +106,8 @@ try {
     )
     $fail = 0
     foreach ($c in $cases) {
-        $src = "tests\errors\" + $c.file
-        $jmb = "build\err_" + [IO.Path]::GetFileNameWithoutExtension($c.file) + ".jmb"
+        $src = "tests/errors/" + $c.file
+        $jmb = "build/err_" + [IO.Path]::GetFileNameWithoutExtension($c.file) + ".jmb"
         $out = (& $micc $src -o $jmb 2>&1 | Out-String)
         if ($LASTEXITCODE -eq 0) {
             $out += (& $jmrun $jmb 2>&1 | Out-String)

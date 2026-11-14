@@ -1,26 +1,27 @@
 ﻿$ErrorActionPreference = "Continue"
 $root = Split-Path -Parent $PSScriptRoot
+. (Join-Path $PSScriptRoot "toolchains.ps1")
 
 Push-Location $root
 try {
-    $micc = "compiler\target\release\micc.exe"
-    $jmrun = "build\jmrun.exe"
-    if (-not (Test-Path $jmrun)) { throw "先运行 tools\build.ps1" }
+    $micc = Join-Path $root ("compiler/target/release/micc" + $ExeSuffix)
+    $jmrun = Join-Path $root ("build/jmrun" + $ExeSuffix)
+    if (-not (Test-Path $jmrun)) { throw "先运行 tools/build.ps1" }
 
     $fail = 0
     $total = 0
     Get-ChildItem "examples" -Filter "*.jsh" | Sort-Object Name | ForEach-Object {
         $total++
         $name = $_.BaseName
-        $jmb = "build\" + $name + ".jmb"
-        & $micc ("examples\" + $_.Name) -o $jmb | Out-Null
+        $jmb = "build/" + $name + ".jmb"
+        & $micc ("examples/" + $_.Name) -o $jmb | Out-Null
         if ($LASTEXITCODE -ne 0) {
             Write-Host ("[编译失败] " + $_.Name)
             $fail++
             return
         }
         $actual = ((& $jmrun $jmb 2>&1 | Out-String).TrimEnd() -replace "`r`n", "`n")
-        $gold = "tests\expected\" + $name + ".txt"
+        $gold = "tests/expected/" + $name + ".txt"
         if (-not (Test-Path $gold)) {
             Write-Host ("[缺少基准] " + $name + " —— 把实际输出存进 " + $gold)
             $fail++
@@ -39,18 +40,18 @@ try {
         }
     }
     # ---------- N6：--emit-blob（固件内嵌字节数组） ----------
-    $blobJmb = "build\你好.jmb"
+    $blobJmb = "build/你好.jmb"
     if (Test-Path $blobJmb) {
-        Remove-Item "build\jm_blob.c" -Force -ErrorAction SilentlyContinue
+        Remove-Item "build/jm_blob.c" -Force -ErrorAction SilentlyContinue
         & $micc --emit-blob $blobJmb | Out-Null
         $total++
-        if (($LASTEXITCODE -eq 0) -and (Test-Path "build\jm_blob.c")) {
+        if (($LASTEXITCODE -eq 0) -and (Test-Path "build/jm_blob.c")) {
             Write-Host "[通过] emit-blob 默认输出同目录 jm_blob.c"
         } else {
             Write-Host "[不通过] emit-blob 默认输出同目录 jm_blob.c"
             $fail++
         }
-        $text = Get-Content "build\jm_blob.c" -Raw -Encoding UTF8
+        $text = Get-Content "build/jm_blob.c" -Raw -Encoding UTF8
         $len = (Get-Item $blobJmb).Length
         $total++
         if (($text -match "const unsigned char jm_app_jmb\[\]") -and
@@ -60,7 +61,7 @@ try {
             Write-Host "[不通过] emit-blob 符号名与内嵌长度一致"
             $fail++
         }
-        $out2 = "build\jm_blob-指定.c"
+        $out2 = "build/jm_blob-指定.c"
         & $micc --emit-blob $blobJmb -o $out2 | Out-Null
         $total++
         if (($LASTEXITCODE -eq 0) -and (Test-Path $out2)) {
@@ -81,9 +82,9 @@ try {
 
     # ---------- N22 前置：引脚 0–47 的越界错误（运行期 E030） ----------
     $enc = New-Object System.Text.UTF8Encoding($false)
-    [IO.File]::WriteAllText((Join-Path $root "build\pin-bad.jsh"), "导入 引脚`n引脚写(48, 1)`n", $enc)
-    & $micc "build\pin-bad.jsh" -o "build\pin-bad.jmb" | Out-Null
-    $o = (& $jmrun "build\pin-bad.jmb" 2>&1 | Out-String)
+    [IO.File]::WriteAllText((Join-Path $root "build/pin-bad.jsh"), "导入 引脚`n引脚写(48, 1)`n", $enc)
+    & $micc "build/pin-bad.jsh" -o "build/pin-bad.jmb" | Out-Null
+    $o = (& $jmrun "build/pin-bad.jmb" 2>&1 | Out-String)
     $code = $LASTEXITCODE
     $total++
     if (($code -ne 0) -and $o.Contains("E030")) {
@@ -94,9 +95,9 @@ try {
         $fail++
     }
 
-    [IO.File]::WriteAllText((Join-Path $root "build\pin-neg.jsh"), "导入 引脚`n引脚读(-1)`n", $enc)
-    & $micc "build\pin-neg.jsh" -o "build\pin-neg.jmb" | Out-Null
-    $o = (& $jmrun "build\pin-neg.jmb" 2>&1 | Out-String)
+    [IO.File]::WriteAllText((Join-Path $root "build/pin-neg.jsh"), "导入 引脚`n引脚读(-1)`n", $enc)
+    & $micc "build/pin-neg.jsh" -o "build/pin-neg.jmb" | Out-Null
+    $o = (& $jmrun "build/pin-neg.jmb" 2>&1 | Out-String)
     $code = $LASTEXITCODE
     $total++
     if (($code -ne 0) -and $o.Contains("E030")) {
@@ -108,8 +109,8 @@ try {
     }
 
     # ---------- N11：枚举/匹配 的编译期错误（E139） ----------
-    [IO.File]::WriteAllText((Join-Path $root "build\enum-bad.jsh"), "枚举 颜色:`n    红`n    绿`n`n打印(颜色.紫)`n", $enc)
-    $o = (& $micc "build\enum-bad.jsh" -o "build\enum-bad.jmb" 2>&1 | Out-String)
+    [IO.File]::WriteAllText((Join-Path $root "build/enum-bad.jsh"), "枚举 颜色:`n    红`n    绿`n`n打印(颜色.紫)`n", $enc)
+    $o = (& $micc "build/enum-bad.jsh" -o "build/enum-bad.jmb" 2>&1 | Out-String)
     $code = $LASTEXITCODE
     $total++
     if (($code -ne 0) -and $o.Contains("E139")) {
@@ -120,8 +121,8 @@ try {
         $fail++
     }
 
-    [IO.File]::WriteAllText((Join-Path $root "build\match-dup.jsh"), "枚举 颜色:`n    红`n    绿`n`n匹配 0:`n    情形 0:`n        打印(1)`n    情形 颜色.红:`n        打印(2)`n", $enc)
-    $o = (& $micc "build\match-dup.jsh" -o "build\match-dup.jmb" 2>&1 | Out-String)
+    [IO.File]::WriteAllText((Join-Path $root "build/match-dup.jsh"), "枚举 颜色:`n    红`n    绿`n`n匹配 0:`n    情形 0:`n        打印(1)`n    情形 颜色.红:`n        打印(2)`n", $enc)
+    $o = (& $micc "build/match-dup.jsh" -o "build/match-dup.jmb" 2>&1 | Out-String)
     $code = $LASTEXITCODE
     $total++
     if (($code -ne 0) -and $o.Contains("E139")) {
@@ -133,24 +134,24 @@ try {
     }
 
     # ---------- N11：枚举跨包隔离（依赖包枚举改名，根包不可直接引用） ----------
-    $pkgRoot = Join-Path $root "build\n11pkg"
+    $pkgRoot = Join-Path $root "build/n11pkg"
     foreach ($d in @("甲", "乙", "应用", "坏应用")) {
         New-Item -ItemType Directory -Force -Path (Join-Path $pkgRoot $d) | Out-Null
     }
-    [IO.File]::WriteAllText((Join-Path $pkgRoot "甲\砾包.toml"), "[包]`n名字 = ""甲""`n版本 = ""1.0.0""`n入口 = ""主.jsh""`n`n[导出]`n名字 = [""颜色名""]`n", $enc)
-    [IO.File]::WriteAllText((Join-Path $pkgRoot "甲\主.jsh"), "枚举 颜色:`n    红`n    绿`n`n函数 颜色名(k):`n    匹配 k:`n        情形 颜色.绿:`n            返回 ""绿""`n        情形 其他:`n            返回 ""其他""`n", $enc)
-    [IO.File]::WriteAllText((Join-Path $pkgRoot "乙\砾包.toml"), "[包]`n名字 = ""乙""`n版本 = ""1.0.0""`n入口 = ""主.jsh""`n", $enc)
-    [IO.File]::WriteAllText((Join-Path $pkgRoot "乙\主.jsh"), "枚举 颜色:`n    绿`n    蓝`n", $enc)
-    [IO.File]::WriteAllText((Join-Path $pkgRoot "应用\砾包.toml"), "[包]`n名字 = ""应用""`n版本 = ""1.0.0""`n入口 = ""主.jsh""`n`n[依赖]`n甲 = { 路径 = ""../甲"", 版本 = ""^1.0.0"" }`n乙 = { 路径 = ""../乙"", 版本 = ""^1.0.0"" }`n", $enc)
-    [IO.File]::WriteAllText((Join-Path $pkgRoot "应用\主.jsh"), "枚举 颜色:`n    蓝`n`n打印(颜色.蓝)`n打印(甲.颜色名(1))`n", $enc)
-    [IO.File]::WriteAllText((Join-Path $pkgRoot "坏应用\砾包.toml"), "[包]`n名字 = ""坏应用""`n版本 = ""1.0.0""`n入口 = ""主.jsh""`n`n[依赖]`n甲 = { 路径 = ""../甲"", 版本 = ""^1.0.0"" }`n", $enc)
-    [IO.File]::WriteAllText((Join-Path $pkgRoot "坏应用\主.jsh"), "打印(颜色.红)`n", $enc)
+    [IO.File]::WriteAllText((Join-Path $pkgRoot "甲/砾包.toml"), "[包]`n名字 = ""甲""`n版本 = ""1.0.0""`n入口 = ""主.jsh""`n`n[导出]`n名字 = [""颜色名""]`n", $enc)
+    [IO.File]::WriteAllText((Join-Path $pkgRoot "甲/主.jsh"), "枚举 颜色:`n    红`n    绿`n`n函数 颜色名(k):`n    匹配 k:`n        情形 颜色.绿:`n            返回 ""绿""`n        情形 其他:`n            返回 ""其他""`n", $enc)
+    [IO.File]::WriteAllText((Join-Path $pkgRoot "乙/砾包.toml"), "[包]`n名字 = ""乙""`n版本 = ""1.0.0""`n入口 = ""主.jsh""`n", $enc)
+    [IO.File]::WriteAllText((Join-Path $pkgRoot "乙/主.jsh"), "枚举 颜色:`n    绿`n    蓝`n", $enc)
+    [IO.File]::WriteAllText((Join-Path $pkgRoot "应用/砾包.toml"), "[包]`n名字 = ""应用""`n版本 = ""1.0.0""`n入口 = ""主.jsh""`n`n[依赖]`n甲 = { 路径 = ""../甲"", 版本 = ""^1.0.0"" }`n乙 = { 路径 = ""../乙"", 版本 = ""^1.0.0"" }`n", $enc)
+    [IO.File]::WriteAllText((Join-Path $pkgRoot "应用/主.jsh"), "枚举 颜色:`n    蓝`n`n打印(颜色.蓝)`n打印(甲.颜色名(1))`n", $enc)
+    [IO.File]::WriteAllText((Join-Path $pkgRoot "坏应用/砾包.toml"), "[包]`n名字 = ""坏应用""`n版本 = ""1.0.0""`n入口 = ""主.jsh""`n`n[依赖]`n甲 = { 路径 = ""../甲"", 版本 = ""^1.0.0"" }`n", $enc)
+    [IO.File]::WriteAllText((Join-Path $pkgRoot "坏应用/主.jsh"), "打印(颜色.红)`n", $enc)
 
-    & $micc pack --目录 "build\n11pkg\应用" -o "build\n11pkg\应用.jmb" | Out-Null
+    & $micc pack --目录 "build/n11pkg/应用" -o "build/n11pkg/应用.jmb" | Out-Null
     $packCode = $LASTEXITCODE
     $pkgOut = ""
     if ($packCode -eq 0) {
-        $pkgOut = ((& $jmrun "build\n11pkg\应用.jmb" 2>&1 | Out-String).TrimEnd() -replace "`r`n", "`n")
+        $pkgOut = ((& $jmrun "build/n11pkg/应用.jmb" 2>&1 | Out-String).TrimEnd() -replace "`r`n", "`n")
     }
     $total++
     if (($packCode -eq 0) -and ($pkgOut -eq "0`n绿")) {
@@ -161,7 +162,7 @@ try {
         $fail++
     }
 
-    $o = (& $micc pack --目录 "build\n11pkg\坏应用" -o "build\n11pkg\坏应用.jmb" 2>&1 | Out-String)
+    $o = (& $micc pack --目录 "build/n11pkg/坏应用" -o "build/n11pkg/坏应用.jmb" 2>&1 | Out-String)
     $code = $LASTEXITCODE
     $total++
     if (($code -ne 0) -and $o.Contains("E128")) {
@@ -173,21 +174,21 @@ try {
     }
 
     # ---------- LI004：断言与 --no-assert ----------
-    & $micc "examples\断言.jsh" -o "build\assert-on.jmb" | Out-Null
+    & $micc "examples/断言.jsh" -o "build/assert-on.jmb" | Out-Null
     $onCode = $LASTEXITCODE
     $onOut = ""
     $onSize = 0
     if ($onCode -eq 0) {
-        $onOut = ((& $jmrun "build\assert-on.jmb" 2>&1 | Out-String).TrimEnd() -replace "`r`n", "`n")
-        $onSize = (Get-Item "build\assert-on.jmb").Length
+        $onOut = ((& $jmrun "build/assert-on.jmb" 2>&1 | Out-String).TrimEnd() -replace "`r`n", "`n")
+        $onSize = (Get-Item "build/assert-on.jmb").Length
     }
-    & $micc "examples\断言.jsh" -o "build\assert-off.jmb" --no-assert | Out-Null
+    & $micc "examples/断言.jsh" -o "build/assert-off.jmb" --no-assert | Out-Null
     $offCode = $LASTEXITCODE
     $offOut = ""
     $offSize = 0
     if ($offCode -eq 0) {
-        $offOut = ((& $jmrun "build\assert-off.jmb" 2>&1 | Out-String).TrimEnd() -replace "`r`n", "`n")
-        $offSize = (Get-Item "build\assert-off.jmb").Length
+        $offOut = ((& $jmrun "build/assert-off.jmb" 2>&1 | Out-String).TrimEnd() -replace "`r`n", "`n")
+        $offSize = (Get-Item "build/assert-off.jmb").Length
     }
     $total++
     if (($onCode -eq 0) -and ($onOut -eq "42`n捕获1 n 不能为负`n捕获2 断言失败`n继续") -and
@@ -201,9 +202,9 @@ try {
         $fail++
     }
 
-    [IO.File]::WriteAllText((Join-Path $root "build\assert-uncaught.jsh"), "断言 假, ""坏输入""`n", $enc)
-    & $micc "build\assert-uncaught.jsh" -o "build\assert-uncaught.jmb" | Out-Null
-    $o = (& $jmrun "build\assert-uncaught.jmb" 2>&1 | Out-String)
+    [IO.File]::WriteAllText((Join-Path $root "build/assert-uncaught.jsh"), "断言 假, ""坏输入""`n", $enc)
+    & $micc "build/assert-uncaught.jsh" -o "build/assert-uncaught.jmb" | Out-Null
+    $o = (& $jmrun "build/assert-uncaught.jmb" 2>&1 | Out-String)
     $code = $LASTEXITCODE
     $total++
     if (($code -ne 0) -and $o.Contains("E027") -and $o.Contains("坏输入")) {
@@ -215,12 +216,12 @@ try {
     }
 
     # ---------- LI015：--strict-type ----------
-    $strictGold = ((Get-Content "tests\expected\类型标注.txt" -Raw -Encoding UTF8).TrimEnd() -replace "`r`n", "`n")
-    & $micc "examples\类型标注.jsh" -o "build\类型标注-strict.jmb" --strict-type | Out-Null
+    $strictGold = ((Get-Content "tests/expected/类型标注.txt" -Raw -Encoding UTF8).TrimEnd() -replace "`r`n", "`n")
+    & $micc "examples/类型标注.jsh" -o "build/类型标注-strict.jmb" --strict-type | Out-Null
     $strictCode = $LASTEXITCODE
     $strictOut = ""
     if ($strictCode -eq 0) {
-        $strictOut = ((& $jmrun "build\类型标注-strict.jmb" 2>&1 | Out-String).TrimEnd() -replace "`r`n", "`n")
+        $strictOut = ((& $jmrun "build/类型标注-strict.jmb" 2>&1 | Out-String).TrimEnd() -replace "`r`n", "`n")
     }
     $total++
     if (($strictCode -eq 0) -and ($strictOut -eq $strictGold)) {
@@ -238,8 +239,8 @@ try {
         @{ file = "strict-new.jsh"; src = "类 甲:`n    令 v = 0`n    函数 初始化(a: 整数):`n        本.v = a`n令 c = 新建 甲(""坏"")`n"; why = "构造实参类型不符" }
     )
     foreach ($c in $strictBad) {
-        [IO.File]::WriteAllText((Join-Path $root ("build\" + $c.file)), $c.src, $enc)
-        $o = (& $micc ("build\" + $c.file) -o "build\strict.jmb" --strict-type 2>&1 | Out-String)
+        [IO.File]::WriteAllText((Join-Path $root ("build/" + $c.file)), $c.src, $enc)
+        $o = (& $micc ("build/" + $c.file) -o "build/strict.jmb" --strict-type 2>&1 | Out-String)
         $total++
         if (($LASTEXITCODE -ne 0) -and $o.Contains("E143")) {
             Write-Host ("[通过] --strict-type " + $c.why + " 报 E143")
@@ -251,8 +252,8 @@ try {
     }
 
     # 默认保持宽松：同样的“实参类型不符”不加开关仍能编过
-    [IO.File]::WriteAllText((Join-Path $root "build\strict-lax.jsh"), "函数 取(x: 整数) -> 整数:`n    返回 x`n打印(取(""坏""))`n", $enc)
-    & $micc "build\strict-lax.jsh" -o "build\strict-lax.jmb" | Out-Null
+    [IO.File]::WriteAllText((Join-Path $root "build/strict-lax.jsh"), "函数 取(x: 整数) -> 整数:`n    返回 x`n打印(取(""坏""))`n", $enc)
+    & $micc "build/strict-lax.jsh" -o "build/strict-lax.jmb" | Out-Null
     $total++
     if ($LASTEXITCODE -eq 0) {
         Write-Host "[通过] 不加 --strict-type 时标注仍被忽略"
@@ -262,8 +263,8 @@ try {
     }
 
     # 子类实例可以传给父类标注
-    [IO.File]::WriteAllText((Join-Path $root "build\strict-sub.jsh"), "类 父:`n    令 v = 0`n类 子 继承 父:`n    令 w = 0`n函数 收(x: 父) -> 整数:`n    返回 1`n打印(收(新建 子()))`n", $enc)
-    $o = (& $micc "build\strict-sub.jsh" -o "build\strict-sub.jmb" --strict-type 2>&1 | Out-String)
+    [IO.File]::WriteAllText((Join-Path $root "build/strict-sub.jsh"), "类 父:`n    令 v = 0`n类 子 继承 父:`n    令 w = 0`n函数 收(x: 父) -> 整数:`n    返回 1`n打印(收(新建 子()))`n", $enc)
+    $o = (& $micc "build/strict-sub.jsh" -o "build/strict-sub.jmb" --strict-type 2>&1 | Out-String)
     $total++
     if ($LASTEXITCODE -eq 0) {
         Write-Host "[通过] --strict-type 允许子类实例传给父类标注"

@@ -381,31 +381,70 @@ fn curl_download(url: &str, out: &Path) -> Result<()> {
 }
 
 fn extract_archive(archive: &Path, dest: &Path) -> Result<()> {
-    let status = std::process::Command::new("tar")
+    let tar_err = match std::process::Command::new("tar")
         .arg("-xf")
         .arg(archive)
         .arg("-C")
         .arg(dest)
         .status()
-        .map_err(|e| {
-            CompileError::new(
-                "E135",
-                1,
-                1,
-                format!("解包 {} 失败：找不到系统 tar（{}）", archive.display(), e),
-            )
-            .with_hint("Windows 10/11 自带 bsdtar，可直接解 .zip/.tar.gz；非 Windows 上 .zip 未验证")
-        })?;
-    if !status.success() {
-        return Err(CompileError::new(
-            "E135",
-            1,
-            1,
-            format!("解包 {} 失败：tar 退出码 {:?}", archive.display(), status.code()),
-        )
-        .with_hint("HTTP 来源只支持 tar 能解的归档（.zip/.tar/.tar.gz）"));
+    {
+        Ok(s) if s.success() => return Ok(()),
+        Ok(s) => format!("tar 退出码 {:?}", s.code()),
+        Err(e) => format!("找不到系统 tar（{}）", e),
+    };
+
+    // Linux 的 GNU tar 不能解 .zip（Windows/macOS 的 bsdtar 可以）；退回 unzip。
+    let is_zip = archive
+        .extension()
+        .map(|e| e.to_string_lossy().eq_ignore_ascii_case("zip"))
+        .unwrap_or(false);
+    if is_zip {
+        match std::process::Command::new("unzip")
+            .args(["-q", "-o"])
+            .arg(archive)
+            .arg("-d")
+            .arg(dest)
+            .status()
+        {
+            Ok(s) if s.success() => return Ok(()),
+            Ok(s) => {
+                return Err(CompileError::new(
+                    "E135",
+                    1,
+                    1,
+                    format!(
+                        "解包 {} 失败：{}；unzip 退出码 {:?}",
+                        archive.display(),
+                        tar_err,
+                        s.code()
+                    ),
+                )
+                .with_hint("安装 unzip，或把归档改成 .tar.gz"));
+            }
+            Err(e) => {
+                return Err(CompileError::new(
+                    "E135",
+                    1,
+                    1,
+                    format!(
+                        "解包 {} 失败：{}；找不到系统 unzip（{}）",
+                        archive.display(),
+                        tar_err,
+                        e
+                    ),
+                )
+                .with_hint("Linux 解 .zip 需要 unzip；也可以改用 .tar.gz"));
+            }
+        }
     }
-    Ok(())
+
+    Err(CompileError::new(
+        "E135",
+        1,
+        1,
+        format!("解包 {} 失败：{}", archive.display(), tar_err),
+    )
+    .with_hint("HTTP 来源支持 .tar/.tar.gz；Windows/macOS 的 tar 也能解 .zip，Linux 需要 unzip"))
 }
 
 /// GitHub 的 release zip 常带一层顶层目录；只有一层且根下没有清单时下钻。

@@ -2,15 +2,16 @@
 # 所有夹具都建在 $env:TEMP 下的临时目录，跑完删除，不污染仓库。
 $ErrorActionPreference = "Continue"
 $root = Split-Path -Parent $PSScriptRoot
-$micc = "compiler\target\release\micc.exe"
-$jmrun = "build\jmrun.exe"
+. (Join-Path $PSScriptRoot "toolchains.ps1")
+$micc = Join-Path $root ("compiler/target/release/micc" + $ExeSuffix)
+$jmrun = Join-Path $root ("build/jmrun" + $ExeSuffix)
 
 Push-Location $root
 try {
-    if (-not (Test-Path $micc)) { throw "先运行 tools\build.ps1" }
-    if (-not (Test-Path $jmrun)) { throw "先运行 tools\build.ps1（缺 build\jmrun.exe）" }
+    if (-not (Test-Path $micc)) { throw "先运行 tools/build.ps1" }
+    if (-not (Test-Path $jmrun)) { throw "先运行 tools/build.ps1（缺 build/jmrun）" }
 
-    $sandbox = Join-Path $env:TEMP ("li-pack-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
+    $sandbox = Join-Path ([IO.Path]::GetTempPath()) ("li-pack-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
     New-Item -ItemType Directory -Path $sandbox | Out-Null
     $script:fail = 0
     $script:total = 0
@@ -155,7 +156,7 @@ try {
 "@
     New-Pkg (Join-Path $root3 "应用") $toml $src
     $r = Invoke-Pack (Join-Path $root3 "应用")
-    $out = Run-Jmb (Join-Path $root3 "应用\应用.jmb")
+    $out = Run-Jmb (Join-Path $root3 "应用/应用.jmb")
     Check "同名函数在不同包内共存" (($r.code -eq 0) -and ($out -eq "甲 乙")) ($r.out + "`n实际输出：" + $out)
 
     # ---------- 3b. 跨包类型导出（LI016）：类/枚举显式写 [导出] 类型 ----------
@@ -447,7 +448,7 @@ try {
 "@
     New-Pkg (Join-Path $root4 "应用") $toml $src
     $r = Invoke-Pack (Join-Path $root4 "应用")
-    $out = Run-Jmb (Join-Path $root4 "应用\应用.jmb")
+    $out = Run-Jmb (Join-Path $root4 "应用/应用.jmb")
     Check "菱形依赖：基础只解析一份（共 3 个）" (($r.code -eq 0) -and $r.out.Contains("共 3 个") -and ($out -eq "7 7")) ($r.out + "`n实际输出：" + $out)
 
     # ---------- 5. 名字表接近上限 ----------
@@ -546,7 +547,7 @@ try {
     $installed7b = ($LASTEXITCODE -eq 0)
     Check "install：ABI 2 正常安装" $installed7b $io
     if ($installed7b) {
-        $cached7b = Join-Path $app7b ".砾\包\工具-1.0.0\砾包.toml"
+        $cached7b = Join-Path $app7b ".砾/包/工具-1.0.0/砾包.toml"
         [IO.File]::WriteAllText($cached7b, $tomlBad, (New-Object System.Text.UTF8Encoding($true)))
         $io = (& $micc install --目录 $app7b --离线 2>&1 | Out-String)
         Check-Error "install --离线：缓存 ABI 不一致 → E129" @{ code = $LASTEXITCODE; out = $io } "E129" "ABI"
@@ -744,19 +745,19 @@ try {
     # ---------- 15. install + 离线打包（只读锁与缓存） ----------
     $installDir = Join-Path $root2 "应用"
     $io = (& $micc install --目录 $installDir 2>&1 | Out-String)
-    $installed = ($LASTEXITCODE -eq 0) -and (Test-Path (Join-Path $installDir ".砾\锁.toml")) -and (Test-Path (Join-Path $installDir ".砾\包\工具-0.1.0\主.jsh"))
+    $installed = ($LASTEXITCODE -eq 0) -and (Test-Path (Join-Path $installDir ".砾/锁.toml")) -and (Test-Path (Join-Path $installDir ".砾/包/工具-0.1.0/主.jsh"))
     $r = Invoke-Pack $installDir -Offline
     $out = Run-Jmb (Join-Path $installDir "应用.jmb")
     Check "install + 离线打包可运行" ($installed -and ($r.code -eq 0) -and ($r.out.Contains("离线")) -and ($out -eq "你好，砾`n42")) ($io + $r.out + "`n实际输出：" + $out)
 
     # ---------- 16. 离线缓存被改坏：校验拒绝 ----------
-    $cached = Join-Path $installDir ".砾\包\工具-0.1.0\主.jsh"
+    $cached = Join-Path $installDir ".砾/包/工具-0.1.0/主.jsh"
     [IO.File]::WriteAllText($cached, "函数 加一(数)：`r`n    返回 数 + 2`r`n", (New-Object System.Text.UTF8Encoding($true)))
     $r = Invoke-Pack $installDir -Offline
     Check-Error "离线缓存被改坏：E126 校验失败" $r "E126" "校验"
 
     # ---------- 17. 仓库内示例包（examples/packages） ----------
-    $exampleDir = Join-Path $root "examples\packages\应用"
+    $exampleDir = Join-Path $root "examples/packages/应用"
     $exampleJmb = Join-Path $sandbox "示例.jmb"
     $o = (& $micc pack --目录 $exampleDir -o $exampleJmb 2>&1 | Out-String)
     $code = $LASTEXITCODE
@@ -813,7 +814,7 @@ try {
     New-Pkg $app18 $toml '打印(工具.版本())'
     $io = (& $micc install --目录 $app18 --索引 $idxFile 2>&1 | Out-String)
     $installCode = $LASTEXITCODE
-    $lockText = [IO.File]::ReadAllText((Join-Path $app18 ".砾\锁.toml"))
+    $lockText = [IO.File]::ReadAllText((Join-Path $app18 ".砾/锁.toml"))
     $rOff = Invoke-Pack $app18 -Offline
     $outOff = Run-Jmb (Join-Path $app18 "应用.jmb")
     $rOn = Invoke-Pack $app18
@@ -833,7 +834,7 @@ try {
     New-Pkg $app19 $toml '打印(工具.版本())'
     $io = (& $micc install --目录 $app19 --索引 $idxFile 2>&1 | Out-String)
     $installCode = $LASTEXITCODE
-    $lockText = [IO.File]::ReadAllText((Join-Path $app19 ".砾\锁.toml"))
+    $lockText = [IO.File]::ReadAllText((Join-Path $app19 ".砾/锁.toml"))
     $r = Invoke-Pack $app19 -Offline
     $out = Run-Jmb (Join-Path $app19 "应用.jmb")
     Check "索引：* 选中最高版本 2.0.0" (($installCode -eq 0) -and $lockText.Contains('版本 = "2.0.0"') -and ($r.code -eq 0) -and ($out -eq "2.0.0")) ($io + $r.out + "`n实际输出：" + $out)
@@ -896,6 +897,9 @@ try {
     # 不拿本地目录冒充 HTTP 证据。
     $pyExe = Get-Command python -ErrorAction SilentlyContinue
     if ($null -eq $pyExe) {
+        $pyExe = Get-Command python3 -ErrorAction SilentlyContinue
+    }
+    if ($null -eq $pyExe) {
         Write-Host "[跳过] HTTP 索引：本机没有 python，无法起静态服务"
         $script:skip++
     }
@@ -942,7 +946,14 @@ try {
 
             $srv = $null
             try {
-                $srv = Start-Process -FilePath $pyExe.Source -ArgumentList @("-m", "http.server", "$port", "--bind", "127.0.0.1", "--directory", $httpRoot) -WindowStyle Hidden -PassThru
+                $srvArgs = @{
+                    FilePath = $pyExe.Source
+                    ArgumentList = @("-m", "http.server", "$port", "--bind", "127.0.0.1", "--directory", $httpRoot)
+                    PassThru = $true
+                }
+                # -WindowStyle 在 Linux/macOS 的 PowerShell 上不支持。
+                if ($env:OS -eq "Windows_NT") { $srvArgs.WindowStyle = "Hidden" }
+                $srv = Start-Process @srvArgs
                 $ready = $false
                 for ($i = 0; $i -lt 20; $i++) {
                     Start-Sleep -Milliseconds 250
@@ -976,9 +987,9 @@ try {
                     $installCode = $LASTEXITCODE
                     $env:NO_PROXY = $savedNoProxy
 
-                    $lockFile = Join-Path $appHttp ".砾\锁.toml"
+                    $lockFile = Join-Path $appHttp ".砾/锁.toml"
                     $lockText = if (Test-Path $lockFile) { [IO.File]::ReadAllText($lockFile) } else { "<缺少锁文件>" }
-                    $cached = Join-Path $appHttp ".砾\包\工具-1.0.0\主.jsh"
+                    $cached = Join-Path $appHttp ".砾/包/工具-1.0.0/主.jsh"
                     $r = Invoke-Pack $appHttp -Offline
                     $out = Run-Jmb (Join-Path $appHttp "应用.jmb")
                     Write-Host ("[信息] HTTP 索引 1 个条目；归档 " + $zipBytes + " 字节；锁文件：" + ($lockText -replace "`r`n", " | "))
@@ -1169,7 +1180,7 @@ try {
 "@
     New-Pkg $app21 $toml '打印(库.版本())'
     $io = (& $micc install --目录 $app21 --索引 $idx2 2>&1 | Out-String)
-    $installed21 = ($LASTEXITCODE -eq 0) -and (Test-Path (Join-Path $app21 ".砾\包\库-1.0.0\主.jsh"))
+    $installed21 = ($LASTEXITCODE -eq 0) -and (Test-Path (Join-Path $app21 ".砾/包/库-1.0.0/主.jsh"))
     Check "install：索引来源指向本地源码归档（zip）" $installed21 $io
 
     $r = Invoke-Pack $app21 -Offline
@@ -1214,7 +1225,7 @@ try {
     $o = (& $micc publish --目录 $p2lib --仓库 $p2repo 2>&1 | Out-String)
     $code = $LASTEXITCODE
     $p2idx = Join-Path $p2repo "砾索引.toml"
-    $p2zip = Join-Path $p2repo "工具\工具-1.2.0.zip"
+    $p2zip = Join-Path $p2repo "工具/工具-1.2.0.zip"
     $idxText = if (Test-Path $p2idx) { [IO.File]::ReadAllText($p2idx, [Text.Encoding]::UTF8) } else { "" }
     $hPub = Get-PkgHash $p2lib
     Check "publish：产出归档与索引条目" (($code -eq 0) -and (Test-Path $p2zip) -and $idxText.Contains('"工具@1.2.0"') -and $idxText.Contains($hPub) -and $idxText.Contains('来源 = "工具/工具-1.2.0.zip"')) $o
@@ -1296,7 +1307,7 @@ try {
     $p2idx2 = Join-Path $p2repo2 "砾索引.toml"
     $o = (& $micc publish --目录 $p2lib --索引 $p2idx2 2>&1 | Out-String)
     $code = $LASTEXITCODE
-    Check "publish：只给 --索引 时仓库取索引所在目录" (($code -eq 0) -and (Test-Path (Join-Path $p2repo2 "工具\工具-1.2.0.zip"))) $o
+    Check "publish：只给 --索引 时仓库取索引所在目录" (($code -eq 0) -and (Test-Path (Join-Path $p2repo2 "工具/工具-1.2.0.zip"))) $o
 
     Write-Host ("包用例：共 " + $script:total + " 个，失败 " + $script:fail + " 个，跳过 " + $script:skip + " 个")
     if ($script:fail -gt 0) { exit 1 }

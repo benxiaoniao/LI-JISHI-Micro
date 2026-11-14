@@ -23,7 +23,8 @@
 #   - `docker run --rm jishi-build` 打印产物路径；
 #   - 容器内固件 **FLASH 42 576 B / RAM 17 340 B**，与开发机逐字节同口径；
 #   - 容器内 `./build/jmrun ./build/类.jmb` 正常运行（输出与开发机一致）。
-#   - 边界：容器只跑构建，不跑回归（test-*.ps1 仍按 Windows 路径写）。
+#   - 容器内可跑全量回归（tools/build.ps1）；HTTP 索引用例需要 python3，已在镜像中安装。
+#   - 边界：仅用于 Linux 复现，不替代 macOS/Windows 的实机验证。
 
 FROM mcr.microsoft.com/powershell:7.4-ubuntu-22.04
 
@@ -38,7 +39,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PATH=/opt/cargo/bin:$PATH
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential ca-certificates curl unzip tar \
+        build-essential ca-certificates curl unzip tar python3 \
     && rm -rf /var/lib/apt/lists/*
 
 # Rust 与开发机同版本：Ubuntu 22.04 的发行版 rustc 1.75 读不了 Cargo.lock v4（需要 1.78+）。
@@ -58,8 +59,8 @@ RUN mkdir -p /opt/jishi-toolchains /tmp/tc \
 WORKDIR /src
 COPY . .
 
-# 主机构建（含 micc 与 jmrun）；固件交叉编译用 `类` 示例（CI 同款大包）
-RUN pwsh -NoProfile -File tools/build.ps1 -SkipTests \
+# 主机构建 + 五套回归；固件交叉编译用 `类` 示例（CI 同款大包）
+RUN pwsh -NoProfile -File tools/build.ps1 \
     && pwsh -NoProfile -File tools/build-firmware.ps1 -Example 类
 
 CMD ["pwsh", "-NoProfile", "-Command", "Write-Host '构建产物：compiler/target/release/micc、build/jmrun、build/stm32/jishim.{elf,bin,hex}'"]

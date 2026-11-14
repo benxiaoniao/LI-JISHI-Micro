@@ -71,7 +71,7 @@ powershell -ExecutionPolicy Bypass -File tools\build.ps1
 [test-native-import.ps1](tools/test-native-import.ps1) 原生导入用例、
 [test-packages.ps1](tools/test-packages.ps1) 包用例、
 [test-debug.ps1](tools/test-debug.ps1) 调试表用例）。
-只想构建不跑回归时加 `-SkipTests`；CI 里打包回归已拆成独立的 `packages` job，本地可用 `-SkipPackages` 跳过 `test-packages`。
+只想构建不跑回归时加 `-SkipTests`；CI 拆成 `windows` / `packages` / `cross-platform`（Ubuntu、macOS）三个 job，本地可用 `-SkipPackages` 跳过 `test-packages`。
 
 单独编译/运行/反汇编：
 
