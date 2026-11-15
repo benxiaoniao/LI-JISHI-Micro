@@ -93,6 +93,8 @@ try {
         }
         & (Join-Path $PSScriptRoot "test-debug.ps1")
         if ($LASTEXITCODE -ne 0) { throw "调试表用例失败" }
+        & (Join-Path $PSScriptRoot "test-arduino.ps1")
+        if ($LASTEXITCODE -ne 0) { throw "Arduino 库验收失败" }
     }
     Write-Host "完成。"
 }

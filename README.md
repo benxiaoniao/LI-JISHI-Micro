@@ -70,7 +70,8 @@ powershell -ExecutionPolicy Bypass -File tools\build.ps1
 （[test.ps1](tools/test.ps1) 输出用例、[test-errors.ps1](tools/test-errors.ps1) 错误码用例、
 [test-native-import.ps1](tools/test-native-import.ps1) 原生导入用例、
 [test-packages.ps1](tools/test-packages.ps1) 包用例、
-[test-debug.ps1](tools/test-debug.ps1) 调试表用例）。
+[test-debug.ps1](tools/test-debug.ps1) 调试表用例、
+[test-arduino.ps1](tools/test-arduino.ps1) Arduino 库验收）。
 只想构建不跑回归时加 `-SkipTests`；CI 拆成 `windows` / `packages` / `cross-platform`（Ubuntu、macOS）三个 job，本地可用 `-SkipPackages` 跳过 `test-packages`。
 
 单独编译/运行/反汇编：
@@ -238,7 +239,9 @@ firmware/stm32f103/        板级固件
 examples/                  砾源码示例（board/ 下是上板示例）
 tests/expected/            主机回归基准输出
 tests/errors/              编译期 / 运行期错误用例
-tools/                     构建、测试、烧录、串口、工具链定位
+tests/arduino/             Arduino 库的主机验收（Arduino.h 兼容桩 + main）
+integrations/arduino/      STM32duino 库模板（library.properties / 包装头 / 端口 / 示例草图）
+tools/                     构建、测试、烧录、串口、工具链定位、Arduino 库打包
 editors/vscode/            VS Code 扩展（可选，宿主机工具链，不进固件）
   src/core.ts                符号/包/运行输出解析与跳转判定（纯函数，可命令行测试）
   test/verify.js             编辑器逻辑回归
@@ -251,7 +254,7 @@ docs/                      路径图、字节码规格、原生函数表、调�
 
 | 脚本 | 用途 |
 |------|------|
-| [tools/build.ps1](tools/build.ps1) | 主机构建 + 五套回归（`-SkipTests` 跳过回归，`-SkipPackages` 跳过包用例） |
+| [tools/build.ps1](tools/build.ps1) | 主机构建 + 六套回归（`-SkipTests` 跳过回归，`-SkipPackages` 跳过包用例） |
 | [tools/build-firmware.ps1](tools/build-firmware.ps1) | 交叉编译固件（`-Example 名字` 切换示例） |
 | [tools/flash-firmware.ps1](tools/flash-firmware.ps1) | SWD 烧录（默认预览，`-Apply` 才写） |
 | [tools/capture-serial.ps1](tools/capture-serial.ps1) | 串口录制到 `build\uart\`（`-Port` / `-Seconds` / `-Out`） |
@@ -260,6 +263,8 @@ docs/                      路径图、字节码规格、原生函数表、调�
 | [tools/test-native-import.ps1](tools/test-native-import.ps1) | 原生导入回归（引脚 / ADC / 定时器 / 队列 / 信号量 / 外部中断各三类错误 + 任务 + 正确用例，37/37） |
 | [tools/test-packages.ps1](tools/test-packages.ps1) | 包用例回归（单包/双包/菱形/离线/预算/跨包类型/公开私有/标准库/接口，72/72） |
 | [tools/test-debug.ps1](tools/test-debug.ps1) | 调试表回归（双向查询/跨函数/跨包/剥离/损坏/旧文件，54/54） |
+| [tools/test-arduino.ps1](tools/test-arduino.ps1) | Arduino 库验收（生成库 + Arduino 兼容桩编译/运行，14/14） |
+| [tools/pack-arduino.ps1](tools/pack-arduino.ps1) | 生成 STM32duino 库目录与 zip（`-Example 名字` 换内嵌程序，`-NoZip` 只出目录） |
 | [tools/size-report.ps1](tools/size-report.ps1) | 固件 Flash/RAM 体积报告与基线对比（`-Label` 命名，`-UpdateBaseline` 更新基线） |
 | [tools/toolchains.ps1](tools/toolchains.ps1) | 工具链定位与版本自检 |
 | [tools/fetch-toolchain.ps1](tools/fetch-toolchain.ps1) | 按锁文件下载并校验 ARM 工具链 |

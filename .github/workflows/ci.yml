@@ -142,9 +142,9 @@ jobs:
 
       - name: 安装主机 gcc（Linux）
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y gcc unzip
+        run: sudo apt-get update && sudo apt-get install -y gcc g++ unzip
 
-      - name: 主机构建 + 五套回归 + 规范校验
+      - name: 主机构建 + 六套回归 + 规范校验
         shell: pwsh
         run: |
           [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
