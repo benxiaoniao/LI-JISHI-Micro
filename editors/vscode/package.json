@@ -79,6 +79,16 @@
         "icon": "$(circle-filled)"
       },
       {
+        "command": "li.setBreakpointCondition",
+        "title": "砾：设置/清除行断点条件（Shift+F9）",
+        "icon": "$(symbol-operator)"
+      },
+      {
+        "command": "li.debug.filterTask",
+        "title": "砾：调试任务过滤（--task）",
+        "icon": "$(filter)"
+      },
+      {
         "command": "li.debug.continue",
         "title": "砾：调试继续（F5）",
         "icon": "$(play)"
@@ -130,6 +140,11 @@
           "command": "li.toggleBreakpoint",
           "group": "navigation@2",
           "when": "editorLangId == li"
+        },
+        {
+          "command": "li.setBreakpointCondition",
+          "group": "navigation@3",
+          "when": "editorLangId == li"
         }
       ],
       "editor/title": [
@@ -154,6 +169,11 @@
       {
         "command": "li.toggleBreakpoint",
         "key": "f9",
+        "when": "editorLangId == li"
+      },
+      {
+        "command": "li.setBreakpointCondition",
+        "key": "shift+f9",
         "when": "editorLangId == li"
       },
       {

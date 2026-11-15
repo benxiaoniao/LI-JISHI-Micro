@@ -278,6 +278,34 @@ try {
     const args = core.buildDebugArgs({ jmb: 'x.jmb', stream: false });
     assert.deepStrictEqual(args, ['--dbg', 'x.jmb']);
   });
+  check('breakSpecText：无条件 / 带条件 / 去掉手写的 if 前缀', () => {
+    assert.strictEqual(core.breakSpecText({ file: 'a.jsh', line: 2 }), 'a.jsh:2');
+    assert.strictEqual(
+      core.breakSpecText({ file: 'a.jsh', line: 2, condition: '  k == 3  ' }),
+      'a.jsh:2 if k == 3'
+    );
+    assert.strictEqual(
+      core.breakSpecText({ file: 'a.jsh', line: 2, condition: 'if k >= 3' }),
+      'a.jsh:2 if k >= 3'
+    );
+  });
+  check('buildDebugArgs：条件断点 + --task 的完整参数顺序', () => {
+    const args = core.buildDebugArgs({
+      jmb: 'x.jmb',
+      breaks: [{ file: 'a.jsh', line: 2, condition: 'k == 3' }],
+      task: 1,
+    });
+    assert.deepStrictEqual(args, ['--dbg', '--事件流', '--break', 'a.jsh:2 if k == 3', '--task', '1', 'x.jmb']);
+  });
+  check('looksLikeBreakCondition：六种比较符都接受，缺比较符/缺名字拒绝', () => {
+    for (const op of ['==', '!=', '<', '<=', '>', '>=']) {
+      assert(core.looksLikeBreakCondition(`k ${op} 3`), '应接受 ' + op);
+    }
+    assert(core.looksLikeBreakCondition('文本名 == "带 空格"'));
+    assert(!core.looksLikeBreakCondition('k = 3'));
+    assert(!core.looksLikeBreakCondition('== 3'));
+    assert(!core.looksLikeBreakCondition('k =='));
+  });
   check('toggleBreak：加、删、排序且不改入参', () => {
     const base = [5, 2];
     const added = core.toggleBreak(base, 9);
@@ -338,6 +366,69 @@ try {
   check('事件流只能与 --dbg 一起用（退出码 2）', () => {
     assert.strictEqual(noDbg.code, 2);
     assert((noDbg.out + noDbg.err).includes('只能与 --dbg 一起用'));
+  });
+
+  // ---------- 9. 条件断点与 --task（编辑器拼出的规格直接交给 jmrun） ----------
+  const condSrc = path.join(sandbox, '条件.jsh');
+  writeUtf8(condSrc, '函数 跑():\n    令 k = 0\n    当 k < 5:\n        打印(k)\n        k = k + 1\n跑()\n');
+  const condJmb = path.join(sandbox, '条件.jmb');
+  const condCompiled = run(micc, [condSrc, '-o', condJmb]);
+  check('条件断点夹具编译成功', () => assert.strictEqual(condCompiled.code, 0));
+  const condFile = condSrc.split(path.sep).join('/');
+  const condArgs = core.buildDebugArgs({
+    jmb: condJmb,
+    breaks: [{ file: condFile, line: 4, condition: 'k == 3' }],
+  });
+  const condRun = spawnSync(jmrun, condArgs, {
+    cwd: root, encoding: 'utf8', windowsHide: true, input: 'c\nq\n',
+  });
+  const condEvents = (condRun.stderr || '').split(/\r?\n/).map(line => core.parseDebugEvent(line)).filter(Boolean);
+  const condPauses = condEvents.filter(e => e.event === 'pause');
+  check('条件断点：k == 3 时只停一次（第 4 行）', () => {
+    assert.strictEqual(condPauses.length, 1, '实际事件：' + JSON.stringify(condEvents));
+    assert.strictEqual(condPauses[0].line, 4);
+    assert.strictEqual(condPauses[0].reason, '断点');
+  });
+  check('条件断点：条件不改变程序输出（0..4 全打印）', () => {
+    assert(condRun.stdout.includes('0') && condRun.stdout.includes('4'), '实际输出：' + condRun.stdout);
+  });
+  const neverArgs = core.buildDebugArgs({
+    jmb: condJmb,
+    breaks: [{ file: condFile, line: 4, condition: 'k == 99' }],
+  });
+  const neverRun = spawnSync(jmrun, neverArgs, {
+    cwd: root, encoding: 'utf8', windowsHide: true, input: 'c\nq\n',
+  });
+  const neverEvents = (neverRun.stderr || '')
+    .split(/\r?\n/)
+    .map(line => core.parseDebugEvent(line))
+    .filter(Boolean);
+  check('条件断点：条件不成立时不暂停，正常结束', () => {
+    assert.strictEqual(neverEvents.filter(e => e.event === 'pause').length, 0,
+      '实际事件：' + JSON.stringify(neverEvents));
+    const finish = neverEvents.find(e => e.event === 'finish');
+    assert(finish && finish.code === 0, '实际事件：' + JSON.stringify(neverEvents));
+  });
+
+  const taskJmb = path.join(sandbox, '任务.jmb');
+  const taskCompiled = run(micc, [path.join(root, 'examples', '任务.jsh'), '-o', taskJmb]);
+  check('--task 夹具编译成功', () => assert.strictEqual(taskCompiled.code, 0));
+  const taskFile = path.join(root, 'examples', '任务.jsh').split(path.sep).join('/');
+  const taskArgs = core.buildDebugArgs({
+    jmb: taskJmb,
+    breaks: [{ file: taskFile, line: 5 }],
+    task: 1,
+  });
+  const taskRun = spawnSync(jmrun, taskArgs, {
+    cwd: root, encoding: 'utf8', windowsHide: true, input: 'c\nq\n',
+  });
+  const taskEvents = (taskRun.stderr || '').split(/\r?\n/).map(line => core.parseDebugEvent(line)).filter(Boolean);
+  const taskPauses = taskEvents.filter(e => e.event === 'pause');
+  check('--task 1：只停子任务「子甲」的第 5 行', () => {
+    assert.strictEqual(taskPauses.length, 1, '实际事件：' + JSON.stringify(taskEvents));
+    assert.strictEqual(taskPauses[0].task, 1);
+    assert.strictEqual(taskPauses[0].func, '子甲');
+    assert.strictEqual(taskPauses[0].line, 5);
   });
 } finally {
   fs.rmSync(sandbox, { recursive: true, force: true });

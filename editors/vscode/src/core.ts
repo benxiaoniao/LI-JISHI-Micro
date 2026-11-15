@@ -104,6 +104,25 @@ export function parseRunOutput(text: string): { error?: RunError; hit?: Site } {
 export interface BreakSpec {
   file: string;
   line: number;
+  /** `if` 之后的条件（`名字 比较符 字面量`）；空/未给 = 无条件断点。 */
+  condition?: string;
+}
+
+/** 断点在命令行里的规格：`文件:行 [if 条件]`。 */
+export function breakSpecText(spec: BreakSpec): string {
+  const base = `${spec.file}:${spec.line}`;
+  const condition = normalizeBreakCondition(spec.condition ?? '');
+  return condition ? `${base} if ${condition}` : base;
+}
+
+/** 用户输入的条件归一：去掉首尾空白与可选的 `if` 前缀。 */
+export function normalizeBreakCondition(text: string): string {
+  return text.trim().replace(/^if\s+/i, '').trim();
+}
+
+/** 条件形状检查（名字 比较符 字面量）；名字与类型是否成立留给 jmrun。 */
+export function looksLikeBreakCondition(text: string): boolean {
+  return /^[^\s]+\s*(==|!=|<=|>=|<|>)\s*\S/.test(normalizeBreakCondition(text));
 }
 
 export type PauseReason = '断点' | '单步' | '行级' | '步过';
@@ -183,7 +202,7 @@ export function buildDebugArgs(opts: {
 }): string[] {
   const args: string[] = opts.stream === false ? ['--dbg'] : ['--dbg', '--事件流'];
   for (const b of opts.breaks ?? []) {
-    args.push('--break', `${b.file}:${b.line}`);
+    args.push('--break', breakSpecText(b));
   }
   if (opts.task !== undefined) {
     args.push('--task', String(opts.task));
@@ -267,7 +286,7 @@ interface FmtToken {
   gap?: number;
 }
 
-const MULTI_OPS = ['==', '!=', '<=', '>=', '+=', '-=', '*=', '/=', '%=', '**', '//'];
+const MULTI_OPS = ['==', '!=', '<=', '>=', '+=', '-=', '*=', '/=', '%=', '**', '//', '<<', '>>', '->'];
 const PUNCT_CHARS = '()[]{},.:：，、；';
 const NO_SPACE_BEFORE = ')]}.,:：，、；';
 
@@ -335,6 +354,18 @@ function tokenizeLine(line: string): FmtToken[] {
       i = j;
       continue;
     }
+    if (ch === '(') {
+      // 记下左括号前原有的空格数：`返回 (表达式)` 这类写法保持原样，`打印(x)` 不会被加空格。
+      let gap = 0;
+      let k = i - 1;
+      while (k >= 0 && (line[k] === ' ' || line[k] === '\t' || line[k] === '\u3000')) {
+        gap++;
+        k--;
+      }
+      toks.push({ kind: 'punct', text: '(', gap });
+      i++;
+      continue;
+    }
     const rest = line.slice(i);
     const op = MULTI_OPS.find(candidate => rest.startsWith(candidate));
     if (op) {
@@ -342,7 +373,7 @@ function tokenizeLine(line: string): FmtToken[] {
       i += op.length;
       continue;
     }
-    if ('+-*/%<>='.includes(ch)) {
+    if ('+-*/%<>=~'.includes(ch)) {
       toks.push({ kind: 'op', text: ch });
       i++;
       continue;
@@ -384,7 +415,8 @@ function needSpace(prev: FmtToken, prevUnary: boolean, tok: FmtToken): boolean {
     if (prev.kind === 'op' || prev.text === ',' || prev.text === ':' || prev.text === '：') {
       return true;
     }
-    return false;
+    // 名字与 `(` 之间：按原样保留（`返回 (x)` 不被压成 `返回(x)`）
+    return prev.kind === 'word' && (tok.gap ?? 0) > 0;
   }
   if (tok.kind === 'punct' && tok.text === '[') {
     if (prev.kind === 'word') {
@@ -430,7 +462,7 @@ function formatTokens(toks: FmtToken[]): string {
       }
     }
     out += tok.text;
-    prevUnary = tok.kind === 'op' && (tok.text === '-' || tok.text === '+') &&
+    prevUnary = tok.kind === 'op' && (tok.text === '-' || tok.text === '+' || tok.text === '~') &&
       !(prev && isValueEnd(prev));
     prev = tok;
   }

@@ -10,7 +10,9 @@ import {
   displayPath,
   findModuleLine,
   formatSource,
+  looksLikeBreakCondition,
   nearestManifest,
+  normalizeBreakCondition,
   parseDebugEvent,
   parsePackFiles,
   parseRunOutput,
@@ -34,6 +36,10 @@ let cardCache: { file: string; mtimeMs: number; card: Langcard } | undefined;
 
 /** 每个文档一个断点集合（多个行号）：文档 URI → 1 起行号数组。 */
 const breakpoints = new Map<string, number[]>();
+/** 条件断点：`文档 URI#行号` → `if` 之后的条件文本（`名字 比较符 字面量`）。 */
+const breakConditions = new Map<string, string>();
+/** `--task N` 过滤：undefined = 任意绿色任务。 */
+let debugTaskFilter: number | undefined;
 let debugChild: ChildProcess | undefined;
 let debugPaused = false;
 let debugPrompting = false;
@@ -442,13 +448,26 @@ function scheduleCheck(document: vscode.TextDocument, delay: number): void {
   );
 }
 
+function breakConditionKey(uri: string, line: number): string {
+  return `${uri}#${line}`;
+}
+
 function refreshBreakpointDecorations(editor: vscode.TextEditor): void {
   if (!breakpointDecoration || editor.document.languageId !== LANGUAGE_ID) {
     return;
   }
-  const lines = breakpoints.get(editor.document.uri.toString()) ?? [];
-  const ranges = lines.map(line => new vscode.Range(line - 1, 0, line - 1, 0));
-  editor.setDecorations(breakpointDecoration, ranges);
+  const uri = editor.document.uri.toString();
+  const lines = breakpoints.get(uri) ?? [];
+  const options: vscode.DecorationOptions[] = lines.map(line => {
+    const condition = breakConditions.get(breakConditionKey(uri, line));
+    return {
+      range: new vscode.Range(line - 1, 0, line - 1, 0),
+      hoverMessage: condition
+        ? new vscode.MarkdownString(`条件断点：\`if ${condition}\``)
+        : new vscode.MarkdownString('断点'),
+    };
+  });
+  editor.setDecorations(breakpointDecoration, options);
 }
 
 function toggleBreakpoint(): void {
@@ -467,6 +486,7 @@ function toggleBreakpoint(): void {
   if (next.includes(line)) {
     vscode.window.setStatusBarMessage(`砾：断点设在第 ${line} 行（共 ${next.length} 个）`, 3000);
   } else {
+    breakConditions.delete(breakConditionKey(key, line));
     vscode.window.setStatusBarMessage(`砾：已清除第 ${line} 行断点（剩 ${next.length} 个）`, 2500);
   }
   if (next.length === 0) {
@@ -475,6 +495,87 @@ function toggleBreakpoint(): void {
     breakpoints.set(key, next);
   }
   refreshBreakpointDecorations(editor);
+}
+
+/** Shift+F9：给当前行设置/清除条件（空输入 = 普通断点）。 */
+async function setBreakpointCondition(): Promise<void> {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor || editor.document.languageId !== LANGUAGE_ID) {
+    vscode.window.showInformationMessage('砾：条件断点只支持 .jsh 文件。');
+    return;
+  }
+  const key = editor.document.uri.toString();
+  const line = editor.selection.active.line + 1;
+  const existing = breakConditions.get(breakConditionKey(key, line)) ?? '';
+  const input = await vscode.window.showInputBox({
+    prompt: `第 ${line} 行断点条件：名字 比较符 字面量（留空 = 无条件）`,
+    value: existing,
+    placeHolder: '如 k == 3',
+    ignoreFocusOut: true,
+    validateInput: value => {
+      const text = normalizeBreakCondition(value);
+      if (!text || looksLikeBreakCondition(text)) {
+        return undefined;
+      }
+      return '应为「名字 比较符 字面量」，比较符 == != < <= > >=';
+    },
+  });
+  if (input === undefined) {
+    return;
+  }
+  const condition = normalizeBreakCondition(input);
+  if (!condition) {
+    const had = (breakpoints.get(key) ?? []).includes(line);
+    breakConditions.delete(breakConditionKey(key, line));
+    vscode.window.setStatusBarMessage(
+      had ? `砾：第 ${line} 行改为无条件断点` : `砾：第 ${line} 行没有条件断点`,
+      2500
+    );
+    refreshBreakpointDecorations(editor);
+    return;
+  }
+
+  let lines = breakpoints.get(key) ?? [];
+  if (!lines.includes(line)) {
+    const next = toggleBreak(lines, line);
+    if (next.length > 8) {
+      vscode.window.showWarningMessage('砾：最多 8 个断点（jmrun 的上限）；条件未设置。');
+      return;
+    }
+    lines = next;
+    breakpoints.set(key, lines);
+  }
+  breakConditions.set(breakConditionKey(key, line), condition);
+  vscode.window.setStatusBarMessage(`砾：第 ${line} 行条件断点 if ${condition}`, 3000);
+  refreshBreakpointDecorations(editor);
+}
+
+/** 「砾：调试任务过滤」：设置/清除 `--task N`，下次 F5 生效。 */
+async function setTaskFilter(): Promise<void> {
+  const input = await vscode.window.showInputBox({
+    prompt: '调试任务过滤：绿色任务号 0–3（留空 = 任意任务）',
+    value: debugTaskFilter === undefined ? '' : String(debugTaskFilter),
+    placeHolder: '如 1',
+    ignoreFocusOut: true,
+    validateInput: value => {
+      const text = value.trim();
+      if (!text) {
+        return undefined;
+      }
+      return /^\d+$/.test(text) ? undefined : '任务号需要非负整数';
+    },
+  });
+  if (input === undefined) {
+    return;
+  }
+  const text = input.trim();
+  if (!text) {
+    debugTaskFilter = undefined;
+    vscode.window.setStatusBarMessage('砾：已清除任务过滤（下次 F5 生效）', 3000);
+    return;
+  }
+  debugTaskFilter = parseInt(text, 10);
+  vscode.window.setStatusBarMessage(`砾：任务过滤 ${debugTaskFilter}（下次 F5 生效）`, 3000);
 }
 
 function siteUri(root: string, file: string): vscode.Uri {
@@ -561,11 +662,19 @@ async function runCurrent(): Promise<void> {
     return;
   }
 
-  const lines = breakpoints.get(document.uri.toString()) ?? [];
+  const key = document.uri.toString();
+  const lines = breakpoints.get(key) ?? [];
   if (lines.length > 0) {
-    const spec: BreakSpec[] = lines.map(line => ({ file: displayPath(root, document.uri.fsPath), line }));
-    await startDebugSession(root, document, jmrun, target, spec);
+    const spec: BreakSpec[] = lines.map(line => ({
+      file: displayPath(root, document.uri.fsPath),
+      line,
+      condition: breakConditions.get(breakConditionKey(key, line)),
+    }));
+    await startDebugSession(root, document, jmrun, target, spec, debugTaskFilter);
     return;
+  }
+  if (debugTaskFilter !== undefined) {
+    vscode.window.showInformationMessage('砾：任务过滤需要至少一个断点；本次按普通运行。');
   }
   const args = [target];
   output.appendLine(`== 运行 ${path.basename(document.uri.fsPath)}`);
@@ -681,7 +790,8 @@ function startDebugSession(
   document: vscode.TextDocument,
   jmrun: string,
   target: string,
-  spec: BreakSpec[]
+  spec: BreakSpec[],
+  task?: number
 ): Promise<void> {
   return new Promise(resolve => {
     let settled = false;
@@ -691,8 +801,14 @@ function startDebugSession(
         resolve();
       }
     };
-    const args = buildDebugArgs({ jmb: target, breaks: spec });
-    output.appendLine(`== 调试 ${path.basename(document.uri.fsPath)}（断点 ${spec.length} 个）`);
+    const args = buildDebugArgs({ jmb: target, breaks: spec, task });
+    const conditionCount = spec.filter(b => normalizeBreakCondition(b.condition ?? '')).length;
+    const parts = [`断点 ${spec.length} 个`];
+    if (conditionCount > 0) {
+      parts.push(`条件 ${conditionCount} 个`);
+    }
+    parts.push(task === undefined ? '任意任务' : `任务 ${task}`);
+    output.appendLine(`== 调试 ${path.basename(document.uri.fsPath)}（${parts.join('，')}）`);
     output.appendLine(`> jmrun ${args.map(a => (a.includes(' ') ? `"${a}"` : a)).join(' ')}`);
     const child = spawn(jmrun, args, { cwd: root, windowsHide: true });
     debugChild = child;
@@ -1000,6 +1116,10 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
 
     vscode.commands.registerCommand('li.toggleBreakpoint', () => toggleBreakpoint()),
+
+    vscode.commands.registerCommand('li.setBreakpointCondition', () => setBreakpointCondition()),
+
+    vscode.commands.registerCommand('li.debug.filterTask', () => setTaskFilter()),
 
     vscode.commands.registerCommand('li.debug.continue', () => sendDebug('c')),
     vscode.commands.registerCommand('li.debug.next', () => sendDebug('n')),

@@ -33,7 +33,7 @@ PC 上：  .jsh 源码 ──micc──▶  .jmb 微字节码
 | 语言卡 | [docs/语言卡.md](docs/语言卡.md) + [spec/langcard.json](spec/langcard.json)，由操作码/原生表/内建/错误码渲染；`--check-langcard` 防漂移 |
 | 规范校验 | `--check-native`、`--check-langcard` 进构建链路，头文件或语言卡落后于规范即失败 |
 | 可复现工具链 | `tools/toolchains/toolchain.lock.json` + `tools/fetch-toolchain.ps1`，按锁文件哈希安装 |
-| 编辑器扩展 | `editors/vscode`（可选）：高亮、编译诊断、语言卡补全、跳转到定义、`F5` 运行、`F9` 单断点；只调 `micc` / `jmrun`，不占固件空间 |
+| 编辑器扩展 | `editors/vscode`（可选）：高亮、编译诊断、语言卡补全、跳转到定义、`F5` 运行、`F9` 多断点 / `Shift+F9` 条件断点 / `--task` 过滤；只调 `micc` / `jmrun`，不占固件空间 |
 
 上板验证记录在 [docs/verification/](docs/verification/)：ADC 零点（PA0 接 GND）、
 ADC 满量程（PA0 接 3V3）、以及第四轮读到 4094 触发 E023 的故障与修复对照。
@@ -159,7 +159,9 @@ compiler\target\release\micc.exe pack --目录 examples\packages\应用 --离线
 - 跳转到定义：`micc --symbols <文件>` 列出本文件定义，`micc --pack-files <包目录>` 复用 `pack_resolve` 给出包与依赖入口；`令/函数/类/方法/字段/导入的模块` 在 `.jsh` 内可跳，跨文件、跨包按同一套规则解析。
 - 运行期错误标红：解析 `jmrun` 输出的 `于 文件:行`，在该行画诊断并可点击定位；没有调试段时优雅退回错误码诊断，不报错。
 - `F5`：以当前文件为入口跑 `micc` + `jmrun`，输出进「砾」频道，错误同时进问题面板。
-- `F9`：对当前行设置/取消单断点（每个文档一个），`F5` 时附加 `--break 文件:行`，命中后打开并定位到该行。仅作行映射的最小验证，不做变量查看、多断点、继续/单步。
+- `F9`：在当前行切换断点，每个文档可设多个（合计 ≤8），`F5` 时附 `--break 文件:行`；命中后打开并定位到该行。
+- `Shift+F9`：给当前行设条件（`名字 比较符 字面量`，如 `k == 3`；留空=普通断点），拼成 `--break "文件:行 if …"`；装饰悬停显示条件。
+- 调试会话：`jmrun --dbg --事件流` 的 NDJSON 驱动暂停/定位，`F10` 下一行、`Ctrl+F10` 步过、`F5` 继续、`Shift+F5` 停止；「砾：调试任务过滤」可设 `--task N`（0–3）。不做变量/调用栈的可视面板。
 - 格式化：`Shift+Alt+F` 缩进按 4 空格归一，运算符两侧各留一个空格；字符串、注释与空行原样保留，重复格式化结果不变（幂等）。
 
 编辑器侧验证不依赖板子：`node test/verify.js` 覆盖符号/包/输出解析、断点判定与 5 项格式化（含幂等），`test/run-it.ps1` 用 VS Code 扩展宿主跑真实命令。

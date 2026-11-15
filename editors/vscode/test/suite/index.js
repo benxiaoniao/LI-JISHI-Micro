@@ -71,10 +71,12 @@ exports.run = async function run() {
     await extension.activate();
   });
 
-  await check('命令面板注册了 li.run / li.toggleBreakpoint', async () => {
+  await check('命令面板注册了 li.run / li.toggleBreakpoint / 条件断点 / 任务过滤', async () => {
     const commands = await vscode.commands.getCommands(true);
     assert(commands.includes('li.run'), '缺 li.run');
     assert(commands.includes('li.toggleBreakpoint'), '缺 li.toggleBreakpoint');
+    assert(commands.includes('li.setBreakpointCondition'), '缺 li.setBreakpointCondition');
+    assert(commands.includes('li.debug.filterTask'), '缺 li.debug.filterTask');
   });
 
   await check('同文件：c.加(3) → 第 7 行方法', async () => {
