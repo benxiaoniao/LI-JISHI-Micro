@@ -7,7 +7,7 @@
 //! - 在线 `pack` 对索引依赖也只读锁与缓存，真正的下载由 `micc install` 负责。
 
 use crate::error::{CompileError, Result};
-use crate::pack_index::{load_index, verify_entry, Index, IndexEntry, TempDirs};
+use crate::pack_index::{load_index, verify_entry, Index, IndexEntry, TempDirs, VerifyKey};
 use crate::pack_manifest::{read_lock, write_lock, Constraint, DepSpec, LockEntry, Manifest};
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -542,13 +542,18 @@ fn topo_offline(
 
 /// 安装：路径依赖从目录复制；索引依赖从静态索引挑版本、取内容、校验哈希。
 /// 所有依赖都落到 `.砾/包/<名字>-<版本>`，最后写锁文件。
-pub fn install(root_dir: &Path, index_source: Option<&str>) -> Result<Vec<LockEntry>> {
+pub fn install(
+    root_dir: &Path,
+    index_source: Option<&str>,
+    verify: Option<&VerifyKey>,
+) -> Result<Vec<LockEntry>> {
     let root_manifest = Manifest::load(root_dir)?;
     root_manifest.check_native_abi()?;
     let mut st = Installer {
         root_dir,
         cache_root: root_dir.join(LOCK_DIR).join(CACHE_DIR),
         index_source,
+        verify,
         index: None,
         temp: TempDirs::new(),
         installed: BTreeMap::new(),
@@ -585,6 +590,8 @@ struct Installer<'a> {
     root_dir: &'a Path,
     cache_root: PathBuf,
     index_source: Option<&'a str>,
+    /// `--公钥`：给了就要求索引签名通过（否则只做哈希校验）。
+    verify: Option<&'a VerifyKey>,
     index: Option<Index>,
     temp: TempDirs,
     installed: BTreeMap<String, Installed>,
@@ -736,7 +743,7 @@ impl<'a> Installer<'a> {
                 p.to_string_lossy().to_string()
             }
         };
-        self.index = Some(load_index(&source, &mut self.temp)?);
+        self.index = Some(load_index(&source, &mut self.temp, self.verify)?);
         Ok(())
     }
 

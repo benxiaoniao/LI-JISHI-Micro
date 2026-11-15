@@ -32,6 +32,10 @@ struct Opts {
     /// `--strict-type`：编译时校验类型标注。
     strict_type: bool,
     index: Option<String>,
+    /// `--公钥`：OpenSSH allowed_signers 允许列表；给了就要求索引带签名且校验通过。
+    pubkey: Option<PathBuf>,
+    /// `--签名身份`：允许列表里的身份，默认 `li`。
+    identity: String,
     archive: bool,
     /// `--源码`：归档内容换成源码包（`砾包.toml` + `.jsh`），供 `micc install` 消费。
     source_archive: bool,
@@ -47,6 +51,8 @@ fn parse_opts(args: &[String], allow_out: bool, allow_index: bool) -> Result<Opt
     let mut no_assert = false;
     let mut strict_type = false;
     let mut index = None;
+    let mut pubkey = None;
+    let mut identity = String::from("li");
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -70,6 +76,20 @@ fn parse_opts(args: &[String], allow_out: bool, allow_index: bool) -> Result<Opt
                     return Err(usage_err("--索引 后面要跟索引文件或 URL"));
                 }
                 index = Some(args[i].clone());
+            }
+            "--公钥" | "--pubkey" if allow_index => {
+                i += 1;
+                if i >= args.len() {
+                    return Err(usage_err("--公钥 后面要跟 allowed_signers 文件"));
+                }
+                pubkey = Some(PathBuf::from(&args[i]));
+            }
+            "--签名身份" | "--signer" if allow_index => {
+                i += 1;
+                if i >= args.len() {
+                    return Err(usage_err("--签名身份 后面要跟身份名"));
+                }
+                identity = args[i].clone();
             }
             "--离线" | "--offline" => offline = true,
             "--归档" | "--archive" => archive = true,
@@ -95,6 +115,8 @@ fn parse_opts(args: &[String], allow_out: bool, allow_index: bool) -> Result<Opt
         no_assert,
         strict_type,
         index,
+        pubkey,
+        identity,
         archive,
         source_archive,
     })
@@ -1456,7 +1478,11 @@ fn do_install(args: &[String]) -> Result<()> {
         return Ok(());
     }
 
-    let entries = pack_resolve::install(&opts.dir, opts.index.as_deref())?;
+    let verify = opts.pubkey.as_ref().map(|p| crate::pack_index::VerifyKey {
+        allowed_signers: p.clone(),
+        identity: opts.identity.clone(),
+    });
+    let entries = pack_resolve::install(&opts.dir, opts.index.as_deref(), verify.as_ref())?;
     println!(
         "已安装 {} 个包到 {}",
         entries.len(),

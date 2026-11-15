@@ -1309,6 +1309,87 @@ try {
     $code = $LASTEXITCODE
     Check "publish：只给 --索引 时仓库取索引所在目录" (($code -eq 0) -and (Test-Path (Join-Path $p2repo2 "工具/工具-1.2.0.zip"))) $o
 
+    # ---------- 26. 索引签名与撤销（LI026） ----------
+    # 用系统 ssh-keygen 签/验（不自造密码学）；撤销靠 allowed_signers 的 @revoked。
+    $ssh = Get-Command ssh-keygen -ErrorAction SilentlyContinue
+    if ($null -eq $ssh) {
+        Write-Host "[跳过] 索引签名：本机没有 ssh-keygen"
+        $script:skip++
+    }
+    else {
+        $signRoot = Join-Path $sandbox "sign"
+        New-Item -ItemType Directory -Path $signRoot -Force | Out-Null
+        $key = Join-Path $signRoot "key"
+        # 空口令：PS 5.1 与 pwsh 7 对空参数的处理不同，按平台分开写；管道 $null 兜底避免交互挂住。
+        if ($env:OS -eq "Windows_NT") {
+            $null | & ssh-keygen -q -t ed25519 -N '""' -f $key 2>&1 | Out-Null
+        }
+        else {
+            $null | & ssh-keygen -q -t ed25519 -N '' -f $key 2>&1 | Out-Null
+        }
+        Check "签名密钥：ssh-keygen 生成 ed25519 无口令密钥" ((Test-Path $key) -and (Test-Path ($key + ".pub"))) "密钥生成失败"
+
+        $signLib = Join-Path $signRoot "lib"
+        New-Pkg $signLib "[包]`n名字 = ""库""`n版本 = ""1.0.0""`n入口 = ""主.jsh""`n" "函数 版本()：`n    返回 ""1.0.0""`n"
+        $signRepo = Join-Path $signRoot "repo"
+        New-Item -ItemType Directory -Path $signRepo -Force | Out-Null
+        $signIdx = Join-Path $signRepo "砾索引.toml"
+        $o = (& $micc publish --目录 $signLib --仓库 $signRepo --签名密钥 $key 2>&1 | Out-String)
+        Check "publish --签名密钥：产出索引与 .sig" (($LASTEXITCODE -eq 0) -and (Test-Path $signIdx) -and (Test-Path ($signIdx + ".sig"))) $o
+
+        $pub = (Get-Content ($key + ".pub") -Raw).Trim()
+        $utf8 = New-Object System.Text.UTF8Encoding($false)
+        $allowed = Join-Path $signRoot "allowed"
+        [IO.File]::WriteAllText($allowed, ("li " + $pub + "`n"), $utf8)
+        $revokedList = Join-Path $signRoot "revoked"
+        [IO.File]::WriteAllText($revokedList, ("@revoked * " + $pub + "`n"), $utf8)
+
+        $appToml = "[包]`n名字 = ""应用""`n版本 = ""1.0.0""`n入口 = ""主.jsh""`n`n[依赖]`n库 = { 版本 = ""^1.0.0"" }`n"
+        $appSrc = '打印(库.版本())'
+
+        $app1 = Join-Path $signRoot "app1"
+        New-Pkg $app1 $appToml $appSrc
+        $o = (& $micc install --目录 $app1 --索引 $signIdx --公钥 $allowed 2>&1 | Out-String)
+        $signOk = ($LASTEXITCODE -eq 0)
+        $r = Invoke-Pack $app1 -Offline
+        $out = Run-Jmb (Join-Path $app1 "应用.jmb")
+        Check "install --公钥：签名通过并安装运行" ($signOk -and ($r.code -eq 0) -and ($out -eq "1.0.0")) ($o + $r.out + "`n实际输出：" + $out)
+
+        $app2 = Join-Path $signRoot "app2"
+        New-Pkg $app2 $appToml $appSrc
+        $o = (& $micc install --目录 $app2 --索引 $signIdx 2>&1 | Out-String)
+        Check "不带 --公钥：保持旧行为（只做哈希校验）" ($LASTEXITCODE -eq 0) $o
+
+        $app3 = Join-Path $signRoot "app3"
+        New-Pkg $app3 $appToml $appSrc
+        $o = (& $micc install --目录 $app3 --索引 $signIdx --公钥 $allowed --签名身份 "别人" 2>&1 | Out-String)
+        Check-Error "签名身份不匹配 → E145" @{ code = $LASTEXITCODE; out = $o } "E145" "签名"
+
+        Add-Content -Path $signIdx -Value "# 改一行" -Encoding UTF8
+        $app4 = Join-Path $signRoot "app4"
+        New-Pkg $app4 $appToml $appSrc
+        $o = (& $micc install --目录 $app4 --索引 $signIdx --公钥 $allowed 2>&1 | Out-String)
+        Check-Error "签名后改索引 → E145" @{ code = $LASTEXITCODE; out = $o } "E145" "签名"
+
+        # 重新发布会重写索引（去掉刚才那行注释）并重新签名
+        $o = (& $micc publish --目录 $signLib --仓库 $signRepo --签名密钥 $key 2>&1 | Out-String)
+        $app5 = Join-Path $signRoot "app5"
+        New-Pkg $app5 $appToml $appSrc
+        $o = (& $micc install --目录 $app5 --索引 $signIdx --公钥 $revokedList 2>&1 | Out-String)
+        Check-Error "允许列表 @revoked → E145" @{ code = $LASTEXITCODE; out = $o } "E145" "签名"
+
+        Remove-Item ($signIdx + ".sig") -Force
+        $app6 = Join-Path $signRoot "app6"
+        New-Pkg $app6 $appToml $appSrc
+        $o = (& $micc install --目录 $app6 --索引 $signIdx --公钥 $allowed 2>&1 | Out-String)
+        Check-Error "缺少 .sig → E145" @{ code = $LASTEXITCODE; out = $o } "E145" "签名"
+
+        # search 与 install 共用同一条校验路径
+        $o = (& $micc publish --目录 $signLib --仓库 $signRepo --签名密钥 $key 2>&1 | Out-String)
+        $o = (& $micc search --索引 $signIdx --公钥 $allowed 2>&1 | Out-String)
+        Check "search --公钥：签名通过并列出条目" (($LASTEXITCODE -eq 0) -and ($o -match "库 1\.0\.0")) $o
+    }
+
     Write-Host ("包用例：共 " + $script:total + " 个，失败 " + $script:fail + " 个，跳过 " + $script:skip + " 个")
     if ($script:fail -gt 0) { exit 1 }
     exit 0

@@ -25,12 +25,12 @@ use std::process::exit;
 fn usage() {
     eprintln!("用法：micc <输入.jsh> [-o 输出.jmb] [--dump] [--strip-debug] [--no-assert] [--strict-type]");
     eprintln!("      micc pack [--目录 <包目录>] [-o 输出] [--离线] [--strip-debug] [--no-assert] [--strict-type] [--归档]");
-    eprintln!("      micc install [--目录 <包目录>] [--索引 <索引文件|URL>] [--离线]");
+    eprintln!("      micc install [--目录 <包目录>] [--索引 <索引文件|URL>] [--离线] [--公钥 <allowed_signers>] [--签名身份 <名字>]");
     eprintln!("      micc hash [--目录 <包目录>]                # 算目录内容哈希（填索引的 校验）");
     eprintln!("      micc verify <包目录|归档.zip>              # 校验归档/二进制包（清单 + 产物 + 哈希）");
     eprintln!("      micc interface --目录 <包目录> [-o 接口.toml]  # 生成导出函数接口清单");
-    eprintln!("      micc search [关键词...] [--索引 <索引文件|URL>]  # 检索静态索引");
-    eprintln!("      micc publish [--目录 <包目录>] [--索引 <索引文件>] [--仓库 <目录>]  # 发布源码包并写索引");
+    eprintln!("      micc search [关键词...] [--索引 <索引文件|URL>] [--公钥 <allowed_signers>]  # 检索静态索引");
+    eprintln!("      micc publish [--目录 <包目录>] [--索引 <索引文件>] [--仓库 <目录>] [--签名密钥 <私钥>]  # 发布源码包并写索引");
     eprintln!("      micc --line-of <x.jmb> <代码下标> <偏移>   # 指令位置 → 源文件:行");
     eprintln!("      micc --lines-of <x.jmb> <文件|*> <行号>    # 源码行 → 指令范围");
     eprintln!("      micc --locals-of <x.jmb> <代码下标>        # 代码对象 → 局部槽符号");

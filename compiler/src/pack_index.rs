@@ -42,13 +42,165 @@ fn idx_err(line: usize, msg: impl Into<String>) -> CompileError {
     )
 }
 
+/// 索引签名校验参数：OpenSSH `allowed_signers` 允许列表 + 签名身份。
+///
+/// 用的是系统 `ssh-keygen -Y sign/verify`，不自造密码学、不引第三方库；
+/// 撤销靠允许列表里的 `@revoked` 标记（OpenSSH 自带语义）。
+#[derive(Clone, Debug)]
+pub struct VerifyKey {
+    pub allowed_signers: PathBuf,
+    pub identity: String,
+}
+
+/// 签名命名空间：固定值，避免同一个密钥在别的用途上的签名被拿来顶替。
+pub const SIGN_NAMESPACE: &str = "li-index";
+
+fn sig_err(msg: impl Into<String>) -> CompileError {
+    CompileError::new("E145", 1, 1, msg)
+}
+
+/// `砾索引.toml` → `砾索引.toml.sig`（OpenSSH 的固定命名，不能换）。
+pub fn sig_path(index: &Path) -> PathBuf {
+    let mut s = index.as_os_str().to_os_string();
+    s.push(".sig");
+    PathBuf::from(s)
+}
+
+fn combined_output(o: &std::process::Output) -> String {
+    // 注意：`ssh-keygen -Y verify` 的失败原因写在 stdout，不在 stderr。
+    let mut s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+    let err = String::from_utf8_lossy(&o.stderr).trim().to_string();
+    if !err.is_empty() {
+        if !s.is_empty() {
+            s.push('；');
+        }
+        s.push_str(&err);
+    }
+    if s.is_empty() {
+        s = "（ssh-keygen 没有输出）".to_string();
+    }
+    s
+}
+
+/// 签名/校验用的临时文件序号。
+static SIG_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// ASCII 临时文件：Windows 版 ssh-keygen 走 ANSI，中文路径（如 `砾索引.toml.sig`）会打不开。
+fn sig_staging(name: &str) -> PathBuf {
+    let n = SIG_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    std::env::temp_dir().join(format!("li-sign-{}-{}-{}", std::process::id(), n, name))
+}
+
+/// 用 `ssh-keygen -Y sign` 给索标签名，签名写在索引旁边的 `.sig`。
+///
+/// 签的是文件内容（SSHSIG 只哈希内容），所以先把索引复制成 ASCII 临时名再签，
+/// 签完把 `.sig` 搬回去——Windows 上 ssh-keygen 打不开中文路径。
+pub fn sign_index(index: &Path, key: &Path) -> Result<()> {
+    let staged = sig_staging("index.toml");
+    let staged_sig = sig_path(&staged);
+    if let Err(e) = std::fs::copy(index, &staged) {
+        return Err(sig_err(format!(
+            "签名失败：复制 {} 到临时文件出错（{}）",
+            index.display(),
+            e
+        )));
+    }
+    let _ = std::fs::remove_file(&staged_sig);
+    let out = std::process::Command::new("ssh-keygen")
+        .args(["-Y", "sign", "-f"])
+        .arg(key)
+        .args(["-n", SIGN_NAMESPACE])
+        .arg(&staged)
+        .output();
+    let result = match out {
+        Ok(o) if o.status.success() => std::fs::copy(&staged_sig, sig_path(index))
+            .map(|_| ())
+            .map_err(|e| sig_err(format!("签名失败：写不了 {}（{}）", sig_path(index).display(), e))),
+        Ok(o) => Err(sig_err(format!(
+            "签名失败：ssh-keygen 退出码 {:?}；{}",
+            o.status.code(),
+            combined_output(&o)
+        ))
+        .with_hint("私钥带口令时 ssh-keygen 要交互输入；请用无口令的专用签名密钥，或先把它加进 ssh-agent 再用公钥路径签名")),
+        Err(e) => Err(sig_err(format!("签名失败：找不到 ssh-keygen（{}）", e))
+            .with_hint("OpenSSH 8.0+ 自带 -Y sign；Windows 可用 Git for Windows 的 ssh-keygen")),
+    };
+    let _ = std::fs::remove_file(&staged);
+    let _ = std::fs::remove_file(&staged_sig);
+    result
+}
+
+/// 校验索引旁的公网签名，不通过时报 E145。
+pub fn verify_signature(index: &Path, key: &VerifyKey) -> Result<()> {
+    let sig = sig_path(index);
+    if !sig.is_file() {
+        return Err(sig_err(format!("索引缺少签名文件 {}", sig.display()))
+            .with_hint("发布方要用 micc publish --签名密钥 重新发布；只想按旧行为做哈希校验时去掉 --公钥"));
+    }
+    if !key.allowed_signers.is_file() {
+        return Err(sig_err(format!(
+            "读不了公钥允许列表 {}",
+            key.allowed_signers.display()
+        ))
+        .with_hint("--公钥 指向 OpenSSH allowed_signers 格式：每行「身份 公钥 [注释]」"));
+    }
+    // 签名与允许列表都是公开数据，复制成 ASCII 临时名，绕开 Windows ssh-keygen 的 ANSI 路径。
+    let staged_sig = sig_staging("index.sig");
+    let staged_allowed = sig_staging("allowed_signers");
+    if std::fs::copy(&sig, &staged_sig).is_err() || std::fs::copy(&key.allowed_signers, &staged_allowed).is_err() {
+        let _ = std::fs::remove_file(&staged_sig);
+        let _ = std::fs::remove_file(&staged_allowed);
+        return Err(sig_err("签名校验失败：读不了签名或公钥允许列表".to_string()));
+    }
+    let stdin = std::fs::File::open(index);
+    let result = match stdin {
+        Ok(f) => {
+            let out = std::process::Command::new("ssh-keygen")
+                .args(["-Y", "verify", "-f"])
+                .arg(&staged_allowed)
+                .args(["-I", &key.identity, "-n", SIGN_NAMESPACE, "-s"])
+                .arg(&staged_sig)
+                .stdin(std::process::Stdio::from(f))
+                .output();
+            match out {
+                Ok(o) if o.status.success() => Ok(()),
+                Ok(o) => Err(sig_err(format!(
+                    "索引签名校验失败：{}",
+                    combined_output(&o)
+                ))
+                .with_hint("确认索引未被改动、--公钥 与发布方私钥配对、且该公钥没有在允许列表里用 @revoked 撤销；身份默认 li，可用 --签名身份 改")),
+                Err(e) => Err(sig_err(format!("签名校验失败：找不到 ssh-keygen（{}）", e))
+                    .with_hint("OpenSSH 8.0+ 自带 -Y verify；Windows 可用 Git for Windows 的 ssh-keygen")),
+            }
+        }
+        Err(e) => Err(sig_err(format!("读不了 {}：{}", index.display(), e))),
+    };
+    let _ = std::fs::remove_file(&staged_sig);
+    let _ = std::fs::remove_file(&staged_allowed);
+    result
+}
+
 /// 读入索引：支持本地路径、`file:` 前缀与 `http(s)://`。
-pub fn load_index(source: &str, temp: &mut TempDirs) -> Result<Index> {
+///
+/// 给了 `verify` 就要求索引带 `.sig` 并通过校验；不给则保持旧行为（只做哈希校验）。
+pub fn load_index(
+    source: &str,
+    temp: &mut TempDirs,
+    verify: Option<&VerifyKey>,
+) -> Result<Index> {
     let source = source.trim();
     if is_http(source) {
         let work = temp.alloc()?;
         let file = work.join("砾索引.toml");
         curl_download(source, &file)?;
+        if let Some(k) = verify {
+            let sig_url = format!("{}.sig", source);
+            curl_download(&sig_url, &sig_path(&file)).map_err(|_| {
+                sig_err(format!("下载索引签名 {} 失败", sig_url))
+                    .with_hint("确认发布方已用 --签名密钥 生成并上传 .sig，或去掉 --公钥 只做哈希校验")
+            })?;
+            verify_signature(&file, k)?;
+        }
         let text = read_index_text(&file)?;
         return parse_index(&text, None);
     }
@@ -65,6 +217,9 @@ pub fn load_index(source: &str, temp: &mut TempDirs) -> Result<Index> {
             1,
             format!("读不了 {}：文件不存在（用 --索引 指定索引文件，或放到包目录下）", path.display()),
         ));
+    }
+    if let Some(k) = verify {
+        verify_signature(&path, k)?;
     }
     let text = read_index_text(&path)?;
     let base = path.parent().map(|p| p.to_path_buf());

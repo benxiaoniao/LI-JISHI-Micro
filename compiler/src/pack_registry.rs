@@ -35,6 +35,8 @@ pub fn cmd_search(args: &[String]) -> i32 {
 /// 检索：关键词对包名做「全部包含」匹配（忽略大小写）；无关键词列出全部。
 fn do_search(args: &[String]) -> Result<usize> {
     let mut index: Option<String> = None;
+    let mut pubkey: Option<PathBuf> = None;
+    let mut identity = String::from("li");
     let mut keys: Vec<String> = Vec::new();
     let mut i = 0;
     while i < args.len() {
@@ -45,6 +47,20 @@ fn do_search(args: &[String]) -> Result<usize> {
                     return Err(usage_err("--索引 后面要跟索引文件或 URL"));
                 }
                 index = Some(args[i].clone());
+            }
+            "--公钥" | "--pubkey" => {
+                i += 1;
+                if i >= args.len() {
+                    return Err(usage_err("--公钥 后面要跟 allowed_signers 文件"));
+                }
+                pubkey = Some(PathBuf::from(&args[i]));
+            }
+            "--签名身份" | "--signer" => {
+                i += 1;
+                if i >= args.len() {
+                    return Err(usage_err("--签名身份 后面要跟身份名"));
+                }
+                identity = args[i].clone();
             }
             "-h" | "--help" => {
                 return Err(usage_err("micc search [关键词...] [--索引 <索引文件|URL>]"))
@@ -58,8 +74,12 @@ fn do_search(args: &[String]) -> Result<usize> {
     }
 
     let source = index.unwrap_or_else(|| INDEX_NAME.to_string());
+    let verify = pubkey.map(|p| pack_index::VerifyKey {
+        allowed_signers: p,
+        identity,
+    });
     let mut temp = TempDirs::new();
-    let idx = pack_index::load_index(&source, &mut temp)?;
+    let idx = pack_index::load_index(&source, &mut temp, verify.as_ref())?;
 
     let mut hits: Vec<&pack_index::IndexEntry> = Vec::new();
     for list in idx.by_name.values() {
@@ -107,6 +127,7 @@ fn do_publish(args: &[String]) -> Result<()> {
     let mut dir = PathBuf::from(".");
     let mut repo: Option<PathBuf> = None;
     let mut index: Option<PathBuf> = None;
+    let mut sign_key: Option<PathBuf> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -131,9 +152,16 @@ fn do_publish(args: &[String]) -> Result<()> {
                 }
                 index = Some(PathBuf::from(&args[i]));
             }
+            "--签名密钥" | "--sign-key" => {
+                i += 1;
+                if i >= args.len() {
+                    return Err(usage_err("--签名密钥 后面要跟私钥文件（或 ssh-agent 里的公钥）"));
+                }
+                sign_key = Some(PathBuf::from(&args[i]));
+            }
             "-h" | "--help" => {
                 return Err(usage_err(
-                    "micc publish [--目录 <包目录>] [--索引 <索引文件>] [--仓库 <目录>]",
+                    "micc publish [--目录 <包目录>] [--索引 <索引文件>] [--仓库 <目录>] [--签名密钥 <私钥>]",
                 ))
             }
             other => return Err(usage_err(format!("不认识的参数：{}", other))),
@@ -251,7 +279,18 @@ fn do_publish(args: &[String]) -> Result<()> {
     std::fs::write(&index_path, render_index(&rows))
         .map_err(|e| e138(format!("写不了 {}：{}", index_path.display(), e)))?;
 
+    if let Some(key) = &sign_key {
+        pack_index::sign_index(&index_path, key)?;
+    }
+
     println!("发布完成：{} {}", m.name, m.version);
+    if sign_key.is_some() {
+        println!(
+            "  签名：{}（ssh-keygen，命名空间 {}）",
+            pack_index::sig_path(&index_path).display(),
+            pack_index::SIGN_NAMESPACE
+        );
+    }
     println!("  归档：{}（{} B）", final_zip.display(), bytes.len());
     println!("  校验：{}", hash);
     println!("  索引：{}（共 {} 条）", index_path.display(), rows.len());
