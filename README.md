@@ -4,6 +4,7 @@
 
 > **基石语言（JISHI）面向单片机的分支。**
 > 仓库名：`LI-JISHI-Micro` · 语言名：**砾** · 许可证：[MIT-0](LICENSE)
+> 最新版本：**[v0.1.1](https://github.com/benxiaoniao/LI-JISHI-Micro/releases/tag/v0.1.1)**（2026-11-15）
 
 砾保留基石的中文关键字与缩进写法，但把「值、指令、内存、错误」全部重新设计成能在
 **STM32F103C8T6（Cortex-M3，64 KB Flash / 20 KB SRAM）** 上活下来的尺寸：
