@@ -38,6 +38,7 @@ fn do_search(args: &[String]) -> Result<usize> {
     let mut pubkey: Option<PathBuf> = None;
     let mut identity = String::from("li");
     let mut keys: Vec<String> = Vec::new();
+    let mut as_json = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -62,8 +63,11 @@ fn do_search(args: &[String]) -> Result<usize> {
                 }
                 identity = args[i].clone();
             }
+            "--json" => as_json = true,
             "-h" | "--help" => {
-                return Err(usage_err("micc search [关键词...] [--索引 <索引文件|URL>]"))
+                return Err(usage_err(
+                    "micc search [关键词...] [--索引 <索引文件|URL>] [--公钥 <allowed_signers>] [--json]",
+                ))
             }
             other if other.starts_with('-') => {
                 return Err(usage_err(format!("不认识的参数：{}", other)))
@@ -91,6 +95,13 @@ fn do_search(args: &[String]) -> Result<usize> {
         }
     }
     if hits.is_empty() {
+        if as_json {
+            println!(
+                "{{\"索引\":\"{}\",\"条数\":0,\"包\":[]}}",
+                json_escape(&source)
+            );
+            return Ok(0);
+        }
         let what = if keys.is_empty() {
             "索引里没有包".to_string()
         } else {
@@ -102,11 +113,56 @@ fn do_search(args: &[String]) -> Result<usize> {
 
     hits.sort_by(|a, b| a.name.cmp(&b.name).then(b.version.cmp(&a.version)));
     let count = hits.len();
+    if as_json {
+        println!("{}", render_json(&source, &hits));
+        return Ok(count);
+    }
     println!("索引：{}；命中 {} 条", source, count);
     for e in &hits {
         println!("{} {}　{}　{}", e.name, e.version, e.source, e.hash);
     }
     Ok(count)
+}
+
+/// JSON 字符串转义：只处理会破坏单行 JSON 的字符（与索引里的中文原样保留）。
+fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push(' '),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// `search --json` 的输出：顶层 索引/条数/包，条目字段与 `砾索引.toml` 一一对应。
+/// 外置包管理站直接读这份 JSON，不再维护第二套包目录。
+fn render_json(source: &str, hits: &[&pack_index::IndexEntry]) -> String {
+    let mut s = String::from("{\"索引\":\"");
+    s.push_str(&json_escape(source));
+    s.push_str("\",\"条数\":");
+    s.push_str(&hits.len().to_string());
+    s.push_str(",\"包\":[");
+    for (i, e) in hits.iter().enumerate() {
+        if i > 0 {
+            s.push(',');
+        }
+        s.push_str(&format!(
+            "{{\"名字\":\"{}\",\"版本\":\"{}\",\"来源\":\"{}\",\"校验\":\"{}\"}}",
+            json_escape(&e.name),
+            e.version,
+            json_escape(&e.source),
+            json_escape(&e.hash)
+        ));
+    }
+    s.push_str("]}");
+    s
 }
 
 pub fn cmd_publish(args: &[String]) -> i32 {

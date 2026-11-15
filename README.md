@@ -263,10 +263,11 @@ docs/                      路径图、字节码规格、原生函数表、调�
 | [tools/test.ps1](tools/test.ps1) | 输出回归（逐字节对比 `tests\expected`，58/58） |
 | [tools/test-errors.ps1](tools/test-errors.ps1) | 错误码回归（96/96） |
 | [tools/test-native-import.ps1](tools/test-native-import.ps1) | 原生导入回归（引脚 / ADC / 定时器 / 队列 / 信号量 / 外部中断各三类错误 + 任务 + 正确用例，37/37） |
-| [tools/test-packages.ps1](tools/test-packages.ps1) | 包用例回归（单包/双包/菱形/离线/预算/跨包类型/公开私有/标准库/接口，72/72） |
+| [tools/test-packages.ps1](tools/test-packages.ps1) | 包用例回归（单包/双包/菱形/离线/预算/跨包类型/公开私有/标准库/接口/签名/包站，93/93） |
 | [tools/test-debug.ps1](tools/test-debug.ps1) | 调试表回归（双向查询/跨函数/跨包/剥离/损坏/旧文件，54/54） |
 | [tools/test-arduino.ps1](tools/test-arduino.ps1) | Arduino 库验收（生成库 + Arduino 兼容桩编译/运行，14/14） |
 | [tools/pack-arduino.ps1](tools/pack-arduino.ps1) | 生成 STM32duino 库目录与 zip（`-Example 名字` 换内嵌程序，`-NoZip` 只出目录） |
+| [tools/index-site.ps1](tools/index-site.ps1) | 从 `砾索引.toml` 生成静态包站 `index.html` + `index.json`（`-Index` / `-Out` / `-Pubkey`） |
 | [tools/size-report.ps1](tools/size-report.ps1) | 固件 Flash/RAM 体积报告与基线对比（`-Label` 命名，`-UpdateBaseline` 更新基线） |
 | [tools/toolchains.ps1](tools/toolchains.ps1) | 工具链定位与版本自检 |
 | [tools/fetch-toolchain.ps1](tools/fetch-toolchain.ps1) | 按锁文件下载并校验 ARM 工具链 |

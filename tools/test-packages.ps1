@@ -1392,6 +1392,87 @@ try {
         Check "search --公钥：签名通过并列出条目" (($LASTEXITCODE -eq 0) -and ($o -match "库 1\.0\.0")) $o
     }
 
+    # ---------- 27. 外置包站读取同一份索引（LI028） ----------
+    # 站点只消费 `micc search --json` 与 `砾索引.toml`，不维护第二套包目录。
+    $siteRoot = Join-Path $sandbox "site"
+    $siteRepo = Join-Path $siteRoot "repo"
+    New-Item -ItemType Directory -Path $siteRepo -Force | Out-Null
+    New-Pkg (Join-Path $siteRoot "甲") "[包]`n名字 = ""甲""`n版本 = ""1.0.0""`n入口 = ""主.jsh""`n" "打印(""甲"")`n"
+    New-Pkg (Join-Path $siteRoot "乙") "[包]`n名字 = ""乙""`n版本 = ""2.1.0""`n入口 = ""主.jsh""`n" "打印(""乙"")`n"
+    $o1 = (& $micc publish --目录 (Join-Path $siteRoot "甲") --仓库 $siteRepo 2>&1 | Out-String)
+    $o2 = (& $micc publish --目录 (Join-Path $siteRoot "乙") --仓库 $siteRepo 2>&1 | Out-String)
+    $siteIdx = Join-Path $siteRepo "砾索引.toml"
+    Check "包站夹具：发布两个包" (($LASTEXITCODE -eq 0) -and (Test-Path $siteIdx)) ($o1 + $o2)
+
+    $json = (& $micc search --json --索引 $siteIdx 2>&1 | Out-String).Trim()
+    $data = $null
+    try { $data = $json | ConvertFrom-Json } catch { }
+    Check "search --json：可解析、条数与字段齐全" `
+        (($null -ne $data) -and ($data.'条数' -eq 2) -and (@($data.'包').Count -eq 2) -and
+         (@($data.'包' | Where-Object { (-not $_.'名字') -or (-not $_.'版本') -or (-not $_.'来源') -or
+             ($_.'校验' -notmatch '^fnv1a64:[0-9a-f]{16}$') }).Count -eq 0)) $json
+    $linksOk = $true
+    foreach ($p in @($data.'包')) {
+        $archive = Join-Path $siteRepo ([string]$p.'来源').Replace('/', [IO.Path]::DirectorySeparatorChar)
+        if (-not (Test-Path $archive)) { $linksOk = $false }
+    }
+    Check "search --json：来源都能落到仓库里的归档" $linksOk $json
+
+    $one = (& $micc search --json 甲 --索引 $siteIdx 2>&1 | Out-String)
+    $oneData = $null
+    try { $oneData = $one | ConvertFrom-Json } catch { }
+    Check "search --json：关键词过滤只留 1 条" (($null -ne $oneData) -and ($oneData.'条数' -eq 1)) $one
+    $none = (& $micc search --json 不存在 --索引 $siteIdx 2>&1 | Out-String)
+    $noneCode = $LASTEXITCODE
+    $noneData = $null
+    try { $noneData = $none | ConvertFrom-Json } catch { }
+    Check "search --json：无命中仍是合法 JSON（退出码 1）" `
+        (($noneCode -eq 1) -and ($null -ne $noneData) -and ($noneData.'条数' -eq 0)) $none
+
+    $siteOut = Join-Path $siteRoot "站"
+    $siteJsonPath = Join-Path $siteOut "index.json"
+    $siteHtmlPath = Join-Path $siteOut "index.html"
+    $o = (& (Join-Path $PSScriptRoot "index-site.ps1") -Index $siteIdx -Out $siteOut 2>&1 | Out-String)
+    Check "index-site：生成 index.html + index.json" `
+        ((Test-Path $siteJsonPath) -and (Test-Path $siteHtmlPath)) $o
+    $siteData = $null
+    try { $siteData = (Get-Content $siteJsonPath -Raw) | ConvertFrom-Json } catch { }
+    Check "index-site：JSON 与索引同源（2 条、未验签）" `
+        (($null -ne $siteData) -and ($siteData.'条数' -eq 2) -and (@($siteData.'包').Count -eq 2) -and
+         ($siteData.'已验签' -eq $false)) ($o + "`n" + (Get-Content $siteJsonPath -Raw -ErrorAction SilentlyContinue))
+    $firstLink = @($siteData.'包')[0].'链接'
+    $linkPath = [IO.Path]::GetFullPath((Join-Path $siteOut $firstLink))
+    Check "index-site：链接从站点目录指向真实归档" (Test-Path $linkPath) ("链接：" + $firstLink)
+    $html = Get-Content $siteHtmlPath -Raw
+    Check "index-site：HTML 列出两个包并声明索引来源" `
+        (($html -match '甲') -and ($html -match '乙') -and ($html -match '砾索引\.toml')) ""
+
+    if (($null -ne $ssh) -and (Test-Path $allowed) -and (Test-Path ($signIdx + ".sig"))) {
+        $siteSigned = Join-Path $siteRoot "站-签名"
+        $o = (& (Join-Path $PSScriptRoot "index-site.ps1") -Index $signIdx -Out $siteSigned -Pubkey $allowed 2>&1 | Out-String)
+        $signedData = $null
+        try { $signedData = (Get-Content (Join-Path $siteSigned "index.json") -Raw) | ConvertFrom-Json } catch { }
+        Check "index-site -Pubkey：签名通过并标记已验签" `
+            (($null -ne $signedData) -and ($signedData.'已验签' -eq $true) -and ($signedData.'条数' -eq 1)) $o
+        $signedHtml = Get-Content (Join-Path $siteSigned "index.html") -Raw -ErrorAction SilentlyContinue
+        Check "index-site -Pubkey：HTML 显示已验签" ($signedHtml -match '已验签') ""
+
+        $revokedOut = Join-Path $siteRoot "站-撤销"
+        $revokedFailed = $false
+        try {
+            & (Join-Path $PSScriptRoot "index-site.ps1") -Index $signIdx -Out $revokedOut -Pubkey $revokedList *> $null
+        }
+        catch {
+            $revokedFailed = $true
+        }
+        Check "index-site -Pubkey 撤销：拒绝生成" `
+            ($revokedFailed -and (-not (Test-Path (Join-Path $revokedOut "index.html")))) ""
+    }
+    else {
+        Write-Host "[跳过] 包站签名：本节签名夹具不可用"
+        $script:skip++
+    }
+
     Write-Host ("包用例：共 " + $script:total + " 个，失败 " + $script:fail + " 个，跳过 " + $script:skip + " 个")
     if ($script:fail -gt 0) { exit 1 }
     exit 0
