@@ -5,7 +5,9 @@
 param(
     [string]$Example = "你好",
     # 额外宏，用于体积/观测两档对照，例如 -Define "-DJM_STACK_DIAG=0"
-    [string[]]$Define = @()
+    [string[]]$Define = @(),
+    # LI029 延迟取证构建：DWT CYCCNT + PendSV/SysTick/EXTI 插桩，只跑测量演示
+    [switch]$Latency
 )
 
 $ErrorActionPreference = "Stop"
@@ -26,6 +28,34 @@ Push-Location $root
 try {
     $out = "build/stm32"
     New-Item -ItemType Directory -Force -Path $out | Out-Null
+
+    # 延迟取证：不改仓库里的切换汇编，构建时在 PendSV 入口/出口插入两个 C 调用。
+    $asmPort = "firmware/stm32f103/jmk_port_cm3.s"
+    $extraDefs = @()
+    $extraSrc = @()
+    if ($Latency) {
+        $asmPort = Join-Path $out "jmk_port_cm3_lat.s"
+        $text = [IO.File]::ReadAllText((Join-Path $root "firmware/stm32f103/jmk_port_cm3.s"))
+        $entry = '(PendSV_Handler:\r?\n)(\s*mrs r0, psp)'
+        $text = [regex]::Replace(
+            $text,
+            $entry,
+            "`$1    push {r0, lr}`r`n    bl jmk_lat_switch_enter`r`n    pop {r0, lr}`r`n`$2"
+        )
+        $exit = '(msr psp, r0\r?\n\s*isb\r?\n)(\s*bx lr\s*/\* 异常返回)'
+        $text = [regex]::Replace(
+            $text,
+            $exit,
+            "`$1    push {r0, lr}`r`n    bl jmk_lat_switch_exit`r`n    pop {r0, lr}`r`n`$2"
+        )
+        if (-not $text.Contains("jmk_lat_switch_enter") -or -not $text.Contains("jmk_lat_switch_exit")) {
+            throw "PendSV 插桩失败：jmk_port_cm3.s 的入口/出口写法已变化"
+        }
+        [IO.File]::WriteAllText($asmPort, $text, (New-Object System.Text.UTF8Encoding($false)))
+        $extraDefs = @("-DJM_LATENCY_DEMO=1", "-DJMK_IPC_DEMO=0")
+        $extraSrc = @("firmware/stm32f103/jmk_latency.c")
+        Write-Host "== 延迟取证构建：PendSV/SysTick/EXTI 插桩 + DWT CYCCNT"
+    }
 
     Write-Host "== 1/6 构建 micc"
     # cargo 把进度（含 Finished）写到 stderr；Stop 会把任意 stderr 当成致命错误。
@@ -75,6 +105,7 @@ try {
         -fdata-sections -ffunction-sections `
         -DJM_HEAP_SIZE=6144 `
         @Define `
+        @extraDefs `
         -I "runtime/include" -I "runtime/src" -I "firmware/stm32f103" `
         -nostartfiles `
         -T "firmware/stm32f103/stm32f103c8.ld" `
@@ -82,8 +113,9 @@ try {
         "-Wl,-Map=$out/jishim.map" `
         "-specs=$NanoSpecs" "-specs=$NosysSpecs" `
         "firmware/stm32f103/startup_stm32f103c8.s" `
-        "firmware/stm32f103/jmk_port_cm3.s" `
+        $asmPort `
         $src `
+        @extraSrc `
         -o "$out/jishim.elf"
     if ($LASTEXITCODE -ne 0) { throw "链接失败" }
 

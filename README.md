@@ -237,6 +237,7 @@ firmware/stm32f103/        板级固件
   jmk.c / jmk.h / jmk_port_cm3.s   JMK 任务内核
   stm32f103_port.c / .h      USART1 / SysTick / GPIO / ADC1 / TIM2
   f103_native.c             原生函数实现（展开 runtime/include/jm_native_table.h）
+  jmk_latency.c / .h        LI029 延迟取证（仅 -Latency 构建，默认不编）
   main.c                     启动横幅、注册原生表、把内嵌字节码放进 JMK 任务运行
 examples/                  砾源码示例（board/ 下是上板示例）
 tests/expected/            主机回归基准输出
@@ -257,7 +258,7 @@ docs/                      路径图、字节码规格、原生函数表、调�
 | 脚本 | 用途 |
 |------|------|
 | [tools/build.ps1](tools/build.ps1) | 主机构建 + 六套回归（`-SkipTests` 跳过回归，`-SkipPackages` 跳过包用例） |
-| [tools/build-firmware.ps1](tools/build-firmware.ps1) | 交叉编译固件（`-Example 名字` 切换示例） |
+| [tools/build-firmware.ps1](tools/build-firmware.ps1) | 交叉编译固件（`-Example 名字` 切换示例；`-Latency` 生成 DWT 延迟取证构建） |
 | [tools/flash-firmware.ps1](tools/flash-firmware.ps1) | SWD 烧录（默认预览，`-Apply` 才写） |
 | [tools/capture-serial.ps1](tools/capture-serial.ps1) | 串口录制到 `build\uart\`（`-Port` / `-Seconds` / `-Out`） |
 | [tools/test.ps1](tools/test.ps1) | 输出回归（逐字节对比 `tests\expected`，58/58） |

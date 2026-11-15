@@ -2,6 +2,9 @@
 #include "stm32f103_port.h"
 #include "jm_port.h"
 #include "jmk.h"
+#if JM_LATENCY_DEMO
+#include "jmk_latency.h"
+#endif
 
 /* ---------------- 寄存器定义（F103 中容量，最小集） ---------------- */
 
@@ -372,8 +375,14 @@ static void systick_init(uint32_t clk)
 /* SysTick 中断：1 ms 一次，由向量表直接引用 */
 void SysTick_Handler(void)
 {
+#if JM_LATENCY_DEMO
+    jmk_lat_tick_enter();
+#endif
     g_ms++;
     jmk_tick();
+#if JM_LATENCY_DEMO
+    jmk_lat_tick_exit();
+#endif
 }
 
 /* ---------------- 对外接口 ---------------- */
@@ -1566,6 +1575,9 @@ static void exti_serve(uint32_t first, uint32_t last)
     uint32_t pr = EXTI_PR;
     uint32_t line;
 
+#if JM_LATENCY_DEMO
+    jmk_lat_isr_enter();   /* 量程起点：EXTI 入口（清挂起前） */
+#endif
     for (line = first; line <= last; line++) {
         uint32_t bit = 1u << line;
         if ((pr & bit) != 0u) {

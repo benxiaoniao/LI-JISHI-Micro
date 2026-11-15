@@ -1,0 +1,48 @@
+LI029 跨优先级切换与端到端延迟实测（DWT CYCCNT）
+日期：2026-11-15
+板卡：STM32F103C8T6（BluePill），72 MHz，ST-LINK V2J29S7，COM4 115200 8N1
+固件：tools/build-firmware.ps1 -Example 你好 -Latency
+      FLASH 55 624 B / RAM 17 772 B（插桩取证构建）
+说明：没有逻辑分析仪，量程全部来自片上 DWT CYCCNT；不含外部信号→ISR 入栈、
+      PendSV 出口后的硬件出栈、任务→GPIO 输出。插桩调用未扣除。
+
+演示结构：high(优先级 3) / consumer(2) / low(1)，200 轮：
+  high 每轮 jmk_delay(1)（3→1 阻塞切换）；
+  low  每轮软件触发 EXTI0 → ISR 给出信号量 → consumer 立即唤醒（1→2→1）；
+  两个任务同时被 1 ms tick 唤醒时，high 先运行（0→3，tick 触发）。
+
+原始串口（两次独立复位重跑逐字一致）：
+
+砾（LI）运行时 · STM32F103C8T6
+系统时钟: 72000000 Hz
+内嵌程序: 132 字节
+[原生] 板级函数表已登记：f103_board, f103_adc, f103_timer, ipc_queue, ipc_sem, f103_exti, f103_bus
+
+
+[延迟] 演示：high(3)/consumer(2)/low(1)，200 轮
+
+[延迟] 72 MHz，DWT CYCCNT；量程含插桩调用，未扣除
+[延迟] 切换 0→1: n=1 avg=297 max=297　tick 触发: n=1 avg=297 max=297
+[延迟] 切换 0→3: n=200 avg=297 max=297　tick 触发: n=200 avg=297 max=297
+[延迟] 切换 1→0: n=201 avg=238 max=238
+[延迟] 切换 1→2: n=200 avg=297 max=297
+[延迟] 切换 2→1: n=201 avg=238 max=238
+[延迟] 切换 3→1: n=200 avg=238 max=238
+[延迟] 切换 3→2: n=1 avg=238 max=238
+[延迟] tick→任务恢复: n=201 avg=881 max=882
+[延迟] EXTI→任务恢复: n=200 avg=905 max=905（ISR 触发=200 次，消费任务首条语句）
+[延迟] 说明：不含外部信号→ISR 入栈、PendSV 出口后的硬件出栈、任务→GPIO 输出
+
+换算（72 MHz）：238 周期 ≈ 3.31 µs；297 ≈ 4.13 µs；881 ≈ 12.24 µs；905 ≈ 12.57 µs。
+
+复现：
+  tools/build-firmware.ps1 -Example 你好 -Latency
+  tools/flash-firmware.ps1 -Apply
+  tools/capture-serial.ps1 -Port COM4 -Seconds 8 -Out build/uart/li029-latency.log
+  # capture 打开后 2 s 内用 STM32_Programmer_CLI -c port=SWD mode=UR -rst 复位
+
+未覆盖：
+  - 外部管脚边沿 → EXTI 入口的异常入栈（约 12 周期量级，未用分析仪计时）；
+  - PendSV 出口 bx lr 之后的硬件出栈与任务恢复；
+  - 任务恢复 → GPIO 翻转的输出延迟；
+  - 更细的 tick 内部拆分（jmk_tick 自身耗时）与带 FPU 上下文（本板无 FPU）。

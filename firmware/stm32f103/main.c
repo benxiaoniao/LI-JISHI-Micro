@@ -2,6 +2,9 @@
 #include "stm32f103_port.h"
 #include "f103_native.h"
 #include "jmk.h"
+#if JM_LATENCY_DEMO
+#include "jmk_latency.h"
+#endif
 
 /*
  * 示例开关（两个示例各建 2 个任务，6 个槽位放不下同时开）：
@@ -370,6 +373,11 @@ int main(void)
     port_fault_demo_trigger();
 #endif
     port_log("\r\n");
+
+#if JM_LATENCY_DEMO
+    /* LI029 取证构建：只跑延迟演示，不创建 vm/led/log 任务。 */
+    jmk_latency_demo();
+#endif
 
 #if JMK_IPC_DEMO
     port_log("[同步] 队列缓冲: ");
