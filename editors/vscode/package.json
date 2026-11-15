@@ -2,7 +2,7 @@
   "name": "li-vscode",
   "displayName": "砾（LI）",
   "description": "砾语言（.jsh）的编辑器支持：语法高亮、编译诊断、运行/断点、跳转到定义与语言卡补全。",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publisher": "jishi-micro-li",
   "license": "MIT-0",
   "keywords": [
