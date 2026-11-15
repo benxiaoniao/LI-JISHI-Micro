@@ -1320,12 +1320,14 @@ try {
         $signRoot = Join-Path $sandbox "sign"
         New-Item -ItemType Directory -Path $signRoot -Force | Out-Null
         $key = Join-Path $signRoot "key"
-        # 空口令：PS 5.1 与 pwsh 7 对空参数的处理不同，按平台分开写；管道 $null 兜底避免交互挂住。
-        if ($env:OS -eq "Windows_NT") {
-            $null | & ssh-keygen -q -t ed25519 -N '""' -f $key 2>&1 | Out-Null
+        # 空口令：PowerShell 5.1 会把 -N '' 当成缺参数（于是交互式提问，CI 上会挂住），
+        # 必须写成 '""'；pwsh 6+ 则正好相反，'' 才是空串。按版本分开写，管道 $null 兜底。
+        $psMajor = $PSVersionTable.PSVersion.Major
+        if ($psMajor -ge 6) {
+            $null | & ssh-keygen -q -t ed25519 -N '' -f $key 2>&1 | Out-Null
         }
         else {
-            $null | & ssh-keygen -q -t ed25519 -N '' -f $key 2>&1 | Out-Null
+            $null | & ssh-keygen -q -t ed25519 -N '""' -f $key 2>&1 | Out-Null
         }
         Check "签名密钥：ssh-keygen 生成 ed25519 无口令密钥" ((Test-Path $key) -and (Test-Path ($key + ".pub"))) "密钥生成失败"
 
