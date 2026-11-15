@@ -4,6 +4,15 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* 可选的本工程配置：Arduino 库等集成方用 src/jm_config.h 覆盖默认上限
+   （例如 F103C8 只有 20 KB RAM，默认 12 KB 堆会和 core 抢内存）。
+   没有这个文件时完全不受影响。 */
+#if defined(__has_include)
+#  if __has_include("jm_config.h")
+#    include "jm_config.h"
+#  endif
+#endif
+
 /* ---- 可配置的资源上限（改宏即可适配不同芯片） ---- */
 #ifndef JM_HEAP_SIZE
 #define JM_HEAP_SIZE (12 * 1024)
