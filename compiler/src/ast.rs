@@ -58,6 +58,14 @@ pub enum ExprKind {
     Compare(Box<Expr>, Vec<(CmpOp, Box<Expr>)>),
     Call(Box<Expr>, Vec<Expr>),
     Index(Box<Expr>, Box<Expr>),
+    /// `a ?? b`：`a` 为 `空` 时取 `b`，否则取 `a`；编译期降级为临时槽 + 判空跳转。
+    Coalesce(Box<Expr>, Box<Expr>),
+    /// `对象?.字段`：对象为 `空` 时结果直接为 `空`。
+    SafeMember(Box<Expr>, String),
+    /// `对象?.方法(实参...)`：对象为 `空` 时结果为 `空`，实参不求值。
+    SafeMethodCall(Box<Expr>, String, Vec<Expr>),
+    /// `对象?[下标]`：对象为 `空` 时结果为 `空`，下标不求值。
+    SafeIndex(Box<Expr>, Box<Expr>),
     /// `新建 类名(实参...)`
     New(String, Vec<Expr>),
     /// `对象.字段`（读）

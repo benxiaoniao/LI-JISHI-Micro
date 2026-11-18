@@ -742,6 +742,21 @@ impl<'a> Renamer<'a> {
                 self.expr(a)?;
                 self.expr(b)?;
             }
+            ExprKind::Coalesce(a, b) => {
+                self.expr(a)?;
+                self.expr(b)?;
+            }
+            ExprKind::SafeMember(base, _f) => self.expr(base)?,
+            ExprKind::SafeMethodCall(base, _n, args) => {
+                self.expr(base)?;
+                for a in args {
+                    self.expr(a)?;
+                }
+            }
+            ExprKind::SafeIndex(a, b) => {
+                self.expr(a)?;
+                self.expr(b)?;
+            }
             ExprKind::Member(base, _f) => self.expr(base)?,
             ExprKind::MethodCall(base, _n, args) => {
                 self.expr(base)?;
@@ -933,6 +948,16 @@ pub fn heap_estimate(stmts: &[Stmt], class_fields: &HashMap<String, usize>) -> u
                 n
             }
             ExprKind::Index(a, b) => expr(a, cf) + expr(b, cf),
+            ExprKind::Coalesce(a, b) => expr(a, cf) + expr(b, cf),
+            ExprKind::SafeMember(a, _) => expr(a, cf),
+            ExprKind::SafeMethodCall(a, _, args) => {
+                let mut n = expr(a, cf);
+                for x in args {
+                    n += expr(x, cf);
+                }
+                n
+            }
+            ExprKind::SafeIndex(a, b) => expr(a, cf) + expr(b, cf),
             ExprKind::Member(a, _) => expr(a, cf),
             ExprKind::MethodCall(a, _, args) => {
                 let mut n = expr(a, cf);

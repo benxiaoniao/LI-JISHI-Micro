@@ -314,7 +314,7 @@ impl Lexer {
             let rest: String = chars[i..].iter().map(|x| norm(*x)).collect();
             let mut matched: Option<(&'static str, usize)> = None;
             for op in [
-                "//=", "**=", "<<", ">>", "**", "//", "==", "!=", "<=", ">=", "+=", "-=", "*=", "/=", "%=", "->", "..",
+                "//=", "**=", "<<", ">>", "**", "//", "==", "!=", "<=", ">=", "+=", "-=", "*=", "/=", "%=", "->", "??", "?.", "?[", "..",
             ] {
                 if rest.starts_with(op) {
                     matched = Some((op, op.chars().count()));

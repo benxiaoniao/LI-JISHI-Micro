@@ -1172,7 +1172,23 @@ impl Parser {
     }
 
     pub fn parse_expr(&mut self) -> Result<Expr> {
-        self.parse_or()
+        self.parse_coalesce()
+    }
+
+    /// `??`：比 `或` 更低（`a 或 b ?? c` 是 `(a 或 b) ?? c`），左结合。
+    fn parse_coalesce(&mut self) -> Result<Expr> {
+        let mut left = self.parse_or()?;
+        while matches!(self.peek().tok, Tok::Op("??")) {
+            self.pos += 1;
+            let right = self.parse_or()?;
+            let (line, col) = (left.line, left.col);
+            left = Expr {
+                kind: ExprKind::Coalesce(Box::new(left), Box::new(right)),
+                line,
+                col,
+            };
+        }
+        Ok(left)
     }
 
     fn parse_or(&mut self) -> Result<Expr> {
@@ -1428,6 +1444,54 @@ impl Parser {
                     let (line, col) = (e.line, e.col);
                     e = Expr {
                         kind: ExprKind::Index(Box::new(e), Box::new(idx)),
+                        line,
+                        col,
+                    };
+                }
+                Tok::Op("?.") => {
+                    self.pos += 1;
+                    if !matches!(self.peek().tok, Tok::Ident(_)) {
+                        return Err(self.err("E108", "「?.」后面应该写字段名或方法名"));
+                    }
+                    let (name, _, _) = self.expect_ident()?;
+                    let (line, col) = (e.line, e.col);
+                    if matches!(self.peek().tok, Tok::Op("(")) {
+                        self.pos += 1;
+                        let mut args = Vec::new();
+                        if !matches!(self.peek().tok, Tok::Op(")")) {
+                            loop {
+                                args.push(self.parse_expr()?);
+                                if matches!(self.peek().tok, Tok::Op(",")) {
+                                    self.pos += 1;
+                                    if matches!(self.peek().tok, Tok::Op(")")) {
+                                        break;
+                                    }
+                                    continue;
+                                }
+                                break;
+                            }
+                        }
+                        self.expect_op(")")?;
+                        e = Expr {
+                            kind: ExprKind::SafeMethodCall(Box::new(e), name, args),
+                            line,
+                            col,
+                        };
+                    } else {
+                        e = Expr {
+                            kind: ExprKind::SafeMember(Box::new(e), name),
+                            line,
+                            col,
+                        };
+                    }
+                }
+                Tok::Op("?[") => {
+                    self.pos += 1;
+                    let idx = self.parse_expr()?;
+                    self.expect_op("]")?;
+                    let (line, col) = (e.line, e.col);
+                    e = Expr {
+                        kind: ExprKind::SafeIndex(Box::new(e), Box::new(idx)),
                         line,
                         col,
                     };

@@ -265,6 +265,13 @@ try {
       assert.strictEqual(core.formatSource(src), src, name + ' 被格式化改写了');
     }
   });
+  check('格式化：?? 两侧留空格，?. / ?[ 不留空格', () => {
+    const src = '令 x=空??1\n打印(甲?.值, 表?[0])\n';
+    assert.strictEqual(
+      core.formatSource(src),
+      '令 x = 空 ?? 1\n打印(甲?.值, 表?[0])\n'
+    );
+  });
   // ---------- 8. 调试事件流（jmrun --dbg --事件流） ----------
   check('buildDebugArgs：--dbg --事件流 + 断点 + task + jmb', () => {
     const args = core.buildDebugArgs({

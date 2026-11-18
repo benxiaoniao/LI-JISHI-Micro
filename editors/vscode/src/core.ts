@@ -286,7 +286,7 @@ interface FmtToken {
   gap?: number;
 }
 
-const MULTI_OPS = ['==', '!=', '<=', '>=', '+=', '-=', '*=', '/=', '%=', '**', '//', '<<', '>>', '->'];
+const MULTI_OPS = ['==', '!=', '<=', '>=', '+=', '-=', '*=', '/=', '%=', '**', '//', '<<', '>>', '->', '??', '?.', '?['];
 const PUNCT_CHARS = '()[]{},.:：，、；';
 const NO_SPACE_BEFORE = ')]}.,:：，、；';
 
@@ -407,6 +407,13 @@ function isValueEnd(tok: FmtToken): boolean {
 function needSpace(prev: FmtToken, prevUnary: boolean, tok: FmtToken): boolean {
   if (tok.kind === 'com') {
     return false; // 注释前的空格在 formatTokens 里按原样保留
+  }
+  // 安全访问的 `?.` / `?[` 两侧不留空格
+  if (tok.kind === 'op' && (tok.text === '?.' || tok.text === '?[')) {
+    return false;
+  }
+  if (prev.kind === 'op' && (prev.text === '?.' || prev.text === '?[')) {
+    return false;
   }
   if (tok.kind === 'punct' && NO_SPACE_BEFORE.includes(tok.text)) {
     return false;

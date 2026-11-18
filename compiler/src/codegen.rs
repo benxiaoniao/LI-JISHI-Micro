@@ -492,6 +492,16 @@ fn obvious_ty(b: &Builder, fs: &FnState, e: &Expr) -> Option<Ty> {
             bin_ty(*op, a, c)
         }
         ExprKind::Compare(..) => Some(Ty::Bool),
+        ExprKind::Coalesce(l, r) => {
+            let a = obvious_ty(b, fs, l);
+            let c = obvious_ty(b, fs, r)?;
+            match a {
+                Some(Ty::Nil) => Some(c),
+                Some(x) if x == c => Some(c),
+                _ => None,
+            }
+        }
+        ExprKind::SafeMember(..) | ExprKind::SafeMethodCall(..) | ExprKind::SafeIndex(..) => None,
         ExprKind::Call(callee, _) => match &callee.kind {
             ExprKind::Name(n) => builtin_ret(n).or_else(|| {
                 b.func_sigs
@@ -1059,6 +1069,21 @@ fn collect_free_expr(e: &Expr, bound: &HashSet<String>, out: &mut Vec<String>) {
             }
         }
         ExprKind::Index(obj, idx) => {
+            collect_free_expr(obj, bound, out);
+            collect_free_expr(idx, bound, out);
+        }
+        ExprKind::Coalesce(l, r) => {
+            collect_free_expr(l, bound, out);
+            collect_free_expr(r, bound, out);
+        }
+        ExprKind::SafeMember(obj, _) => collect_free_expr(obj, bound, out),
+        ExprKind::SafeMethodCall(obj, _, args) => {
+            collect_free_expr(obj, bound, out);
+            for a in args {
+                collect_free_expr(a, bound, out);
+            }
+        }
+        ExprKind::SafeIndex(obj, idx) => {
             collect_free_expr(obj, bound, out);
             collect_free_expr(idx, bound, out);
         }
@@ -2701,6 +2726,14 @@ fn cmp_code(op: CmpOp) -> u8 {
     }
 }
 
+/// 栈顶值 == 空？结果压回布尔；不改 JMB、不加指令。
+fn emit_nil_cmp(fs: &mut FnState, b: &mut Builder, line: u32, col: u32) -> Result<()> {
+    let c = b.const_nil(line, col)?;
+    fs.emit_u8(OP_CONST, c);
+    fs.emit_u8(OP_CMP, CMP_EQ);
+    Ok(())
+}
+
 fn compile_expr(fs: &mut FnState, b: &mut Builder, e: &Expr) -> Result<()> {
     match &e.kind {
         ExprKind::Int(v) => {
@@ -2827,6 +2860,21 @@ fn compile_expr(fs: &mut FnState, b: &mut Builder, e: &Expr) -> Result<()> {
             compile_expr(fs, b, r)?;
             let here = fs.here();
             fs.patch(j, here);
+        }
+        ExprKind::Coalesce(l, r) => {
+            // `a ?? b`：a 只求值一次；a 为 空 时求 b，否则直接保留 a。
+            compile_expr(fs, b, l)?;
+            let t = fs.alloc_temp(e.line, e.col)?;
+            fs.emit_u8(OP_STORE_LOCAL, t);
+            fs.emit_u8(OP_LOAD_LOCAL, t);
+            emit_nil_cmp(fs, b, e.line, e.col)?;
+            let non_nil = fs.jump(OP_JUMP_IF_FALSE);
+            compile_expr(fs, b, r)?;
+            fs.emit_u8(OP_STORE_LOCAL, t);
+            let end = fs.here();
+            fs.patch(non_nil, end);
+            fs.emit_u8(OP_LOAD_LOCAL, t);
+            fs.free_temp(t);
         }
         ExprKind::Bin(op, l, r) => {
             compile_expr(fs, b, l)?;
@@ -3000,6 +3048,69 @@ fn compile_expr(fs: &mut FnState, b: &mut Builder, e: &Expr) -> Result<()> {
                 return Err(CompileError::new("E114", e.line, e.col, "实参超过 255 个"));
             }
             fs.emit_u8u8(OP_CALL_INIT, ci, args.len() as u8);
+        }
+        ExprKind::SafeMember(obj, name) => {
+            let ni = field_name_idx(fs, b, obj, name, e.line, e.col)?;
+            compile_expr(fs, b, obj)?;
+            let t = fs.alloc_temp(e.line, e.col)?;
+            fs.emit_u8(OP_STORE_LOCAL, t);
+            fs.emit_u8(OP_LOAD_LOCAL, t);
+            emit_nil_cmp(fs, b, e.line, e.col)?;
+            let non_nil = fs.jump(OP_JUMP_IF_FALSE);
+            let c = b.const_nil(e.line, e.col)?;
+            fs.emit_u8(OP_CONST, c);
+            let skip = fs.jump(OP_JUMP);
+            let here = fs.here();
+            fs.patch(non_nil, here);
+            fs.emit_u8(OP_LOAD_LOCAL, t);
+            fs.emit_u8(OP_GET_FIELD, ni);
+            let end = fs.here();
+            fs.patch(skip, end);
+            fs.free_temp(t);
+        }
+        ExprKind::SafeMethodCall(obj, name, args) => {
+            let ni = method_name_idx(fs, b, obj, name, e.line, e.col)?;
+            compile_expr(fs, b, obj)?;
+            let t = fs.alloc_temp(e.line, e.col)?;
+            fs.emit_u8(OP_STORE_LOCAL, t);
+            fs.emit_u8(OP_LOAD_LOCAL, t);
+            emit_nil_cmp(fs, b, e.line, e.col)?;
+            let non_nil = fs.jump(OP_JUMP_IF_FALSE);
+            let c = b.const_nil(e.line, e.col)?;
+            fs.emit_u8(OP_CONST, c);
+            let skip = fs.jump(OP_JUMP);
+            let here = fs.here();
+            fs.patch(non_nil, here);
+            fs.emit_u8(OP_LOAD_LOCAL, t);
+            for a in args {
+                compile_expr(fs, b, a)?;
+            }
+            if args.len() > 255 {
+                return Err(CompileError::new("E114", e.line, e.col, "实参超过 255 个"));
+            }
+            fs.emit_u8u8(OP_CALL_METHOD, ni, args.len() as u8);
+            let end = fs.here();
+            fs.patch(skip, end);
+            fs.free_temp(t);
+        }
+        ExprKind::SafeIndex(obj, idx) => {
+            compile_expr(fs, b, obj)?;
+            let t = fs.alloc_temp(e.line, e.col)?;
+            fs.emit_u8(OP_STORE_LOCAL, t);
+            fs.emit_u8(OP_LOAD_LOCAL, t);
+            emit_nil_cmp(fs, b, e.line, e.col)?;
+            let non_nil = fs.jump(OP_JUMP_IF_FALSE);
+            let c = b.const_nil(e.line, e.col)?;
+            fs.emit_u8(OP_CONST, c);
+            let skip = fs.jump(OP_JUMP);
+            let here = fs.here();
+            fs.patch(non_nil, here);
+            fs.emit_u8(OP_LOAD_LOCAL, t);
+            compile_expr(fs, b, idx)?;
+            fs.emit(OP_GET_ITEM);
+            let end = fs.here();
+            fs.patch(skip, end);
+            fs.free_temp(t);
         }
         ExprKind::Member(obj, name) => {
             // `枚举名.成员`：编译期直接折成整数常量，不产生对象访问。
