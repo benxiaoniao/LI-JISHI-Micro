@@ -776,13 +776,24 @@ impl Parser {
                 self.pos += 1;
                 let (name, _, _) = self.expect_ident()?;
                 self.expect_kw(Kw::In, "在")?;
-                let iterable = self.parse_expr()?;
-                let body = self.parse_block()?;
-                Ok(Stmt {
-                    kind: StmtKind::ForEach(name, iterable, body),
-                    line,
-                    is_private: false,
-                })
+                let first = self.parse_expr()?;
+                if matches!(self.peek().tok, Tok::Op("..")) {
+                    self.pos += 1;
+                    let last = self.parse_expr()?;
+                    let body = self.parse_block()?;
+                    Ok(Stmt {
+                        kind: StmtKind::ForRange(name, first, last, body),
+                        line,
+                        is_private: false,
+                    })
+                } else {
+                    let body = self.parse_block()?;
+                    Ok(Stmt {
+                        kind: StmtKind::ForEach(name, first, body),
+                        line,
+                        is_private: false,
+                    })
+                }
             }
             Tok::Kw(Kw::Func) if !matches!(self.peek_at(1).tok, Tok::Op("(")) => {
                 let m = self.parse_func_decl()?;

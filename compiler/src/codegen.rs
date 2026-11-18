@@ -587,7 +587,7 @@ fn collect_declared(stmts: &[Stmt]) -> HashSet<String> {
     let mut out = HashSet::new();
     for s in stmts {
         match &s.kind {
-            StmtKind::Let(n, _) | StmtKind::Assign(n, _) | StmtKind::ForEach(n, _, _) => {
+            StmtKind::Let(n, _) | StmtKind::Assign(n, _) | StmtKind::ForEach(n, _, _) | StmtKind::ForRange(n, _, _, _) => {
                 out.insert(n.clone());
             }
             StmtKind::FuncDef { name, .. } => {
@@ -823,6 +823,20 @@ fn reject_enum_name(b: &Builder, name: &str, line: u32, col: u32) -> Result<()> 
     Ok(())
 }
 
+fn emit_load_name(
+    fs: &mut FnState,
+    b: &mut Builder,
+    name: &str,
+    line: u32,
+    col: u32,
+) -> Result<()> {
+    match resolve(fs, b, name, line, col)? {
+        Res::Local(s) | Res::Capture(s) => fs.emit_u8(OP_LOAD_LOCAL, s),
+        Res::Global(i) => fs.emit_u8(OP_LOAD_GLOBAL, i),
+    }
+    Ok(())
+}
+
 fn store_name(fs: &mut FnState, b: &mut Builder, name: &str, line: u32, col: u32) -> Result<()> {
     reject_enum_name(b, name, line, col)?;
     if native_spec::entry(name).is_some() || vm_spec::reserved(name) {
@@ -994,7 +1008,7 @@ fn collect_decls(stmts: &[Stmt], out: &mut Vec<String>) {
     for s in stmts {
         match &s.kind {
             StmtKind::Let(n, _) => out.push(n.clone()),
-            StmtKind::ForEach(n, _, _) => out.push(n.clone()),
+            StmtKind::ForEach(n, _, _) | StmtKind::ForRange(n, _, _, _) => out.push(n.clone()),
             StmtKind::FuncDef { name, .. } => out.push(name.clone()),
             StmtKind::If { branches, else_body } => {
                 for (_, body) in branches {
@@ -1202,6 +1216,11 @@ fn collect_free_stmts(stmts: &[Stmt], bound: &HashSet<String>, out: &mut Vec<Str
                 collect_free_expr(iterable, bound, out);
                 collect_free_stmts(body, bound, out);
             }
+            StmtKind::ForRange(_, start, end, body) => {
+                collect_free_expr(start, bound, out);
+                collect_free_expr(end, bound, out);
+                collect_free_stmts(body, bound, out);
+            }
             StmtKind::FuncDef { params, body, .. } => {
                 let mut child_bound: HashSet<String> = params.iter().cloned().collect();
                 let mut decls = Vec::new();
@@ -1342,7 +1361,7 @@ fn collect_enums(b: &mut Builder, stmts: &[Stmt]) -> Result<()> {
     let mut top: HashSet<String> = HashSet::new();
     for s in stmts {
         match &s.kind {
-            StmtKind::Let(n, _) | StmtKind::ForEach(n, ..) => {
+            StmtKind::Let(n, _) | StmtKind::ForEach(n, ..) | StmtKind::ForRange(n, ..) => {
                 top.insert(n.clone());
             }
             StmtKind::FuncDef { name, .. } => {
@@ -1433,7 +1452,7 @@ fn compile_classes(
     let mut top = HashSet::new();
     for s in stmts {
         match &s.kind {
-            StmtKind::Let(n, _) | StmtKind::ForEach(n, ..) => {
+            StmtKind::Let(n, _) | StmtKind::ForEach(n, ..) | StmtKind::ForRange(n, ..) => {
                 top.insert(n.clone());
             }
             StmtKind::FuncDef { name, .. } => {
@@ -2306,6 +2325,105 @@ fn compile_stmt(fs: &mut FnState, b: &mut Builder, s: &Stmt) -> Result<()> {
             for p in ctx.breaks {
                 fs.patch(p, end);
             }
+        }
+        StmtKind::ForRange(name, start, end, body) => {
+            for e in [start, end] {
+                if let Some(t) = obvious_ty(b, fs, e) {
+                    if t != Ty::Int {
+                        return Err(CompileError::new(
+                            "E109",
+                            s.line,
+                            1,
+                            "「..」的起止必须是整数",
+                        ));
+                    }
+                }
+            }
+            // 起止各求值一次，方向在进入循环时定一次；之后只是计数循环。
+            compile_expr(fs, b, start)?;
+            let t_start = fs.alloc_temp(s.line, 1)?;
+            fs.emit_u8(OP_STORE_LOCAL, t_start);
+            compile_expr(fs, b, end)?;
+            let t_end = fs.alloc_temp(s.line, 1)?;
+            fs.emit_u8(OP_STORE_LOCAL, t_end);
+            let t_dir = fs.alloc_temp(s.line, 1)?;
+
+            // dir = (起 <= 止) ? 1 : -1
+            fs.emit_u8(OP_LOAD_LOCAL, t_start);
+            fs.emit_u8(OP_LOAD_LOCAL, t_end);
+            fs.emit_u8(OP_CMP, CMP_LE);
+            let j_desc = fs.jump(OP_JUMP_IF_FALSE);
+            let one = b.const_int(1, s.line, 1)?;
+            fs.emit_u8(OP_CONST, one);
+            fs.emit_u8(OP_STORE_LOCAL, t_dir);
+            let j_dir_end = fs.jump(OP_JUMP);
+            let desc = fs.here();
+            fs.patch(j_desc, desc);
+            let neg = b.const_int(-1, s.line, 1)?;
+            fs.emit_u8(OP_CONST, neg);
+            fs.emit_u8(OP_STORE_LOCAL, t_dir);
+            let after_dir = fs.here();
+            fs.patch(j_dir_end, after_dir);
+
+            // i = 起
+            fs.emit_u8(OP_LOAD_LOCAL, t_start);
+            store_name(fs, b, name, s.line, 1)?;
+
+            let test = fs.here();
+            // 方向 > 0 走递增测试，否则递减测试
+            fs.emit_u8(OP_LOAD_LOCAL, t_dir);
+            let zero = b.const_int(0, s.line, 1)?;
+            fs.emit_u8(OP_CONST, zero);
+            fs.emit_u8(OP_CMP, CMP_GT);
+            let j_desc_test = fs.jump(OP_JUMP_IF_FALSE);
+            emit_load_name(fs, b, name, s.line, 1)?;
+            fs.emit_u8(OP_LOAD_LOCAL, t_end);
+            fs.emit_u8(OP_CMP, CMP_LE);
+            let e1 = fs.jump(OP_JUMP_IF_FALSE);
+            let b1 = fs.jump(OP_JUMP);
+            let desc_test = fs.here();
+            fs.patch(j_desc_test, desc_test);
+            emit_load_name(fs, b, name, s.line, 1)?;
+            fs.emit_u8(OP_LOAD_LOCAL, t_end);
+            fs.emit_u8(OP_CMP, CMP_GE);
+            let e2 = fs.jump(OP_JUMP_IF_FALSE);
+            let b2 = fs.jump(OP_JUMP);
+
+            // update：达到端点就不再自增，避免 max+1 溢出。
+            let update = fs.here();
+            emit_load_name(fs, b, name, s.line, 1)?;
+            fs.emit_u8(OP_LOAD_LOCAL, t_end);
+            fs.emit_u8(OP_CMP, CMP_EQ);
+            let e3 = fs.jump(OP_JUMP_IF_TRUE);
+            emit_load_name(fs, b, name, s.line, 1)?;
+            fs.emit_u8(OP_LOAD_LOCAL, t_dir);
+            fs.emit_u8(OP_BINOP, BIN_ADD);
+            store_name(fs, b, name, s.line, 1)?;
+            let back = fs.jump(OP_JUMP);
+            fs.patch(back, test);
+
+            let body_start = fs.here();
+            fs.patch(b1, body_start);
+            fs.patch(b2, body_start);
+            fs.loops.push(LoopCtx {
+                is_foreach: false,
+                continue_target: update,
+                breaks: Vec::new(),
+            });
+            compile_stmts(fs, b, body)?;
+            let ctx = fs.loops.pop().unwrap();
+            let to_update = fs.jump(OP_JUMP);
+            fs.patch(to_update, update);
+            let end_label = fs.here();
+            fs.patch(e1, end_label);
+            fs.patch(e2, end_label);
+            fs.patch(e3, end_label);
+            for p in ctx.breaks {
+                fs.patch(p, end_label);
+            }
+            fs.free_temp(t_dir);
+            fs.free_temp(t_end);
+            fs.free_temp(t_start);
         }
         StmtKind::Break => {
             let Some(ctx) = fs.loops.last() else {

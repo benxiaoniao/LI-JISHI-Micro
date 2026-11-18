@@ -163,6 +163,8 @@ pub enum StmtKind {
     While(Expr, Vec<Stmt>),
     Repeat(Expr, Vec<Stmt>),
     ForEach(String, Expr, Vec<Stmt>),
+    /// `遍历 名字 在 起..止:`：闭区间，按起止大小自动选择递增/递减，降级为计数循环。
+    ForRange(String, Expr, Expr, Vec<Stmt>),
     Break,
     Continue,
     FuncDef {

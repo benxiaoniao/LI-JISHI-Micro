@@ -95,7 +95,7 @@ fn collect_top(
                 enums.insert(e.name.clone());
                 Some(e.name.clone())
             }
-            StmtKind::ForEach(n, _, _) => Some(n.clone()),
+            StmtKind::ForEach(n, _, _) | StmtKind::ForRange(n, _, _, _) => Some(n.clone()),
             _ => None,
         };
         if let Some(n) = name {
@@ -146,7 +146,7 @@ fn stmt_label(k: &StmtKind) -> &'static str {
         StmtKind::If { .. } => "如果",
         StmtKind::While(_, _) => "当",
         StmtKind::Repeat(_, _) => "循环",
-        StmtKind::ForEach(_, _, _) => "遍历",
+        StmtKind::ForEach(_, _, _) | StmtKind::ForRange(_, _, _, _) => "遍历",
         StmtKind::Break => "中断",
         StmtKind::Continue => "继续",
         StmtKind::FuncDef { .. } => "函数",
@@ -455,6 +455,16 @@ impl<'a> Renamer<'a> {
             }
             StmtKind::ForEach(n, e, b) => {
                 self.expr(e)?;
+                if module {
+                    if let Some(m) = self.global_ref(n) {
+                        *n = m;
+                    }
+                }
+                self.stmts(b, false)
+            }
+            StmtKind::ForRange(n, a, z, b) => {
+                self.expr(a)?;
+                self.expr(z)?;
                 if module {
                     if let Some(m) = self.global_ref(n) {
                         *n = m;
@@ -816,6 +826,10 @@ fn local_decls(stmts: &[Stmt]) -> Vec<String> {
                     out.push(n.clone());
                     walk(b, out);
                 }
+                StmtKind::ForRange(n, _, _, b) => {
+                    out.push(n.clone());
+                    walk(b, out);
+                }
                 StmtKind::FuncDef { name, .. } => out.push(name.clone()),
                 StmtKind::If {
                     branches,
@@ -1009,6 +1023,7 @@ pub fn heap_estimate(stmts: &[Stmt], class_fields: &HashMap<String, usize>) -> u
                 }
                 StmtKind::While(c, b) | StmtKind::Repeat(c, b) => expr(c, cf) + walk_stmts(b, cf),
                 StmtKind::ForEach(_, e, b) => expr(e, cf) + walk_stmts(b, cf),
+                StmtKind::ForRange(_, a, z, b) => expr(a, cf) + expr(z, cf) + walk_stmts(b, cf),
                 StmtKind::Match {
                     subject,
                     arms,
@@ -1094,7 +1109,7 @@ pub fn collect_imports(stmts: &[Stmt], out: &mut HashSet<String>) {
                 }
             }
             StmtKind::While(_, b) | StmtKind::Repeat(_, b) => collect_imports(b, out),
-            StmtKind::ForEach(_, _, b) => collect_imports(b, out),
+            StmtKind::ForEach(_, _, b) | StmtKind::ForRange(_, _, _, b) => collect_imports(b, out),
             StmtKind::Match {
                 arms, else_body, ..
             } => {

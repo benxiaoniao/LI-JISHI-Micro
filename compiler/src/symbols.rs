@@ -72,7 +72,7 @@ fn walk(stmts: &[Stmt], out: &mut Vec<Symbol>) {
                 }
             }
             StmtKind::While(_, body) | StmtKind::Repeat(_, body) => walk(body, out),
-            StmtKind::ForEach(_, _, body) => walk(body, out),
+            StmtKind::ForEach(_, _, body) | StmtKind::ForRange(_, _, _, body) => walk(body, out),
             StmtKind::Try {
                 body, catch_body, ..
             } => {

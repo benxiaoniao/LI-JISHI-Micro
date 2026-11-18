@@ -25,6 +25,7 @@ try {
         @{ file = "类方法当值.jsh"; code = "E123"; stage = "编译" },
         @{ file = "安全访问缺名字.jsh"; code = "E108"; stage = "编译" },
         @{ file = "安全访问赋值.jsh"; code = "E109"; stage = "编译" },
+        @{ file = "范围端点非整数.jsh"; code = "E109"; stage = "编译" },
         @{ file = "类运行期字段.jsh"; code = "E035"; stage = "运行" },
         @{ file = "类运行期非实例.jsh"; code = "E036"; stage = "运行" },
         @{ file = "类运行期方法.jsh"; code = "E037"; stage = "运行" },
