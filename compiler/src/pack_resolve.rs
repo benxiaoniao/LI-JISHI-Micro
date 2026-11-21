@@ -811,7 +811,7 @@ pub fn dir_hash(dir: &Path) -> Result<String> {
     Ok(format!("fnv1a64:{:016x}", h))
 }
 
-fn skip_dir(name: &str) -> bool {
+pub(crate) fn skip_dir(name: &str) -> bool {
     matches!(name, ".砾" | ".git" | "build" | "target" | "node_modules")
 }
 

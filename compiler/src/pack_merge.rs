@@ -33,6 +33,10 @@ pub struct Unit {
     pub export_types: Option<HashSet<String>>,
     /// 入口源文件（调试表的显示名）。
     pub file: String,
+    /// 本单元用到的全部源文件（下标 0 = 入口；包内子模块依次追加）。
+    pub files: Vec<String>,
+    /// 与 `stmts` 一一对应的局部文件下标。
+    pub stmt_files: Vec<u8>,
 }
 
 impl Unit {
@@ -49,6 +53,7 @@ impl Unit {
         let mut enums = HashSet::new();
         let mut private = HashSet::new();
         collect_top(&stmts, &mut globals, &mut classes, &mut enums, &mut private);
+        let stmt_files = vec![0u8; stmts.len()];
         Unit {
             name,
             is_root,
@@ -59,7 +64,9 @@ impl Unit {
             private,
             exports: exports.map(|v| v.into_iter().collect()),
             export_types: export_types.map(|v| v.into_iter().collect()),
+            files: vec![file.clone()],
             file,
+            stmt_files,
         }
     }
 
@@ -932,9 +939,27 @@ pub fn merge(units: &mut Vec<Unit>) -> Result<Merged> {
     for u in units.iter() {
         let start = out.len();
         out.extend(u.stmts.iter().cloned());
-        let file_id = files.len() as u8;
-        files.push(u.file.clone());
-        spans.push((start, out.len(), file_id));
+        // 把本单元的局部文件下标映射到全局文件表；连续同文件的语句并成一段。
+        let mut map: Vec<u8> = Vec::with_capacity(u.files.len());
+        for f in &u.files {
+            map.push(files.len() as u8);
+            files.push(f.clone());
+        }
+        let mut run_start = start;
+        let mut run_file: Option<u8> = None;
+        for (i, &lf) in u.stmt_files.iter().enumerate() {
+            let gf = *map.get(lf as usize).unwrap_or(&0);
+            if run_file != Some(gf) {
+                if let Some(prev) = run_file {
+                    spans.push((run_start, start + i, prev));
+                }
+                run_start = start + i;
+                run_file = Some(gf);
+            }
+        }
+        if let Some(prev) = run_file {
+            spans.push((run_start, out.len(), prev));
+        }
     }
     Ok(Merged {
         stmts: out,

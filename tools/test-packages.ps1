@@ -809,6 +809,68 @@ try {
         ($installOk -and ($r.code -eq 0) -and ($out -eq "[2, 4, 6, 8, 10]`n15`n假 真")) `
         ($io + $r.out + "`n实际输出：" + $out)
 
+    # ---------- 17c. 包内多文件模块（LI036） ----------
+    $multiApp = Join-Path $root "examples/packages/多文件应用"
+    $multiJmb = Join-Path $sandbox "多文件示例.jmb"
+    $o = (& $micc pack --目录 $multiApp -o $multiJmb 2>&1 | Out-String)
+    $code = $LASTEXITCODE
+    $out = Run-Jmb $multiJmb
+    Check "包内多文件：同目录 + 子目录模块打包并运行" `
+        (($code -eq 0) -and ($out -eq "面积: 12 27`n你好，砾！")) ($o + "`n实际输出：" + $out)
+
+    $multiUse = Join-Path $sandbox "多文件安装"
+    $multiPath = (Join-Path $root "examples/packages/多文件包") -replace '\\', '/'
+    $toml = @"
+[包]
+名字 = "多文件安装"
+版本 = "1.0.0"
+入口 = "主.jsh"
+
+[依赖]
+多文件包 = { 路径 = "$multiPath", 版本 = "^1.0.0" }
+"@
+    $src = @"
+打印(多文件包.面积(4))
+打印(多文件包.问候("安装"))
+"@
+    New-Pkg $multiUse $toml $src
+    $io = (& $micc install --目录 $multiUse 2>&1 | Out-String)
+    $installOk = ($LASTEXITCODE -eq 0) -and (Test-Path (Join-Path $multiUse ".砾/包/多文件包-1.0.0/词/主.jsh"))
+    $r = Invoke-Pack $multiUse -Offline
+    $out = Run-Jmb (Join-Path $multiUse "多文件安装.jmb")
+    Check "包内多文件：install 收子目录，离线打包可运行" `
+        ($installOk -and ($r.code -eq 0) -and ($out -eq "48`n你好，安装！")) `
+        ($io + $r.out + "`n实际输出：" + $out)
+
+    $multiPkg = Join-Path $root "examples/packages/多文件包"
+    $multiZip = Join-Path $sandbox "多文件包-源码.zip"
+    $o = (& $micc pack --目录 $multiPkg --源码 -o $multiZip 2>&1 | Out-String)
+    $code = $LASTEXITCODE
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $zipNames = @()
+    if (Test-Path $multiZip) {
+        $z = [IO.Compression.ZipFile]::OpenRead($multiZip)
+        $zipNames = @($z.Entries | ForEach-Object { $_.FullName })
+        $z.Dispose()
+    }
+    Check "包内多文件：--源码 收子目录" `
+        (($code -eq 0) -and ($zipNames -contains "数学.jsh") -and ($zipNames -contains "词/主.jsh") -and ($zipNames -contains "词/后缀.jsh")) `
+        ($o + "`n归档条目：" + ($zipNames -join ", "))
+
+    $cyc = Join-Path $sandbox "循环模块"
+    $toml = @"
+[包]
+名字 = "循环模块"
+版本 = "1.0.0"
+入口 = "主.jsh"
+"@
+    New-Pkg $cyc $toml "导入 甲`n"
+    $enc = New-Object System.Text.UTF8Encoding($false)
+    [IO.File]::WriteAllText((Join-Path $cyc "甲.jsh"), "导入 乙`n函数 甲()：`n    返回 1`n", $enc)
+    [IO.File]::WriteAllText((Join-Path $cyc "乙.jsh"), "导入 甲`n函数 乙()：`n    返回 2`n", $enc)
+    $r = Invoke-Pack $cyc
+    Check-Error "包内多文件：循环导入报 E112" $r "E112" "循环导入"
+
     # ---------- 18. 静态索引：按 ^ 约束挑版本（1.2.0），install 后在线/离线都可打包 ----------
     $idxRoot = Join-Path $sandbox "索引"
     $artifact = Join-Path $idxRoot "工件"

@@ -3,6 +3,7 @@
 //! 只做源码包：多个本地包在源码层合并成一个 Program，产出单个 `.jmb`。
 //! 不改 JMB 格式、不改 VM，目标侧新增 0 B。
 
+use crate::ast::{Stmt, StmtKind};
 use crate::codegen;
 use crate::error::{CompileError, Result};
 use crate::lexer;
@@ -14,7 +15,7 @@ use crate::parser::Parser;
 use crate::stdlib_spec;
 use crate::writer;
 use crate::zip;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 /// 堆预算只允许用到 80%，留出运行期波动空间。
@@ -178,15 +179,17 @@ fn do_pack(args: &[String]) -> Result<()> {
 
     let mut units: Vec<Unit> = Vec::new();
     for dep in &tree.deps {
-        let stmts = parse_entry(dep)?;
-        let unit = Unit::new(
+        let loaded = load_package(&dep.dir, &dep.manifest)?;
+        let mut unit = Unit::new(
             dep.manifest.name.clone(),
             false,
-            stmts,
+            loaded.stmts,
             dep.manifest.exports.clone(),
             dep.manifest.export_types.clone(),
             entry_display(dep),
         );
+        unit.files = loaded.files;
+        unit.stmt_files = loaded.stmt_files;
         pack_merge::check_dependency_top_level(&unit)?;
         if let Some(exports) = &unit.exports {
             for n in exports {
@@ -242,15 +245,18 @@ fn do_pack(args: &[String]) -> Result<()> {
         }
         units.push(unit);
     }
-    let root_stmts = parse_entry(&tree.root)?;
-    units.push(Unit::new(
+    let root_loaded = load_package(&tree.root.dir, &tree.root.manifest)?;
+    let mut root_unit = Unit::new(
         tree.root.manifest.name.clone(),
         true,
-        root_stmts,
+        root_loaded.stmts,
         None,
         None,
         entry_display(&tree.root),
-    ));
+    );
+    root_unit.files = root_loaded.files;
+    root_unit.stmt_files = root_loaded.stmt_files;
+    units.push(root_unit);
 
     let native_union = check_native(&tree)?;
 
@@ -871,6 +877,30 @@ fn read_optional(dir: &Path, name: &str) -> Option<Vec<u8>> {
     }
 }
 
+/// 递归收集包目录里的 `.jsh`（相对路径，统一用 `/`）；跳过 `.砾/.git/build/...`。
+fn collect_jsh(base: &Path, dir: &Path, out: &mut Vec<String>) -> Result<()> {
+    let rd = std::fs::read_dir(dir)
+        .map_err(|e| usage_err(format!("读不了目录 {}：{}", dir.display(), e)))?;
+    for ent in rd.flatten() {
+        let p = ent.path();
+        let name = ent.file_name().to_string_lossy().to_string();
+        if p.is_dir() {
+            if pack_resolve::skip_dir(&name) {
+                continue;
+            }
+            collect_jsh(base, &p, out)?;
+        } else if p.extension().map(|x| x == "jsh").unwrap_or(false) {
+            let rel = p
+                .strip_prefix(base)
+                .unwrap_or(&p)
+                .to_string_lossy()
+                .replace('\\', "/");
+            out.push(rel);
+        }
+    }
+    Ok(())
+}
+
 /// 源码归档（`pack --源码`）：只收 `砾包.toml` 与本包的 `.jsh`，供 `micc install` 解包后按目录哈希校验。
 /// 不含 `.jmb`、`清单.toml`、`.zip` 等生成物，保证归档内容与 `micc hash --目录` 的口径一致。
 ///
@@ -887,18 +917,10 @@ pub fn build_source_archive(
         )));
     }
     let mut names: Vec<String> = Vec::new();
-    let rd = std::fs::read_dir(dir)
-        .map_err(|e| usage_err(format!("读不了目录 {}：{}", dir.display(), e)))?;
-    for ent in rd.flatten() {
-        let p = ent.path();
-        if p.is_file() && p.extension().map(|x| x == "jsh").unwrap_or(false) {
-            if let Some(n) = p.file_name().and_then(|s| s.to_str()) {
-                names.push(n.to_string());
-            }
-        }
-    }
+    collect_jsh(dir, dir, &mut names)?;
     names.sort();
-    if !names.iter().any(|n| n == &m.entry) {
+    let entry_rel = m.entry.replace('\\', "/");
+    if !names.iter().any(|n| n == &entry_rel) {
         return Err(usage_err(format!(
             "入口 {} 不在包目录里；源码归档必须先有入口源码",
             m.entry
@@ -1076,14 +1098,8 @@ fn do_interface(args: &[String]) -> Result<()> {
             m.name
         )));
     }
-    let entry = dir.join(&m.entry);
-    let src = std::fs::read_to_string(&entry)
-        .map_err(|e| usage_err(format!("读不了入口 {}：{}", entry.display(), e)))?;
-    let src = src.strip_prefix('\u{feff}').unwrap_or(&src);
-    let tokens = lexer::tokenize(src).map_err(|e| in_pkg(e, &m.name))?;
-    let stmts = Parser::new(tokens)
-        .parse_program()
-        .map_err(|e| in_pkg(e, &m.name))?;
+    // 入口 + 包内子模块一起看，导出函数可以定义在子模块里。
+    let stmts = load_package(&dir, &m)?.stmts;
 
     let mut funcs: Vec<(String, usize)> = Vec::new();
     let mut classes: Vec<(String, Vec<String>, Vec<(String, usize)>)> = Vec::new();
@@ -1403,26 +1419,166 @@ fn entry_display(pkg: &Resolved) -> String {
     display_path(&pkg.dir.join(&pkg.manifest.entry))
 }
 
-fn parse_entry(pkg: &Resolved) -> Result<Vec<crate::ast::Stmt>> {
-    let path = pkg.dir.join(&pkg.manifest.entry);
-    let src = std::fs::read_to_string(&path).map_err(|e| {
-        usage_err(format!(
-            "读不了包「{}」的入口 {}：{}",
-            pkg.manifest.name,
-            path.display(),
-            e
-        ))
-    })?;
-    let src = src.strip_prefix('\u{feff}').unwrap_or(&src);
-    let tokens = lexer::tokenize(src).map_err(|e| in_pkg(e, &pkg.manifest.name))?;
-    let mut p = Parser::new(tokens);
-    p.parse_program().map_err(|e| in_pkg(e, &pkg.manifest.name))
+/// 包内源码加载结果：语句 + 每条语句所属的源文件下标。
+struct LoadedSource {
+    stmts: Vec<Stmt>,
+    files: Vec<String>,
+    stmt_files: Vec<u8>,
 }
 
-fn in_pkg(mut e: CompileError, pkg: &str) -> CompileError {
-    e.msg = format!("包「{}」：{}", pkg, e.msg);
+/// 加载一个包：入口 + `导入 子模块` 指向的包内 `.jsh`，编译期拼成一个语句表。
+///
+/// 解析顺序（相对当前文件所在目录，再回退包根）：
+/// - `名字.jsh`
+/// - `名字/主.jsh`
+/// 标准库模块（文本/列表/字典）与本包 `[包] 原生` 里声明的名字仍按原来的导入语义处理；
+/// 都不是、也没有对应文件时留给后续的原生并集检查（保持既有行为）。
+struct PackageLoader<'a> {
+    dir: &'a Path,
+    manifest: &'a pack_manifest::Manifest,
+    files: Vec<String>,
+    ids: HashMap<PathBuf, u8>,
+    loaded: HashSet<PathBuf>,
+    chain: Vec<PathBuf>,
+}
+
+fn load_package(dir: &Path, manifest: &pack_manifest::Manifest) -> Result<LoadedSource> {
+    let mut loader = PackageLoader {
+        dir,
+        manifest,
+        files: Vec::new(),
+        ids: HashMap::new(),
+        loaded: HashSet::new(),
+        chain: Vec::new(),
+    };
+    let mut out: Vec<(Stmt, u8)> = Vec::new();
+    let entry = dir.join(&manifest.entry);
+    loader.load_file(&entry, &mut out)?;
+    Ok(LoadedSource {
+        stmts: out.iter().map(|(s, _)| s.clone()).collect(),
+        files: loader.files,
+        stmt_files: out.iter().map(|(_, f)| *f).collect(),
+    })
+}
+
+impl<'a> PackageLoader<'a> {
+    fn load_file(&mut self, path: &Path, out: &mut Vec<(Stmt, u8)>) -> Result<()> {
+        let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        if self.chain.iter().any(|p| p == &canon) {
+            return Err(self.cycle_error(&canon));
+        }
+        let fid = self.file_id(&canon, path)?;
+        self.chain.push(canon.clone());
+        self.loaded.insert(canon.clone());
+
+        let stmts = self.parse_file(path)?;
+        let cur_dir = path.parent().unwrap_or(self.dir).to_path_buf();
+        for s in stmts {
+            let import_name = match &s.kind {
+                StmtKind::Import(n) => Some(n.clone()),
+                _ => None,
+            };
+            if let Some(name) = import_name {
+                if let Some(mp) = self.resolve_module(&cur_dir, &name) {
+                    let mcanon =
+                        std::fs::canonicalize(&mp).unwrap_or_else(|_| mp.clone());
+                    // 还在展开链上 = 循环；展开完过 = 菱形依赖，只收一次。
+                    if self.chain.iter().any(|p| p == &mcanon) {
+                        return Err(self.cycle_error(&mcanon));
+                    }
+                    if !self.loaded.contains(&mcanon) {
+                        self.load_file(&mp, out)?;
+                    }
+                    continue;
+                }
+            }
+            out.push((s, fid));
+        }
+        self.chain.pop();
+        Ok(())
+    }
+
+    fn cycle_error(&self, canon: &Path) -> CompileError {
+        let mut names: Vec<String> = self.chain.iter().map(|p| display_path(p)).collect();
+        names.push(display_path(canon));
+        CompileError::new(
+            "E112",
+            1,
+            1,
+            format!(
+                "包「{}」的模块循环导入：{}",
+                self.manifest.name,
+                names.join(" → ")
+            ),
+        )
+        .with_hint("把公共部分抽成第三个模块，避免 A → B → A")
+    }
+
+    /// 包内模块解析：先当前目录，再包根；找不到就交还给原生导入流程。
+    fn resolve_module(&self, cur_dir: &Path, name: &str) -> Option<PathBuf> {
+        if stdlib_spec::module(name).is_some()
+            || self.manifest.native_mods.iter().any(|m| m == name)
+        {
+            return None;
+        }
+        let mut cands = vec![
+            cur_dir.join(format!("{}.jsh", name)),
+            cur_dir.join(name).join("主.jsh"),
+        ];
+        if cur_dir != self.dir {
+            cands.push(self.dir.join(format!("{}.jsh", name)));
+            cands.push(self.dir.join(name).join("主.jsh"));
+        }
+        cands.into_iter().find(|p| p.is_file())
+    }
+
+    fn file_id(&mut self, canon: &Path, path: &Path) -> Result<u8> {
+        if let Some(&id) = self.ids.get(canon) {
+            return Ok(id);
+        }
+        let id = self.files.len();
+        if id >= 255 {
+            return Err(CompileError::new(
+                "E124",
+                1,
+                1,
+                format!("包「{}」引用的源文件超过 255 个", self.manifest.name),
+            ));
+        }
+        self.files.push(display_path(path));
+        self.ids.insert(canon.to_path_buf(), id as u8);
+        Ok(id as u8)
+    }
+
+    fn parse_file(&self, path: &Path) -> Result<Vec<Stmt>> {
+        let src = std::fs::read_to_string(path).map_err(|e| {
+            usage_err(format!(
+                "包「{}」读不了源文件 {}：{}",
+                self.manifest.name,
+                path.display(),
+                e
+            ))
+        })?;
+        let src = src.strip_prefix('\u{feff}').unwrap_or(&src);
+        let tokens = lexer::tokenize(src)
+            .map_err(|e| in_file(e, &self.manifest.name, path))?;
+        let mut p = Parser::new(tokens);
+        p.parse_program()
+            .map_err(|e| in_file(e, &self.manifest.name, path))
+    }
+}
+
+/// 源文件里的错误：前缀包名与文件名，便于定位到具体子模块。
+fn in_file(mut e: CompileError, pkg: &str, path: &Path) -> CompileError {
+    e.msg = format!(
+        "包「{}」模块 {}：{}",
+        pkg,
+        display_path(path),
+        e.msg
+    );
     e
 }
+
 
 /// 校验 Native ABI 与原生模块并集。
 fn check_native(tree: &Tree) -> Result<HashSet<String>> {

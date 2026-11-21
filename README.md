@@ -143,6 +143,8 @@ compiler\target\release\micc.exe examples\类.jsh --strip-debug -o build\类-发
 在声明前加 `私有` 就只在包内可见。`[导出] 名字/类型` 是可选的跨包白名单。
 `micc interface` 会生成公开类/字段/方法与枚举轮廓，并跳过私有声明。
 标准库用 `导入 文本/列表/字典`，这些模块不需要写进 `[包] 原生`。
+包内可以拆成多个 `.jsh`：`导入 数学` 按「当前文件目录 → 包根」找 `数学.jsh` 或 `数学/主.jsh`，
+编译期并入同一个包（入口仍是单个 `.jmb`），循环导入报 E112。
 规范见 [docs/包规范.md](docs/包规范.md)，可运行示例在 [examples/packages](examples/packages/说明.md)。
 
 ```powershell
@@ -266,7 +268,7 @@ docs/                      路径图、字节码规格、原生函数表、调�
 | [tools/test.ps1](tools/test.ps1) | 输出回归（逐字节对比 `tests\expected`，62/62） |
 | [tools/test-errors.ps1](tools/test-errors.ps1) | 错误码回归（104/104） |
 | [tools/test-native-import.ps1](tools/test-native-import.ps1) | 原生导入回归（引脚 / ADC / 定时器 / 队列 / 信号量 / 外部中断各三类错误 + 任务 + 正确用例，37/37） |
-| [tools/test-packages.ps1](tools/test-packages.ps1) | 包用例回归（单包/双包/菱形/离线/预算/跨包类型/公开私有/标准库/集合源码包/接口/签名/包站，95/95） |
+| [tools/test-packages.ps1](tools/test-packages.ps1) | 包用例回归（单包/双包/菱形/离线/预算/跨包类型/公开私有/标准库/集合源码包/包内多文件/接口/签名/包站，99/99） |
 | [tools/test-debug.ps1](tools/test-debug.ps1) | 调试表回归（双向查询/跨函数/跨包/剥离/损坏/旧文件，54/54） |
 | [tools/test-arduino.ps1](tools/test-arduino.ps1) | Arduino 库验收（生成库 + Arduino 兼容桩编译/运行，14/14） |
 | [tools/pack-arduino.ps1](tools/pack-arduino.ps1) | 生成 STM32duino 库目录与 zip（`-Example 名字` 换内嵌程序，`-NoZip` 只出目录） |
