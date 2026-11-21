@@ -317,6 +317,11 @@ typedef struct {
 
     JmError err;
     int has_err;
+    /// 最近一次 `抛出 码, 消息` 的码；`捕获` 块里用 `错误码()` 读取。
+    int32_t catch_code;
+    uint8_t has_catch_code;
+    /// 码已由 `错误码(码)` 写入，等待紧随其后的 THROW 消费。
+    uint8_t catch_code_pending;
 } JmState;
 
 /* RAM 预算锁：6 B/帧、36 B/任务（见 docs/设计-语言层任务.md §2）。

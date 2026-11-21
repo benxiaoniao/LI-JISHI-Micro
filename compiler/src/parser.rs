@@ -995,10 +995,17 @@ impl Parser {
             }
             Tok::Kw(Kw::Throw) => {
                 self.pos += 1;
-                let e = self.parse_expr()?;
+                let first = self.parse_expr()?;
+                let kind = if matches!(self.peek().tok, Tok::Op(",")) {
+                    self.pos += 1;
+                    let message = self.parse_expr()?;
+                    StmtKind::ThrowCode(first, message)
+                } else {
+                    StmtKind::Throw(first)
+                };
                 self.expect_newline()?;
                 Ok(Stmt {
-                    kind: StmtKind::Throw(e),
+                    kind,
                     line,
                     is_private: false,
                 })

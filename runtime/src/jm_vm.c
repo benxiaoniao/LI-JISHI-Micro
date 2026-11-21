@@ -1953,6 +1953,9 @@ int jm_execute(JmState *st) {
             r->frame_idx = (uint8_t)st->fp;
             r->sp = (uint16_t)st->sp;
             r->handler_ip = tgt;
+            /* 进入新的 `尝试`：上一层的错误码不再对本次捕获有效。 */
+            st->has_catch_code = 0u;
+            st->catch_code_pending = 0u;
             break;
         }
         case OP_TRY_END:
@@ -1964,6 +1967,12 @@ int jm_execute(JmState *st) {
         case OP_THROW: {
             JmValue v;
             POP_V(v);
+            /* `抛出 码, 消息` 的码由紧邻的 `错误码(码)` 写入；
+             * 不带码的抛出要清掉旧码，避免捕获块读到上一次的残留。 */
+            if (!st->catch_code_pending) {
+                st->has_catch_code = 0u;
+            }
+            st->catch_code_pending = 0u;
             if (st->tp <= 0) {
                 ThrowSink tb = {st->uncaught, UNCAUGHT_BODY, 0u, 0};
                 st->uncaught[0] = 0;

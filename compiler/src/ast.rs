@@ -190,6 +190,8 @@ pub enum StmtKind {
     Assert(Expr, Option<Expr>),
     Return(Option<Expr>),
     Throw(Expr),
+    /// `抛出 码, 消息`：码是整数，catch 里用 `错误码()` 读回；消息仍绑定到 `捕获 名`。
+    ThrowCode(Expr, Expr),
     Try {
         body: Vec<Stmt>,
         catch_name: Option<String>,

@@ -154,7 +154,7 @@ fn stmt_label(k: &StmtKind) -> &'static str {
         StmtKind::Enum(_) => "枚举",
         StmtKind::Match { .. } => "匹配",
         StmtKind::Return(_) => "返回",
-        StmtKind::Throw(_) => "抛出",
+        StmtKind::Throw(_) | StmtKind::ThrowCode(..) => "抛出",
         StmtKind::Try { .. } => "尝试",
     }
 }
@@ -563,6 +563,10 @@ impl<'a> Renamer<'a> {
                 Ok(())
             }
             StmtKind::Throw(e) => self.expr(e),
+            StmtKind::ThrowCode(c, m) => {
+                self.expr(c)?;
+                self.expr(m)
+            }
             StmtKind::Try {
                 body,
                 catch_name: _,
@@ -1004,6 +1008,7 @@ pub fn heap_estimate(stmts: &[Stmt], class_fields: &HashMap<String, usize>) -> u
         for s in list {
             n += match &s.kind {
                 StmtKind::Let(_, e) | StmtKind::Assign(_, e) | StmtKind::Throw(e) => expr(e, cf),
+                StmtKind::ThrowCode(c, m) => expr(c, cf) + expr(m, cf),
                 StmtKind::AssignIndex(a, b, c) => expr(a, cf) + expr(b, cf) + expr(c, cf),
                 StmtKind::AssignMember(a, _, b) => expr(a, cf) + expr(b, cf),
                 StmtKind::Expr(e) => expr(e, cf),

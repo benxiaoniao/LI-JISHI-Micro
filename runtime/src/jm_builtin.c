@@ -40,6 +40,7 @@
 #define B_DICT_MERGE 37
 #define B_DICT_DEL 38
 #define B_DICT_GET 39
+#define B_ERRCODE 40
 
 typedef struct {
     const char *name;
@@ -62,6 +63,7 @@ static const JmBuiltinDef BUILTINS[] = {
     {"切片", B_LIST_SLICE}, {"反转", B_LIST_REVERSE}, {"排序", B_LIST_SORT},
     {"键列表", B_DICT_KEYS}, {"包含", B_DICT_HAS}, {"合并", B_DICT_MERGE},
     {"移除键", B_DICT_DEL}, {"默认值", B_DICT_GET},
+    {"错误码", B_ERRCODE},
 };
 #define NBUILTINS ((int)(sizeof(BUILTINS) / sizeof(BUILTINS[0])))
 
@@ -1579,6 +1581,24 @@ int jm_builtin_call(JmState *st, uint8_t id, JmValue *args, uint8_t nargs,
             return jm_fail(st, E_OVERFLOW, "整数溢出");
         }
         *out = jm_v_int((int32_t)v);
+        return 0;
+    }
+    case B_ERRCODE: {
+        if (nargs > 1) {
+            return jm_fail(st, E_ARGC, "错误码() 要 0 或 1 个参数");
+        }
+        if (nargs == 0) {
+            *out = jm_v_int(st->has_catch_code ? st->catch_code : 0);
+            return 0;
+        }
+        if (JM_TAG(args[0]) != JM_TAG_INT) {
+            return jm_fail(st, E_TYPE, "错误码() 的码必须是整数");
+        }
+        st->catch_code = jm_int(args[0]);
+        st->has_catch_code = 1u;
+        /* 等下一条 THROW 消费；若中间被别的语句打断，THROW 见 pending=0 就清码。 */
+        st->catch_code_pending = 1u;
+        *out = JM_NIL;
         return 0;
     }
     default:

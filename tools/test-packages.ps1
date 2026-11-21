@@ -1436,14 +1436,14 @@ try {
     Check "index-site：生成 index.html + index.json" `
         ((Test-Path $siteJsonPath) -and (Test-Path $siteHtmlPath)) $o
     $siteData = $null
-    try { $siteData = (Get-Content $siteJsonPath -Raw) | ConvertFrom-Json } catch { }
+    try { $siteData = (Get-Content $siteJsonPath -Raw -Encoding UTF8) | ConvertFrom-Json } catch { }
     Check "index-site：JSON 与索引同源（2 条、未验签）" `
         (($null -ne $siteData) -and ($siteData.'条数' -eq 2) -and (@($siteData.'包').Count -eq 2) -and
-         ($siteData.'已验签' -eq $false)) ($o + "`n" + (Get-Content $siteJsonPath -Raw -ErrorAction SilentlyContinue))
+         ($siteData.'已验签' -eq $false)) ($o + "`n" + (Get-Content $siteJsonPath -Raw -Encoding UTF8 -ErrorAction SilentlyContinue))
     $firstLink = @($siteData.'包')[0].'链接'
     $linkPath = [IO.Path]::GetFullPath((Join-Path $siteOut $firstLink))
     Check "index-site：链接从站点目录指向真实归档" (Test-Path $linkPath) ("链接：" + $firstLink)
-    $html = Get-Content $siteHtmlPath -Raw
+    $html = Get-Content $siteHtmlPath -Raw -Encoding UTF8
     Check "index-site：HTML 列出两个包并声明索引来源" `
         (($html -match '甲') -and ($html -match '乙') -and ($html -match '砾索引\.toml')) ""
 
@@ -1451,10 +1451,10 @@ try {
         $siteSigned = Join-Path $siteRoot "站-签名"
         $o = (& (Join-Path $PSScriptRoot "index-site.ps1") -Index $signIdx -Out $siteSigned -Pubkey $allowed 2>&1 | Out-String)
         $signedData = $null
-        try { $signedData = (Get-Content (Join-Path $siteSigned "index.json") -Raw) | ConvertFrom-Json } catch { }
+        try { $signedData = (Get-Content (Join-Path $siteSigned "index.json") -Raw -Encoding UTF8) | ConvertFrom-Json } catch { }
         Check "index-site -Pubkey：签名通过并标记已验签" `
             (($null -ne $signedData) -and ($signedData.'已验签' -eq $true) -and ($signedData.'条数' -eq 1)) $o
-        $signedHtml = Get-Content (Join-Path $siteSigned "index.html") -Raw -ErrorAction SilentlyContinue
+        $signedHtml = Get-Content (Join-Path $siteSigned "index.html") -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
         Check "index-site -Pubkey：HTML 显示已验签" ($signedHtml -match '已验签') ""
 
         $revokedOut = Join-Path $siteRoot "站-撤销"

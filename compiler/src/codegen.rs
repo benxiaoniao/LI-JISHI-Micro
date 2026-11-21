@@ -427,7 +427,7 @@ fn builtin_ret(name: &str) -> Option<Ty> {
         "文本" | "字节文本" | "字节十六进制" | "十六进制字节" | "子串" | "替换" | "连接"
         | "去空白" | "转大写" | "转小写" => Ty::Str,
         "分割" | "切片" | "反转" | "排序" | "键列表" | "字节列表" => Ty::List,
-        "整数" | "长度" | "查找" | "字节取" => Ty::Int,
+        "整数" | "长度" | "查找" | "字节取" | "错误码" => Ty::Int,
         _ => return None,
     })
 }
@@ -1184,6 +1184,10 @@ fn collect_free_stmts(stmts: &[Stmt], bound: &HashSet<String>, out: &mut Vec<Str
             StmtKind::Return(Some(e)) => collect_free_expr(e, bound, out),
             StmtKind::Return(None) => {}
             StmtKind::Throw(e) => collect_free_expr(e, bound, out),
+            StmtKind::ThrowCode(c, m) => {
+                collect_free_expr(c, bound, out);
+                collect_free_expr(m, bound, out);
+            }
             StmtKind::Try {
                 body,
                 catch_name,
@@ -2465,6 +2469,26 @@ fn compile_stmt(fs: &mut FnState, b: &mut Builder, s: &Stmt) -> Result<()> {
         }
         StmtKind::Throw(e) => {
             compile_expr(fs, b, e)?;
+            fs.emit(OP_THROW);
+        }
+        StmtKind::ThrowCode(code, message) => {
+            // 码必须是整数：能静态看出来就提前报错，剩下的交给运行期 `错误码()` 检查。
+            if let Some(t) = obvious_ty(b, fs, code) {
+                if t != Ty::Int {
+                    return Err(CompileError::new(
+                        "E109",
+                        code.line,
+                        code.col,
+                        "「抛出」的错误码必须是整数",
+                    ));
+                }
+            }
+            // `错误码(码)` 只写运行期的待抛错误码并返回 空；随后正常 THROW 消息。
+            load_name(fs, b, "错误码", s.line, 1)?;
+            compile_expr(fs, b, code)?;
+            fs.emit_u8(OP_CALL, 1);
+            fs.emit(OP_POP);
+            compile_expr(fs, b, message)?;
             fs.emit(OP_THROW);
         }
         StmtKind::Try {
