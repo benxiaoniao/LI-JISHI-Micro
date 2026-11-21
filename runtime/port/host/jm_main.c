@@ -1,8 +1,40 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include "jishim.h"
 #include "jm_debug.h"
+
+#ifdef JM_HOST_DEBUG
+/* 由 jm_vm.c 提供：--统计 时按指令累加。 */
+extern unsigned long long jm_instr_count;
+extern int jm_host_measure;
+/* jm_vm.c 每指令检查它；只有 --dbg 时才走断点/调试钩子。 */
+int jm_host_debug_active = 0;
+/* 非调试的 `--break` 也走 jm_host_break_hit；没有断点时跳过每指令调用。 */
+int jm_host_break_active = 0;
+#endif
+
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
+/* 单调毫秒时钟：基准统计用（clock() 在 Windows 上只有约 1 ms 粒度）。 */
+static double stat_now_ms(void) {
+#ifdef _WIN32
+    static LARGE_INTEGER freq;
+    LARGE_INTEGER t;
+    if (freq.QuadPart == 0) {
+        QueryPerformanceFrequency(&freq);
+    }
+    QueryPerformanceCounter(&t);
+    return 1000.0 * (double)t.QuadPart / (double)freq.QuadPart;
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1000000.0;
+#endif
+}
 
 /* 交互调试的容量上限：断点数与预取行表条目数（只在宿主进程，纯静态数组）。 */
 #define DBG_MAX_BP 8
@@ -1074,6 +1106,7 @@ int main(int argc, char **argv) {
     int task = -1;
     int dbg = 0;
     int stream = 0;
+    int stats = 0;
     const char *bpfile = NULL;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--break") == 0 && i + 1 < argc) {
@@ -1095,6 +1128,8 @@ int main(int argc, char **argv) {
             }
         } else if (strcmp(argv[i], "--dbg") == 0) {
             dbg = 1;
+        } else if (strcmp(u8arg(argv[i]), "--统计") == 0 || strcmp(argv[i], "--stats") == 0) {
+            stats = 1;
         } else if (strcmp(u8arg(argv[i]), "--事件流") == 0 || strcmp(argv[i], "--ndjson") == 0) {
             stream = 1;
         } else if (!path) {
@@ -1118,6 +1153,10 @@ int main(int argc, char **argv) {
     }
     if (stream && !dbg) {
         fprintf(stderr, "--事件流 只能与 --dbg 一起用\n");
+        return 2;
+    }
+    if (stats && dbg) {
+        fprintf(stderr, "--统计 不能与 --dbg 一起用\n");
         return 2;
     }
 #if !(defined(JM_HOST_DEBUG) && JM_DEBUG_HOOKS)
@@ -1157,6 +1196,7 @@ int main(int argc, char **argv) {
                         u8arg(brks[0]));
                 return 2;
             }
+            jm_host_break_active = 1;
         }
 #else
         fprintf(stderr, "这个 jmrun 没有编译调试接入（缺 JM_HOST_DEBUG）\n");
@@ -1246,6 +1286,8 @@ int main(int argc, char **argv) {
 #if defined(JM_HOST_DEBUG) && JM_DEBUG_HOOKS
     if (dbg) {
         g_dbg_on = 1;
+        jm_host_debug_active = 1;
+        jm_host_break_active = 1;
         g_stream = stream;
         g_task_filter = task;
         load_line_table();
@@ -1263,7 +1305,21 @@ int main(int argc, char **argv) {
         return 2;
     }
 
+#ifdef JM_HOST_DEBUG
+    jm_instr_count = 0;
+    jm_host_measure = stats;
+    double stat_t0 = stats ? stat_now_ms() : 0.0;
+#endif
     int rc = jm_run(buf, (size_t)n);
+#ifdef JM_HOST_DEBUG
+    if (stats) {
+        jm_host_measure = 0;
+        double ms = stat_now_ms() - stat_t0;
+        double mips = ms > 0.0 ? (double)jm_instr_count / ms / 1000.0 : 0.0;
+        fprintf(stderr, "[统计] 指令 %llu 耗时 %.3f ms 吞吐 %.2f 百万指令/秒\n",
+                jm_instr_count, ms, mips);
+    }
+#endif
 #if JM_STACK_WATERMARK
     /* 观测构建专用：把本次运行的值栈峰值打到 stdout，便于按示例采集。 */
     {

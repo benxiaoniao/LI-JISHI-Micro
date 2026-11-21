@@ -4,6 +4,16 @@
 
 JmState jm_state;
 
+#ifdef JM_HOST_DEBUG
+/* 主机基准：`jmrun --统计` 打开后按指令累加；固件不编这一段。 */
+unsigned long long jm_instr_count = 0;
+int jm_host_measure = 0;
+/* 只有 --dbg 才置 1：普通运行跳过每指令的断点/调试钩子调用。 */
+extern int jm_host_debug_active;
+/* 有 `--break`（含非调试单断点）或 --dbg 时置 1。 */
+extern int jm_host_break_active;
+#endif
+
 #if JM_STACK_WATERMARK
 /* 值栈高水位：本次 jm_run 里 sp 达到过的最大槽数（见 jm_internal.h 的开关说明）。 */
 uint16_t jm_stack_hw = 0;
@@ -1216,14 +1226,19 @@ int jm_execute(JmState *st) {
     while (!switched) {
         cur_ip = ip;
 #ifdef JM_HOST_DEBUG
-        if (jm_host_break_hit(cur_code, cur_ip)) {
-            st->tasks[st->current].sp = (uint16_t)st->sp;
-            goto done;
+        if (jm_host_break_active) {
+            if (jm_host_break_hit(cur_code, cur_ip)) {
+                st->tasks[st->current].sp = (uint16_t)st->sp;
+                goto done;
+            }
         }
 #endif
 #if JM_DEBUG_HOOKS
         /* 调试钩子：命中即暂停并保留现场。不能走 done:（那里会释放全部任务栈），
          * 也不能改任务状态为 DEAD；置 READY 后由 jm_dbg_resume 重新调度。 */
+#ifdef JM_HOST_DEBUG
+        if (jm_host_debug_active)
+#endif
         if (jm_host_dbg_tick(cur_code, cur_ip, (uint8_t)st->fp)) {
             f->ip = cur_ip;
             st->tasks[st->current].state = JM_TASK_READY;
@@ -1236,6 +1251,11 @@ int jm_execute(JmState *st) {
             VM_FAIL(E_OPCODE, "指令流越界");
         }
         uint8_t op = code[ip++];
+#ifdef JM_HOST_DEBUG
+        if (jm_host_measure) {
+            jm_instr_count++;
+        }
+#endif
         switch (op) {
         case OP_HALT:
             st->tasks[st->current].sp = (uint16_t)st->sp;
@@ -1329,6 +1349,40 @@ int jm_execute(JmState *st) {
         }
         case OP_BINOP: {
             uint8_t sub = code[ip++];
+            /* 整数四则的快速路径：常见循环/递归里全是 整数+整数，
+             * 直接在这里算，省掉 jm_binop 调用与两次 jm_release。 */
+            if (st->sp >= 2) {
+                JmValue r = st->stack[st->sp - 1];
+                JmValue l = st->stack[st->sp - 2];
+                if (JM_TAG(l) == JM_TAG_INT && JM_TAG(r) == JM_TAG_INT) {
+                    int64_t a = jm_int(l);
+                    int64_t b = jm_int(r);
+                    int64_t res = 0;
+                    int handled = 1;
+                    switch (sub) {
+                    case BIN_ADD:
+                        res = a + b;
+                        break;
+                    case BIN_SUB:
+                        res = a - b;
+                        break;
+                    case BIN_MUL:
+                        res = a * b;
+                        break;
+                    default:
+                        handled = 0;
+                        break;
+                    }
+                    if (handled) {
+                        if (!int_range_ok(res)) {
+                            VM_FAIL(E_OVERFLOW, "整数溢出");
+                        }
+                        st->sp -= 2;
+                        PUSH_V(jm_v_int((int32_t)res));
+                        break;
+                    }
+                }
+            }
             JmValue r, l, out;
             POP_V(r);
             POP_V(l);
@@ -1380,6 +1434,45 @@ int jm_execute(JmState *st) {
         }
         case OP_CMP: {
             uint8_t sub = code[ip++];
+            /* 整数比较走快速路径：循环条件与递归出口主要用它。 */
+            if (st->sp >= 2) {
+                JmValue r = st->stack[st->sp - 1];
+                JmValue l = st->stack[st->sp - 2];
+                if (JM_TAG(l) == JM_TAG_INT && JM_TAG(r) == JM_TAG_INT) {
+                    int32_t a = jm_int(l);
+                    int32_t b = jm_int(r);
+                    int handled = 1;
+                    int t = 0;
+                    switch (sub) {
+                    case CMP_EQ:
+                        t = a == b;
+                        break;
+                    case CMP_NE:
+                        t = a != b;
+                        break;
+                    case CMP_LT:
+                        t = a < b;
+                        break;
+                    case CMP_GT:
+                        t = a > b;
+                        break;
+                    case CMP_LE:
+                        t = a <= b;
+                        break;
+                    case CMP_GE:
+                        t = a >= b;
+                        break;
+                    default:
+                        handled = 0;
+                        break;
+                    }
+                    if (handled) {
+                        st->sp -= 2;
+                        PUSH_V(t ? JM_TRUE : JM_FALSE);
+                        break;
+                    }
+                }
+            }
             JmValue r, l, out;
             POP_V(r);
             POP_V(l);

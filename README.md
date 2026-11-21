@@ -200,6 +200,29 @@ compiler\target\release\micc.exe pack --目录 examples\packages\应用 --离线
 `node editors/vscode/test/verify.js` 覆盖符号/包/输出解析、断点判定与格式化（44 项）；
 `editors/vscode/test/run-it.ps1` 用 VS Code 扩展宿主跑真实命令（14 项，含 LSP 定义、DAP 断点与单步）。
 
+### 2.8 性能基准（LI042）
+
+`jmrun --统计` 输出执行指令数与高精度耗时；`tools/bench.ps1` 编译 `tests/bench/*.jsh`，每个跑 3 次取最快：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tools/bench.ps1
+```
+
+优化（不改 JMB / 操作码 / ABI）：
+
+- 无 `--dbg` / `--break` 时跳过每条指令的断点与调试钩子调用（仅宿主构建）。
+- `OP_BINOP` 的 `+ - *` 与 `OP_CMP` 的六种比较增加整数快速路径（宿主与固件共享）。
+
+同机实测（3 次取最快）：
+
+| 工作负载 | 改前 | 改后 | 耗时变化 | 吞吐变化 |
+|---|---:|---:|---:|---:|
+| 函数 fib(23) | 11.128 ms | 6.786 ms | −39.0% | 125 → 205 MIPS |
+| 类（10 万次方法调用） | 17.434 ms | 10.484 ms | −39.9% | 149 → 248 MIPS |
+| 循环（30 万次迭代） | 39.283 ms | 15.454 ms | −60.7% | 130 → 330 MIPS |
+
+固件 `类` 55 500 B Flash / 17 412 B RAM（+296 B / +0 B）。板上计时待补测（串口已接入，LI042 期间未采集），详见 [docs/性能基准.md](docs/性能基准.md)。
+
 ---
 
 ## 3. 烧录与串口
