@@ -1580,6 +1580,163 @@ try {
         $script:skip++
     }
 
+    # ---------- 24. LI039：依赖管理 add / remove / update ----------
+    $depRoot = Join-Path $sandbox "依赖管理"
+    $depArt = Join-Path $depRoot "工件"
+    New-Item -ItemType Directory -Path $depArt -Force | Out-Null
+    $toolDirs = @{}
+    foreach ($v in @("1.0.0", "1.2.0", "2.0.0")) {
+        $toml = @"
+[包]
+名字 = "工具"
+版本 = "$v"
+
+[导出]
+名字 = ["版本"]
+"@
+        $dir = Join-Path $depArt ("工具-" + $v)
+        New-Pkg $dir $toml ("函数 版本()：`n    返回 `"$v`"`n")
+        $toolDirs[$v] = $dir
+    }
+    $upperToml = @"
+[包]
+名字 = "上层"
+版本 = "1.0.0"
+
+[依赖]
+工具 = { 版本 = "^2.0.0" }
+"@
+    New-Pkg (Join-Path $depArt "上层") $upperToml "打印(工具.版本())`n"
+    $h100 = Get-PkgHash $toolDirs["1.0.0"]
+    $h120 = Get-PkgHash $toolDirs["1.2.0"]
+    $h200 = Get-PkgHash $toolDirs["2.0.0"]
+    $hUpper = Get-PkgHash (Join-Path $depArt "上层")
+    $depIdx = Join-Path $depRoot "砾索引.toml"
+    $depIdxText = @"
+索引版本 = 1
+
+[包]
+"工具@1.0.0" = { 来源 = "file:工件/工具-1.0.0", 校验 = "$h100" }
+"工具@1.2.0" = { 来源 = "file:工件/工具-1.2.0", 校验 = "$h120" }
+"工具@2.0.0" = { 来源 = "file:工件/工具-2.0.0", 校验 = "$h200" }
+"上层@1.0.0" = { 来源 = "file:工件/上层", 校验 = "$hUpper" }
+"@
+    [IO.File]::WriteAllText($depIdx, $depIdxText, (New-Object System.Text.UTF8Encoding($false)))
+
+    $depApp = Join-Path $depRoot "应用"
+    $depAppToml = @"
+[包]
+名字 = "应用"
+版本 = "1.0.0"
+"@
+    New-Pkg $depApp $depAppToml "打印(工具.版本())`n"
+    $depManifest = Join-Path $depApp "砾包.toml"
+    $depLock = Join-Path $depApp ".砾/锁.toml"
+
+    # add 不带约束：按索引取最高版，写 ^2.0.0 并装 2.0.0
+    $o = (& $micc add 工具 --目录 $depApp --索引 $depIdx 2>&1 | Out-String)
+    $code = $LASTEXITCODE
+    $text = [IO.File]::ReadAllText($depManifest, [Text.Encoding]::UTF8)
+    $lock = [IO.File]::ReadAllText($depLock, [Text.Encoding]::UTF8)
+    $bomBytes = [IO.File]::ReadAllBytes($depManifest)
+    $bomKept = ($bomBytes.Length -ge 3) -and ($bomBytes[0] -eq 0xEF) -and ($bomBytes[1] -eq 0xBB) -and ($bomBytes[2] -eq 0xBF)
+    Check "add：不带约束选最高版并写 ^2.0.0" `
+        (($code -eq 0) -and $text.Contains('工具 = { 版本 = "^2.0.0" }') -and $lock.Contains('版本 = "2.0.0"')) $o
+    Check "add：保留 UTF-8 BOM" $bomKept ("首字节：" + ($bomBytes[0..2] -join ","))
+
+    # 再 add 一次改约束：^1.0.0 → 1.2.0，清单里只留一行
+    $o = (& $micc add '工具@^1.0.0' --目录 $depApp --索引 $depIdx 2>&1 | Out-String)
+    $code = $LASTEXITCODE
+    $text = [IO.File]::ReadAllText($depManifest, [Text.Encoding]::UTF8)
+    $lock = [IO.File]::ReadAllText($depLock, [Text.Encoding]::UTF8)
+    $toolLines = ($text -split "`n" | Where-Object { $_ -match '^\s*工具\s*=' }).Count
+    Check "add：改约束 ^1.0.0 选中 1.2.0 且只留一行" `
+        (($code -eq 0) -and ($toolLines -eq 1) -and $text.Contains('版本 = "^1.0.0"') -and $lock.Contains('版本 = "1.2.0"')) ($o + "`n" + $text)
+
+    # 精确版本 + 离线打包运行
+    $o = (& $micc add '工具@1.0.0' --目录 $depApp --索引 $depIdx 2>&1 | Out-String)
+    $code = $LASTEXITCODE
+    $r = Invoke-Pack $depApp -Offline
+    $out = Run-Jmb (Join-Path $depApp "应用.jmb")
+    Check "add：精确 1.0.0，离线打包运行输出 1.0.0" `
+        (($code -eq 0) -and ($r.code -eq 0) -and ($out -eq "1.0.0")) ($o + $r.out + "`n实际输出：" + $out)
+
+    # 冲突：上层要求 工具 ^2.0.0，与根的精确 1.0.0 冲突；清单与锁必须原样回滚
+    $beforeText = [IO.File]::ReadAllText($depManifest, [Text.Encoding]::UTF8)
+    $beforeLock = [IO.File]::ReadAllText($depLock, [Text.Encoding]::UTF8)
+    $o = (& $micc add 上层 --目录 $depApp --索引 $depIdx 2>&1 | Out-String)
+    $code = $LASTEXITCODE
+    $afterText = [IO.File]::ReadAllText($depManifest, [Text.Encoding]::UTF8)
+    $afterLock = [IO.File]::ReadAllText($depLock, [Text.Encoding]::UTF8)
+    Check-Error "add：版本冲突 → E126" @{ code = $code; out = $o } "E126" "版本冲突"
+    Check "add 冲突：清单与锁原样回滚" `
+        (($beforeText -eq $afterText) -and ($beforeLock -eq $afterLock)) ($beforeText + "`n---`n" + $afterText)
+
+    # 放宽到 ^2.0.0 后，上层 可以装上；锁里同时有两个包
+    $o = (& $micc add '工具@^2.0.0' --目录 $depApp --索引 $depIdx 2>&1 | Out-String)
+    $o2 = (& $micc add 上层 --目录 $depApp --索引 $depIdx 2>&1 | Out-String)
+    $code = $LASTEXITCODE
+    $lock = [IO.File]::ReadAllText($depLock, [Text.Encoding]::UTF8)
+    Check "add：放宽约束后 上层 成功，锁含两包" `
+        (($code -eq 0) -and $lock.Contains('上层 =') -and $lock.Contains('工具 =') -and $lock.Contains('版本 = "2.0.0"')) ($o + $o2)
+
+    # remove 在线：清单与锁同时去掉 上层，工具仍在
+    $o = (& $micc remove 上层 --目录 $depApp --索引 $depIdx 2>&1 | Out-String)
+    $code = $LASTEXITCODE
+    $text = [IO.File]::ReadAllText($depManifest, [Text.Encoding]::UTF8)
+    $lock = [IO.File]::ReadAllText($depLock, [Text.Encoding]::UTF8)
+    Check "remove：清单与锁同时移除 上层" `
+        (($code -eq 0) -and ($text -notmatch '上层') -and ($lock -notmatch '上层') -and $lock.Contains('版本 = "2.0.0"')) ($o + "`n" + $lock)
+
+    # remove --离线：锁剪成空，install --离线 通过
+    $o = (& $micc remove 工具 --目录 $depApp --离线 2>&1 | Out-String)
+    $code = $LASTEXITCODE
+    $text = [IO.File]::ReadAllText($depManifest, [Text.Encoding]::UTF8)
+    $lock = [IO.File]::ReadAllText($depLock, [Text.Encoding]::UTF8)
+    $off = (& $micc install --目录 $depApp --离线 2>&1 | Out-String)
+    $offCode = $LASTEXITCODE
+    Check "remove --离线：锁剪成空，install --离线 通过" `
+        (($code -eq 0) -and ($text -notmatch '工具 =') -and ($lock -notmatch '工具 =') -and ($offCode -eq 0) -and $off.Contains('0 个包')) ($o + $off)
+
+    # add --离线：锁里没有这个包 → E126，清单回滚
+    $beforeText = [IO.File]::ReadAllText($depManifest, [Text.Encoding]::UTF8)
+    $o = (& $micc add '工具@1.0.0' --目录 $depApp --离线 2>&1 | Out-String)
+    $code = $LASTEXITCODE
+    $afterText = [IO.File]::ReadAllText($depManifest, [Text.Encoding]::UTF8)
+    Check-Error "add --离线：锁里没有 → E126" @{ code = $code; out = $o } "E126" "离线模式缺包"
+    Check "add --离线 失败：清单回滚" ($beforeText -eq $afterText) ($beforeText + "`n---`n" + $afterText)
+
+    # 重新在线加回，再 update --离线：不访问索引，锁仍 1.2.0
+    & $micc add '工具@^1.0.0' --目录 $depApp --索引 $depIdx | Out-Null
+    $o = (& $micc update --目录 $depApp --离线 2>&1 | Out-String)
+    $code = $LASTEXITCODE
+    $lock = [IO.File]::ReadAllText($depLock, [Text.Encoding]::UTF8)
+    Check "update --离线：不访问索引，锁仍 1.2.0" `
+        (($code -eq 0) -and $o.Contains('离线') -and $lock.Contains('版本 = "1.2.0"')) $o
+
+    $o = (& $micc update 不存在 --目录 $depApp --离线 2>&1 | Out-String)
+    $code = $LASTEXITCODE
+    Check-Error "update：依赖树里没有 → E125" @{ code = $code; out = $o } "E125" "依赖树里没有"
+    $o = (& $micc remove 不存在 --目录 $depApp 2>&1 | Out-String)
+    $code = $LASTEXITCODE
+    Check-Error "remove：依赖不存在 → E125" @{ code = $code; out = $o } "E125" "没有"
+
+    # add --路径：写本地路径依赖并安装
+    $localLib = Join-Path $depRoot "本地库"
+    $localToml = @"
+[包]
+名字 = "本地库"
+版本 = "0.1.0"
+"@
+    New-Pkg $localLib $localToml '打印("本地")'
+    $localApp = Join-Path $depRoot "路径应用"
+    New-Pkg $localApp "[包]`n名字 = `"路径应用`"`n版本 = `"1.0.0`"" '打印(本地库.问候())'
+    $o = (& $micc add 本地库 --路径 ../本地库 --目录 $localApp 2>&1 | Out-String)
+    $code = $LASTEXITCODE
+    $text = [IO.File]::ReadAllText((Join-Path $localApp "砾包.toml"), [Text.Encoding]::UTF8)
+    Check "add --路径：写本地路径依赖并安装" `
+        (($code -eq 0) -and $text.Contains('路径 = "../本地库"') -and(Test-Path (Join-Path $localApp ".砾/包/本地库-0.1.0/主.jsh"))) $o
+
     Write-Host ("包用例：共 " + $script:total + " 个，失败 " + $script:fail + " 个，跳过 " + $script:skip + " 个")
     if ($script:fail -gt 0) { exit 1 }
     exit 0

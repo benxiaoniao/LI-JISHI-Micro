@@ -11,6 +11,7 @@ mod lsp;
 mod native_spec;
 mod opcodes;
 mod pack;
+mod pack_deps;
 mod pack_index;
 mod pack_manifest;
 mod pack_merge;
@@ -30,6 +31,9 @@ fn usage() {
     eprintln!("用法：micc <输入.jsh> [-o 输出.jmb] [--dump] [--strip-debug] [--no-assert] [--strict-type]");
     eprintln!("      micc pack [--目录 <包目录>] [-o 输出] [--离线] [--strip-debug] [--no-assert] [--strict-type] [--归档]");
     eprintln!("      micc install [--目录 <包目录>] [--索引 <索引文件|URL>] [--离线] [--公钥 <allowed_signers>] [--签名身份 <名字>]");
+    eprintln!("      micc add <名字>[@约束] [--路径 <目录>] [--目录 <包目录>] [--索引 <索引|URL>] [--离线]  # 加依赖并写锁");
+    eprintln!("      micc remove <名字> [--目录 <包目录>] [--离线]                              # 删依赖并重写锁");
+    eprintln!("      micc update [名字] [--目录 <包目录>] [--索引 <索引|URL>] [--离线]            # 按约束重新选版");
     eprintln!("      micc hash [--目录 <包目录>]                # 算目录内容哈希（填索引的 校验）");
     eprintln!("      micc verify <包目录|归档.zip>              # 校验归档/二进制包（清单 + 产物 + 哈希）");
     eprintln!("      micc interface --目录 <包目录> [-o 接口.toml]  # 生成导出函数接口清单");
@@ -412,6 +416,15 @@ fn main() {
     }
     if args[0] == "install" {
         exit(pack::cmd_install(&args[1..]));
+    }
+    if args[0] == "add" {
+        exit(pack_deps::cmd_add(&args[1..]));
+    }
+    if args[0] == "remove" {
+        exit(pack_deps::cmd_remove(&args[1..]));
+    }
+    if args[0] == "update" {
+        exit(pack_deps::cmd_update(&args[1..]));
     }
     if args[0] == "hash" {
         exit(pack::cmd_hash(&args[1..]));
