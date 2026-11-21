@@ -764,6 +764,51 @@ try {
     $out = Run-Jmb $exampleJmb
     Check "仓库示例包 examples/packages：打包并运行" (($code -eq 0) -and ($out -eq "你好，砾`n42")) ($o + "`n实际输出：" + $out)
 
+    # ---------- 17b. 标准库/集合 源码包（LI035） ----------
+    $collApp = Join-Path $root "examples/packages/集合应用"
+    $collJmb = Join-Path $sandbox "集合示例.jmb"
+    $o = (& $micc pack --目录 $collApp -o $collJmb 2>&1 | Out-String)
+    $code = $LASTEXITCODE
+    $out = Run-Jmb $collJmb
+    $expectColl = @(
+        "平方: [1, 4, 9, 16, 25]",
+        "偶数: [2, 4]",
+        "求和: 15",
+        "有负数: 假",
+        "全正数: 真",
+        "空: [] [] 100 假 真",
+        "大于阈值: [4, 5]",
+        "捕获: 四不行"
+    ) -join "`n"
+    Check "标准库/集合：示例包打包并运行" (($code -eq 0) -and ($out -eq $expectColl)) ($o + "`n实际输出：" + $out)
+
+    $collUse = Join-Path $sandbox "集合安装"
+    $collPath = (Join-Path $root "标准库/集合") -replace '\\', '/'
+    $toml = @"
+[包]
+名字 = "集合安装"
+版本 = "1.0.0"
+入口 = "主.jsh"
+
+[依赖]
+集合 = { 路径 = "$collPath", 版本 = "^0.1.0" }
+"@
+    $src = @"
+令 数 = [1, 2, 3, 4, 5]
+打印(集合.映射(数, 函数(x): x * 2))
+打印(集合.归约(数, 0, 函数(a, b): a + b))
+令 空表 = []
+打印(集合.任意(空表, 函数(x): 真), 集合.全部(空表, 函数(x): 假))
+"@
+    New-Pkg $collUse $toml $src
+    $io = (& $micc install --目录 $collUse 2>&1 | Out-String)
+    $installOk = ($LASTEXITCODE -eq 0) -and (Test-Path (Join-Path $collUse ".砾/锁.toml"))
+    $r = Invoke-Pack $collUse -Offline
+    $out = Run-Jmb (Join-Path $collUse "集合安装.jmb")
+    Check "标准库/集合：install 后离线打包可运行" `
+        ($installOk -and ($r.code -eq 0) -and ($out -eq "[2, 4, 6, 8, 10]`n15`n假 真")) `
+        ($io + $r.out + "`n实际输出：" + $out)
+
     # ---------- 18. 静态索引：按 ^ 约束挑版本（1.2.0），install 后在线/离线都可打包 ----------
     $idxRoot = Join-Path $sandbox "索引"
     $artifact = Join-Path $idxRoot "工件"
