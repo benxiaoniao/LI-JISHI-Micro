@@ -9,6 +9,7 @@ mod json;
 mod langcard;
 mod lexer;
 mod lsp;
+mod micctest;
 mod native_spec;
 mod opcodes;
 mod pack;
@@ -39,6 +40,7 @@ fn usage() {
     eprintln!("      micc verify <包目录|归档.zip>              # 校验归档/二进制包（清单 + 产物 + 哈希）");
     eprintln!("      micc interface --目录 <包目录> [-o 接口.toml]  # 生成导出函数接口清单");
     eprintln!("      micc doc [--目录 <包目录>] [-o 输出.md|html] [--格式 md|html] [--语言卡 <json>]  # 生成 API 文档");
+    eprintln!("      micc test [过滤...] [--目录 <用例目录>] [--超时 <毫秒>] [--jmrun <路径>] [--列出]  # 跑 .jsh 用例");
     eprintln!("      micc search [关键词...] [--索引 <索引文件|URL>] [--公钥 <allowed_signers>] [--json]  # 检索静态索引");
     eprintln!("      micc publish [--目录 <包目录>] [--索引 <索引文件>] [--仓库 <目录>] [--签名密钥 <私钥>]  # 发布源码包并写索引");
     eprintln!("      micc --line-of <x.jmb> <代码下标> <偏移>   # 指令位置 → 源文件:行");
@@ -439,6 +441,9 @@ fn main() {
     }
     if args[0] == "doc" {
         exit(doc::cmd_doc(&args[1..]));
+    }
+    if args[0] == "test" {
+        exit(micctest::cmd_test(&args[1..]));
     }
     if args[0] == "search" {
         exit(pack_registry::cmd_search(&args[1..]));

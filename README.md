@@ -160,7 +160,27 @@ compiler\target\release\micc.exe install --目录 examples\packages\应用   # �
 compiler\target\release\micc.exe pack --目录 examples\packages\应用 --离线
 ```
 
-### 2.6 编辑器扩展（H3）
+### 2.6 测试框架（`micc test`）
+
+`micc test [过滤...]` 把目录里的 `.jsh` 当用例跑：编译 → `jmrun` → 对照期望。默认目录 `tests/cases`，默认 `jmrun` 是 `build/jmrun.exe`。
+
+用例顶部用注释声明期望（可组合）：
+
+```jsh
+# @期望输出: 你好          # 可重复，按顺序拼成完整 stdout
+# @期望错误: E027           # 编译期或运行期错误码；E109 等编译错误也可
+# @超时: 3000               # 毫秒；默认 5000
+# @名称: 别名               # 过滤与报告里用的名字
+打印("你好")
+```
+
+- 断言用语言自带的 `断言 条件[, 消息]`；不写 `@期望错误` 时，断言失败会让用例不通过。
+- 名称过滤：`micc test 阶乘 断言` 只跑名字或相对路径包含任一关键词的用例。
+- `--列出` 只打印名称与文件，不执行；`--jmrun` 指定运行器；`--超时` 改全局默认。
+- 超时进程会被终止并计为失败；退出码 0 仅当所有选中用例通过。
+- 独立回归：`tools/test-micctest.ps1`（正/负/期望输出/编译错误/超时/过滤/列出）。
+
+### 2.7 编辑器扩展（H3）
 
 [editors/vscode](editors/vscode/README.md) 是独立的 VS Code 外壳。诊断、补全、定义、格式化统一由 `micc lsp`（stdio JSON-RPC）提供，扩展只做 LSP 客户端，不复制语言逻辑：
 
