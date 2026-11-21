@@ -9,6 +9,7 @@ use crate::pack_resolve;
 use crate::parser::Parser;
 use std::path::Path;
 
+#[derive(Clone)]
 pub struct Symbol {
     pub kind: &'static str,
     pub name: String,
@@ -84,17 +85,23 @@ fn walk(stmts: &[Stmt], out: &mut Vec<Symbol>) {
     }
 }
 
-/// 解析一个 `.jsh`，列出其中所有可跳转的定义（行/列从 1 起）。
-pub fn file_symbols(path: &Path) -> Result<Vec<Symbol>, String> {
-    let src = std::fs::read_to_string(path)
-        .map_err(|e| format!("读不了 {}：{}", path.display(), e))?;
-    let src = src.strip_prefix('\u{feff}').unwrap_or(&src);
+/// 解析一段源码，列出其中所有可跳转的定义（行/列从 1 起）。
+/// LSP 对未保存的缓冲区也走这里，不落盘。
+pub fn source_symbols(src: &str) -> Result<Vec<Symbol>, String> {
+    let src = src.strip_prefix('\u{feff}').unwrap_or(src);
     let tokens = lexer::tokenize(src).map_err(|e| e.to_string())?;
     let mut parser = Parser::new(tokens);
     let program = parser.parse_program().map_err(|e| e.to_string())?;
     let mut out = Vec::new();
     walk(&program, &mut out);
     Ok(out)
+}
+
+/// 解析一个 `.jsh`，列出其中所有可跳转的定义（行/列从 1 起）。
+pub fn file_symbols(path: &Path) -> Result<Vec<Symbol>, String> {
+    let src = std::fs::read_to_string(path)
+        .map_err(|e| format!("读不了 {}：{}", path.display(), e))?;
+    source_symbols(&src)
 }
 
 /// 包目录 → 该包及其依赖的入口文件（依赖在前，根包最后）。

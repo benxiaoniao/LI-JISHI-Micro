@@ -31,8 +31,6 @@ pub struct Unit {
     pub private: HashSet<String>,
     pub exports: Option<HashSet<String>>,
     pub export_types: Option<HashSet<String>>,
-    /// 入口源文件（调试表的显示名）。
-    pub file: String,
     /// 本单元用到的全部源文件（下标 0 = 入口；包内子模块依次追加）。
     pub files: Vec<String>,
     /// 与 `stmts` 一一对应的局部文件下标。
@@ -64,8 +62,7 @@ impl Unit {
             private,
             exports: exports.map(|v| v.into_iter().collect()),
             export_types: export_types.map(|v| v.into_iter().collect()),
-            files: vec![file.clone()],
-            file,
+            files: vec![file],
             stmt_files,
         }
     }

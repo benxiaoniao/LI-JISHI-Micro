@@ -2,8 +2,11 @@ mod ast;
 mod codegen;
 mod debug;
 mod error;
+mod format;
+mod json;
 mod langcard;
 mod lexer;
+mod lsp;
 mod native_spec;
 mod opcodes;
 mod pack;
@@ -38,6 +41,8 @@ fn usage() {
     eprintln!("      micc --debug-dump <x.jmb>                  # 打印调试表");
     eprintln!("      micc --symbols <x.jsh>                     # 列出定义：种类 名字 行 列");
     eprintln!("      micc --pack-files <包目录>                 # 包与依赖的入口文件（给编辑器跳转）");
+    eprintln!("      micc --format <x.jsh>                      # 按编辑器规则格式化到 stdout");
+    eprintln!("      micc lsp                                   # 语言服务器（stdio JSON-RPC，编辑器调用）");
     eprintln!("      micc --emit-blob <x.jmb> [-o jm_blob.c]     # 生成内嵌字节数组（固件用）");
     eprintln!("      micc --emit-header        # 导出 jm_opcodes.h");
     eprintln!("      micc --emit-native-header # 导出运行时原生表头 runtime/include/jm_native_table.h");
@@ -376,6 +381,26 @@ fn main() {
             }
         }
         return;
+    }
+    if args[0] == "--format" {
+        if args.len() != 2 {
+            usage();
+            exit(2);
+        }
+        match std::fs::read_to_string(&args[1]) {
+            Ok(src) => {
+                let src = src.strip_prefix('\u{feff}').unwrap_or(&src);
+                print!("{}", format::format_source(src));
+            }
+            Err(e) => {
+                eprintln!("读不了文件 {}：{}", args[1], e);
+                exit(2);
+            }
+        }
+        return;
+    }
+    if args[0] == "lsp" {
+        exit(lsp::run());
     }
     if args[0] == "pack" {
         exit(pack::cmd_pack(&args[1..]));

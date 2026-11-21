@@ -6,25 +6,18 @@ import * as os from 'os';
 import * as path from 'path';
 import {
   buildDebugArgs,
-  decideDefinition,
   displayPath,
-  findModuleLine,
-  formatSource,
   looksLikeBreakCondition,
-  nearestManifest,
   normalizeBreakCondition,
   parseDebugEvent,
-  parsePackFiles,
   parseRunOutput,
-  parseSymbols,
   toggleBreak,
 } from './core';
-import type { BreakSpec, PackInfo, Site, SymbolInfo } from './core';
+import type { BreakSpec, Site } from './core';
+import { LiLspClient } from './lsp';
 
 const LANGUAGE_ID = 'li';
 const OUTPUT_NAME = '砾';
-/** micc 的错误行：`1:7 错误[E102] 不支持指数形式的数字字面量（如 1e3）` */
-const ERROR_LINE = /^(\d+):(\d+)\s*错误\[([A-Z]+\d+)\]\s*(.*)$/;
 
 let output: vscode.OutputChannel;
 let diagnostics: vscode.DiagnosticCollection;
@@ -32,7 +25,6 @@ let runDiagnostics: vscode.DiagnosticCollection;
 let statusItem: vscode.StatusBarItem;
 let breakpointDecoration: vscode.TextEditorDecorationType;
 let runningChild: ChildProcess | undefined;
-let cardCache: { file: string; mtimeMs: number; card: Langcard } | undefined;
 
 /** 每个文档一个断点集合（多个行号）：文档 URI → 1 起行号数组。 */
 const breakpoints = new Map<string, number[]>();
@@ -44,20 +36,57 @@ let debugChild: ChildProcess | undefined;
 let debugPaused = false;
 let debugPrompting = false;
 const runUris = new Map<string, vscode.Uri>();
-const symbolCache = new Map<string, { mtimeMs: number; symbols: SymbolInfo[] }>();
-const packCache = new Map<string, { mtimeMs: number; packs: PackInfo[] }>();
 
 const debounceTimers = new Map<string, NodeJS.Timeout>();
 const checkSeq = new Map<string, number>();
 
-interface Langcard {
-  keywords?: Array<{ word: string; supported?: boolean }>;
-  builtins?: Array<{ name: string; min_args?: number; max_args?: number; doc?: string }>;
-  native_modules?: Array<{
-    module: string;
-    table?: string;
-    entries?: Array<{ name: string; min_args?: number; max_args?: number; doc?: string }>;
-  }>;
+/** 每个工作区一个 LSP 客户端；诊断/补全/定义/格式化都走它。 */
+let lspClient: LiLspClient | undefined;
+let lspRoot: string | undefined;
+
+function ensureLsp(root: string): LiLspClient | undefined {
+  const micc = resolveMicc(root);
+  if (!micc) {
+    return undefined;
+  }
+  if (lspClient && lspRoot === root) {
+    return lspClient;
+  }
+  lspClient?.dispose();
+  lspRoot = root;
+  const langcard = resolveInRoot(root, config<string>('langcardPath', 'spec/langcard.json'));
+  const client = new LiLspClient(micc, root, langcard);
+  client.onNotification('textDocument/publishDiagnostics', (params: any) => {
+    if (!diagnostics || !params || !params.uri) {
+      return;
+    }
+    const uri = vscode.Uri.parse(params.uri);
+    const list = (params.diagnostics ?? []).map((raw: any) => {
+      const range = new vscode.Range(
+        raw.range.start.line,
+        raw.range.start.character,
+        raw.range.end.line,
+        raw.range.end.character
+      );
+      const severity =
+        raw.severity === 2 ? vscode.DiagnosticSeverity.Warning : vscode.DiagnosticSeverity.Error;
+      const diag = new vscode.Diagnostic(range, raw.message, severity);
+      diag.source = raw.source ?? 'micc';
+      if (raw.code !== undefined && raw.code !== null) {
+        diag.code = raw.code;
+      }
+      return diag;
+    });
+    diagnostics.set(uri, list);
+  });
+  client.start();
+  lspClient = client;
+  for (const document of vscode.workspace.textDocuments) {
+    if (document.languageId === LANGUAGE_ID) {
+      client.sync(document.uri.toString(), document.getText(), document.version);
+    }
+  }
+  return client;
 }
 
 function config<T>(key: string, fallback: T): T {
@@ -98,15 +127,6 @@ function resolveInRoot(root: string, configured: string): string {
 function zeroRange(line: number, column: number): vscode.Range {
   const ln = Math.max(0, line);
   return new vscode.Range(ln, Math.max(0, column), ln, Math.max(0, column) + 1);
-}
-
-function makeDiagnostic(line: number, column: number, message: string, code?: string): vscode.Diagnostic {
-  const diag = new vscode.Diagnostic(zeroRange(line, column), message, vscode.DiagnosticSeverity.Error);
-  diag.source = 'micc';
-  if (code) {
-    diag.code = code;
-  }
-  return diag;
 }
 
 interface MiccResult {
@@ -183,143 +203,76 @@ function runText(exe: string, args: string[], cwd: string, timeout = 30000): Pro
   });
 }
 
-/** 取文件的定义表；按 mtime 缓存，保存后自动失效。 */
-async function loadSymbols(micc: string, file: string): Promise<SymbolInfo[]> {
-  let mtimeMs = 0;
-  try {
-    mtimeMs = fs.statSync(file).mtimeMs;
-  } catch {
-    return [];
-  }
-  const cached = symbolCache.get(file);
-  if (cached && cached.mtimeMs === mtimeMs) {
-    return cached.symbols;
-  }
-  const result = await runText(micc, ['--symbols', file], path.dirname(file), 15000);
-  const symbols = result.code === 0 ? parseSymbols(result.out) : [];
-  symbolCache.set(file, { mtimeMs, symbols });
-  return symbols;
-}
-
-/** 取包与依赖的入口文件；按 `砾包.toml` 的 mtime 缓存。 */
-async function loadPacks(micc: string, manifestDir: string): Promise<PackInfo[]> {
-  let mtimeMs = 0;
-  try {
-    mtimeMs = fs.statSync(path.join(manifestDir, '砾包.toml')).mtimeMs;
-  } catch {
-    return [];
-  }
-  const cached = packCache.get(manifestDir);
-  if (cached && cached.mtimeMs === mtimeMs) {
-    return cached.packs;
-  }
-  const result = await runText(micc, ['--pack-files', manifestDir], manifestDir, 15000);
-  const packs = result.code === 0 ? parsePackFiles(result.out) : [];
-  packCache.set(manifestDir, { mtimeMs, packs });
-  return packs;
-}
-
-/** 光标处标识符的定义位置；找不到返回 undefined。 */
-async function definitionAt(
-  document: vscode.TextDocument,
-  position: vscode.Position
-): Promise<vscode.Location | undefined> {
-  const wordRange = document.getWordRangeAtPosition(position, /[\p{L}\p{N}_]+/u);
-  const root = workspaceRoot(document.uri);
-  if (!wordRange || !root) {
-    return undefined;
-  }
-  const micc = resolveMicc(root);
-  if (!micc) {
-    return undefined;
-  }
-  const word = document.getText(wordRange);
-  const local = await loadSymbols(micc, document.uri.fsPath);
-
-  // `接收者.名字`：取出点号左边的标识符
-  const lineText = document.lineAt(position.line).text;
-  const start = wordRange.start.character;
-  let receiver: string | undefined;
-  if (start > 0 && lineText[start - 1] === '.') {
-    const before = lineText.slice(0, start - 1);
-    const match = /([\p{L}\p{N}_]+)\s*$/u.exec(before);
-    if (match) {
-      receiver = match[1];
-    }
-  }
-
-  const manifest = nearestManifest(document.uri.fsPath, root);
-  const packs = manifest ? await loadPacks(micc, manifest) : [];
-
-  // 只为候选包预取一次依赖入口的定义表，其余判断交给纯函数
-  const remote = new Map<string, SymbolInfo[]>();
-  const candidate = receiver ?? word;
-  const pkg = packs.find(p => p.name === candidate);
-  if (pkg) {
-    remote.set(pkg.entry, await loadSymbols(micc, pkg.entry));
-  }
-
-  let moduleLine: number | undefined;
-  let langcardFile: string | undefined;
-  if (new RegExp(`导入\\s+${escapeRegExp(word)}(\\s|$)`).test(document.getText())) {
-    langcardFile = resolveInRoot(root, config<string>('langcardPath', 'spec/langcard.json'));
-    try {
-      moduleLine = findModuleLine(fs.readFileSync(langcardFile, 'utf8'), word);
-    } catch {
-      moduleLine = undefined;
-    }
-  }
-
-  const decision = decideDefinition({
-    word,
-    receiver,
-    file: document.uri.fsPath,
-    local,
-    packs,
-    remote,
-    langcardFile,
-    moduleLine,
-  });
-  if (!decision) {
-    return undefined;
-  }
-  return new vscode.Location(
-    vscode.Uri.file(decision.file),
-    new vscode.Position(Math.max(0, decision.line - 1), Math.max(0, decision.col - 1))
-  );
-}
-
-function escapeRegExp(text: string): string {
-  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
 class LiDefinitions implements vscode.DefinitionProvider {
-  provideDefinition(
+  async provideDefinition(
     document: vscode.TextDocument,
     position: vscode.Position
-  ): vscode.ProviderResult<vscode.Definition> {
+  ): Promise<vscode.Definition | undefined> {
     if (document.languageId !== LANGUAGE_ID) {
       return undefined;
     }
-    return definitionAt(document, position);
+    const root = workspaceRoot(document.uri);
+    if (!root) {
+      return undefined;
+    }
+    const client = ensureLsp(root);
+    if (!client) {
+      return undefined;
+    }
+    client.sync(document.uri.toString(), document.getText(), document.version);
+    try {
+      const loc: any = await client.request('textDocument/definition', {
+        textDocument: { uri: document.uri.toString() },
+        position: { line: position.line, character: position.character },
+      });
+      if (!loc || !loc.uri) {
+        return undefined;
+      }
+      return new vscode.Location(
+        vscode.Uri.parse(loc.uri),
+        new vscode.Position(loc.range.start.line, loc.range.start.character)
+      );
+    } catch {
+      return undefined;
+    }
   }
 }
 
-/** Shift+Alt+F：缩进归一 + 运算符空格；逻辑全在 core.formatSource，便于命令行测幂等。 */
+/** Shift+Alt+F：格式化统一由 `micc lsp` 提供（与 CLI `--format` 同一实现）。 */
 class LiFormatter implements vscode.DocumentFormattingEditProvider {
-  provideDocumentFormattingEdits(document: vscode.TextDocument): vscode.TextEdit[] {
+  async provideDocumentFormattingEdits(document: vscode.TextDocument): Promise<vscode.TextEdit[]> {
     if (document.languageId !== LANGUAGE_ID) {
       return [];
     }
-    const original = document.getText();
-    const formatted = formatSource(original);
-    if (formatted === original) {
+    const root = workspaceRoot(document.uri);
+    if (!root) {
       return [];
     }
-    return [vscode.TextEdit.replace(
-      new vscode.Range(document.positionAt(0), document.positionAt(original.length)),
-      formatted
-    )];
+    const client = ensureLsp(root);
+    if (!client) {
+      return [];
+    }
+    client.sync(document.uri.toString(), document.getText(), document.version);
+    try {
+      const edits: any = await client.request('textDocument/formatting', {
+        textDocument: { uri: document.uri.toString() },
+        options: { tabSize: 4, insertSpaces: true },
+      });
+      return (edits ?? []).map(
+        (edit: any) =>
+          new vscode.TextEdit(
+            new vscode.Range(
+              edit.range.start.line,
+              edit.range.start.character,
+              edit.range.end.line,
+              edit.range.end.character
+            ),
+            edit.newText
+          )
+      );
+    } catch {
+      return [];
+    }
   }
 }
 
@@ -333,8 +286,8 @@ async function checkDocument(document: vscode.TextDocument, interactive = false)
     return;
   }
 
-  const micc = resolveMicc(root);
-  if (!micc) {
+  const client = ensureLsp(root);
+  if (!client) {
     diagnostics.set(document.uri, [
       new vscode.Diagnostic(
         zeroRange(0, 0),
@@ -349,86 +302,10 @@ async function checkDocument(document: vscode.TextDocument, interactive = false)
     return;
   }
 
-  const key = document.uri.toString();
-  const seq = (checkSeq.get(key) ?? 0) + 1;
-  checkSeq.set(key, seq);
-
-  const dirty = document.isDirty;
-  const source = dirty
-    ? path.join(os.tmpdir(), `li-src-${process.pid}-${Date.now()}.jsh`)
-    : document.uri.fsPath;
-  const target = path.join(os.tmpdir(), `li-out-${process.pid}-${Date.now()}.jmb`);
-
-  if (dirty) {
-    try {
-      fs.writeFileSync(source, document.getText(), 'utf8');
-    } catch (error) {
-      output.appendLine(`[诊断] 无法写入临时源文件：${String(error)}`);
-      return;
-    }
-  }
-
-  let result: MiccResult;
-  try {
-    result = await runMicc(micc, source, target, root);
-  } finally {
-    if (dirty) {
-      removeQuietly(source);
-    }
-    removeQuietly(target);
-  }
-
-  // 键盘输入会并发触发多次检查，只接受最后一次的结果
-  if (checkSeq.get(key) !== seq) {
-    return;
-  }
-
-  if (result.spawnError) {
-    diagnostics.set(document.uri, [
-      makeDiagnostic(0, 0, `无法启动 micc：${result.spawnError}`),
-    ]);
-    if (interactive) {
-      vscode.window.showErrorMessage(`砾：无法启动 micc（${result.spawnError}）`);
-    }
-    return;
-  }
-
-  if (result.code === 0) {
-    diagnostics.delete(document.uri);
-    if (interactive) {
-      output.appendLine('[诊断] 通过，没有编译错误。');
-      output.show(true);
-    }
-    return;
-  }
-
-  const found: vscode.Diagnostic[] = [];
-  const other: string[] = [];
-  for (const raw of result.stderr.split(/\r?\n/)) {
-    const line = raw.replace(/^\uFEFF/, '').trim();
-    if (!line) {
-      continue;
-    }
-    const match = ERROR_LINE.exec(line);
-    if (match) {
-      const lineNo = parseInt(match[1], 10) - 1;
-      const columnNo = parseInt(match[2], 10) - 1;
-      found.push(makeDiagnostic(lineNo, columnNo, `${match[3]}：${match[4]}`, match[3]));
-    } else {
-      other.push(line);
-    }
-  }
-
-  if (found.length === 0) {
-    found.push(makeDiagnostic(0, 0, other.length > 0 ? other.join('\n') : 'micc 退出码非 0（未给出错误行）'));
-  }
-
-  diagnostics.set(document.uri, found);
+  // 诊断由 `micc lsp` 在 didOpen/didChange 后主动 publishDiagnostics。
+  client.sync(document.uri.toString(), document.getText(), document.version);
   if (interactive) {
-    output.appendLine(`[诊断] ${found.length} 处错误。`);
-    found.forEach(diag => {
-      output.appendLine(`  ${diag.range.start.line + 1}:${diag.range.start.character + 1} ${diag.message}`);
-    });
+    output.appendLine('[诊断] 已提交给语言服务器（micc lsp），结果会刷新到问题面板。');
     output.show(true);
   }
 }
@@ -952,20 +829,6 @@ function firmwareExample(root: string, document?: vscode.TextDocument): string {
   return config<string>('firmwareExample', '你好');
 }
 
-function loadLangcard(file: string): Langcard | undefined {
-  try {
-    const stat = fs.statSync(file);
-    if (cardCache && cardCache.file === file && cardCache.mtimeMs === stat.mtimeMs) {
-      return cardCache.card;
-    }
-    const card = JSON.parse(fs.readFileSync(file, 'utf8')) as Langcard;
-    cardCache = { file, mtimeMs: stat.mtimeMs, card };
-    return card;
-  } catch {
-    return undefined;
-  }
-}
-
 /** 当前光标是否落在字符串或注释里（按行内引号配对判断）。 */
 function inStringOrComment(document: vscode.TextDocument, position: vscode.Position): boolean {
   const before = document.lineAt(position.line).text.slice(0, position.character);
@@ -992,10 +855,10 @@ function inStringOrComment(document: vscode.TextDocument, position: vscode.Posit
 }
 
 class LangcardCompletions implements vscode.CompletionItemProvider {
-  provideCompletionItems(
+  async provideCompletionItems(
     document: vscode.TextDocument,
     position: vscode.Position
-  ): vscode.CompletionItem[] | undefined {
+  ): Promise<vscode.CompletionItem[] | undefined> {
     if (document.languageId !== LANGUAGE_ID || inStringOrComment(document, position)) {
       return undefined;
     }
@@ -1004,72 +867,40 @@ class LangcardCompletions implements vscode.CompletionItemProvider {
     if (!root) {
       return undefined;
     }
-
-    const card = loadLangcard(resolveInRoot(root, config<string>('langcardPath', 'spec/langcard.json')));
-    if (!card) {
+    const client = ensureLsp(root);
+    if (!client) {
       return undefined;
     }
-
-    const items: vscode.CompletionItem[] = [];
-    const imported = new Map<string, string>(); // 小写模块名 -> 原模块名
-    const importPattern = /导入\s+(\S+)/g;
-    const text = document.getText();
-    let match: RegExpExecArray | null;
-    while ((match = importPattern.exec(text)) !== null) {
-      imported.set(match[1].toLowerCase(), match[1]);
-    }
-
-    const linePrefix = document.lineAt(position.line).text.slice(0, position.character);
-    if (/^\s*导入\s+\S*$/.test(linePrefix)) {
-      for (const module of card.native_modules ?? []) {
-        const item = new vscode.CompletionItem(module.module, vscode.CompletionItemKind.Module);
-        item.detail = '砾原生模块';
-        item.documentation = new vscode.MarkdownString(
-          [`模块 \`${module.module}\``, '', ...(module.entries ?? []).map(e => `- \`${e.name}\` ${e.doc ?? ''}`)].join(
-            '\n'
-          )
-        );
+    client.sync(document.uri.toString(), document.getText(), document.version);
+    try {
+      const result: any = await client.request('textDocument/completion', {
+        textDocument: { uri: document.uri.toString() },
+        position: { line: position.line, character: position.character },
+      });
+      const items: vscode.CompletionItem[] = [];
+      for (const raw of result.items ?? []) {
+        const kind =
+          raw.kind === 14
+            ? vscode.CompletionItemKind.Keyword
+            : raw.kind === 9
+              ? vscode.CompletionItemKind.Module
+              : vscode.CompletionItemKind.Function;
+        const item = new vscode.CompletionItem(raw.label, kind);
+        if (raw.detail) {
+          item.detail = raw.detail;
+        }
+        if (raw.insertText) {
+          item.insertText = raw.insertText;
+        }
+        if (raw.documentation && raw.documentation.value) {
+          item.documentation = new vscode.MarkdownString(raw.documentation.value);
+        }
         items.push(item);
       }
       return items;
+    } catch {
+      return undefined;
     }
-
-    for (const keyword of card.keywords ?? []) {
-      if (keyword.supported === false) {
-        continue;
-      }
-      const item = new vscode.CompletionItem(keyword.word, vscode.CompletionItemKind.Keyword);
-      item.detail = '关键字';
-      item.sortText = `0-${keyword.word}`;
-      items.push(item);
-    }
-
-    for (const builtin of card.builtins ?? []) {
-      const item = new vscode.CompletionItem(builtin.name, vscode.CompletionItemKind.Function);
-      item.detail = `内建函数（${builtin.min_args ?? 0}–${builtin.max_args ?? '?'} 个参数）`;
-      if (builtin.doc) {
-        item.documentation = new vscode.MarkdownString(builtin.doc);
-      }
-      item.sortText = `1-${builtin.name}`;
-      items.push(item);
-    }
-
-    for (const module of card.native_modules ?? []) {
-      if (!imported.has(module.module.toLowerCase())) {
-        continue;
-      }
-      for (const entry of module.entries ?? []) {
-        const item = new vscode.CompletionItem(entry.name, vscode.CompletionItemKind.Function);
-        item.detail = `原生函数 · ${module.module}`;
-        if (entry.doc) {
-          item.documentation = new vscode.MarkdownString(entry.doc);
-        }
-        item.sortText = `2-${entry.name}`;
-        items.push(item);
-      }
-    }
-
-    return items;
   }
 }
 
@@ -1158,11 +989,18 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
 
     vscode.commands.registerCommand('li.reloadLangcard', () => {
-      cardCache = undefined;
+      // 补全/定义都由语言服务器读语言卡：重启它即可拿到最新内容。
+      lspClient?.dispose();
+      lspClient = undefined;
+      lspRoot = undefined;
       const root = workspaceRoot(vscode.window.activeTextEditor?.document.uri);
-      const file = root ? resolveInRoot(root, config<string>('langcardPath', 'spec/langcard.json')) : '';
-      if (file && loadLangcard(file)) {
-        vscode.window.showInformationMessage('砾：语言卡补全已重新加载。');
+      if (root && ensureLsp(root)) {
+        for (const document of vscode.workspace.textDocuments) {
+          if (document.languageId === LANGUAGE_ID) {
+            void checkDocument(document);
+          }
+        }
+        vscode.window.showInformationMessage('砾：语言服务器已重启，补全已按语言卡重新加载。');
       } else {
         vscode.window.showWarningMessage('砾：没有找到语言卡 spec/langcard.json。');
       }
@@ -1194,6 +1032,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
     vscode.workspace.onDidCloseTextDocument(document => {
       diagnostics.delete(document.uri);
+      lspClient?.close(document.uri.toString());
       const timer = debounceTimers.get(document.uri.toString());
       if (timer) {
         clearTimeout(timer);
@@ -1211,7 +1050,10 @@ export function activate(context: vscode.ExtensionContext): void {
 
     vscode.workspace.onDidChangeConfiguration(event => {
       if (event.affectsConfiguration('li')) {
-        cardCache = undefined;
+        // micc 路径等配置变了：重启语言服务器，后续请求走新进程。
+        lspClient?.dispose();
+        lspClient = undefined;
+        lspRoot = undefined;
         for (const document of vscode.workspace.textDocuments) {
           if (document.languageId === LANGUAGE_ID) {
             void checkDocument(document);
@@ -1232,6 +1074,9 @@ export function activate(context: vscode.ExtensionContext): void {
 export function deactivate(): void {
   stopRunning();
   stopDebug();
+  lspClient?.dispose();
+  lspClient = undefined;
+  lspRoot = undefined;
   if (output) {
     output.dispose();
   }

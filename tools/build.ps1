@@ -85,6 +85,14 @@ try {
         if ($LASTEXITCODE -ne 0) { throw "回归失败" }
         & (Join-Path $PSScriptRoot "test-errors.ps1")
         if ($LASTEXITCODE -ne 0) { throw "错误用例失败" }
+        # LSP 用例需要 Node（与编辑器同一套 JS 环境）；没装就明确跳过。
+        if (Get-Command node -ErrorAction SilentlyContinue) {
+            & node (Join-Path $PSScriptRoot "test-lsp.js")
+            if ($LASTEXITCODE -ne 0) { throw "LSP 用例失败" }
+        }
+        else {
+            Write-Host "SKIP: 未找到 node，跳过 LSP 用例"
+        }
         & (Join-Path $PSScriptRoot "test-native-import.ps1")
         if ($LASTEXITCODE -ne 0) { throw "原生导入回归失败" }
         if (-not $SkipPackages) {

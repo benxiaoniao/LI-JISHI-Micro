@@ -35,7 +35,8 @@ PC 上：  .jsh 源码 ──micc──▶  .jmb 微字节码
 | 语言卡 | [docs/语言卡.md](docs/语言卡.md) + [spec/langcard.json](spec/langcard.json)，由操作码/原生表/内建/错误码渲染；`--check-langcard` 防漂移 |
 | 规范校验 | `--check-native`、`--check-langcard` 进构建链路，头文件或语言卡落后于规范即失败 |
 | 可复现工具链 | `tools/toolchains/toolchain.lock.json` + `tools/fetch-toolchain.ps1`，按锁文件哈希安装 |
-| 编辑器扩展 | `editors/vscode`（可选）：高亮、编译诊断、语言卡补全、跳转到定义、`F5` 运行、`F9` 多断点 / `Shift+F9` 条件断点 / `--task` 过滤；只调 `micc` / `jmrun`，不占固件空间 |
+| 语言服务器 | `micc lsp`（stdio JSON-RPC）：诊断、语言卡补全、跳转到定义、格式化；宿主侧 0 B，编辑器只做客户端 |
+| 编辑器扩展 | `editors/vscode`（可选）：高亮、LSP 诊断/补全/定义/格式化、`F5` 运行、`F9` 多断点 / `Shift+F9` 条件断点 / `--task` 过滤；只调 `micc` / `jmrun`，不占固件空间 |
 
 上板验证记录在 [docs/verification/](docs/verification/)：ADC 零点（PA0 接 GND）、
 ADC 满量程（PA0 接 3V3）、以及第四轮读到 4094 触发 E023 的故障与修复对照。
@@ -70,6 +71,7 @@ powershell -ExecutionPolicy Bypass -File tools\build.ps1
 脚本依次做：构建 `micc` → 校验原生表头 → 生成 `runtime/include/jm_opcodes.h` →
 构建 `build\jmrun.exe` → ABI v2 与 native 表运行期主机回归 → 编译 `examples\*.jsh` → 跑回归
 （[test.ps1](tools/test.ps1) 输出用例、[test-errors.ps1](tools/test-errors.ps1) 错误码用例、
+[test-lsp.js](tools/test-lsp.js) 语言服务器用例（需 node）、
 [test-native-import.ps1](tools/test-native-import.ps1) 原生导入用例、
 [test-packages.ps1](tools/test-packages.ps1) 包用例、
 [test-debug.ps1](tools/test-debug.ps1) 调试表用例、
@@ -157,18 +159,22 @@ compiler\target\release\micc.exe pack --目录 examples\packages\应用 --离线
 
 ### 2.6 编辑器扩展（H3）
 
-[editors/vscode](editors/vscode/README.md) 是独立的 VS Code 外壳，只调用现有 CLI，不复制编译逻辑：
+[editors/vscode](editors/vscode/README.md) 是独立的 VS Code 外壳。诊断、补全、定义、格式化统一由 `micc lsp`（stdio JSON-RPC）提供，扩展只做 LSP 客户端，不复制语言逻辑：
 
-- 语法高亮、`micc` 编译诊断、语言卡补全（原有能力）。
-- 跳转到定义：`micc --symbols <文件>` 列出本文件定义，`micc --pack-files <包目录>` 复用 `pack_resolve` 给出包与依赖入口；`令/函数/类/方法/字段/导入的模块` 在 `.jsh` 内可跳，跨文件、跨包按同一套规则解析。
+- 语法高亮；编译诊断由 `micc lsp` 在打开/输入/保存时推送，问题面板直接显示错误码与行列。
+- 补全来自语言卡（关键字、内建、原生模块与已导入模块的函数）。
+- 跳转到定义：本文件符号、`包名.函数` 的依赖入口、`导入 模块` 的语言卡声明；未保存的缓冲区也按当前文本解析。
+- `micc --format` 与 LSP 格式化是同一份 Rust 实现（`Shift+Alt+F`），CLI 可单独验证。
 - 运行期错误标红：解析 `jmrun` 输出的 `于 文件:行`，在该行画诊断并可点击定位；没有调试段时优雅退回错误码诊断，不报错。
 - `F5`：以当前文件为入口跑 `micc` + `jmrun`，输出进「砾」频道，错误同时进问题面板。
 - `F9`：在当前行切换断点，每个文档可设多个（合计 ≤8），`F5` 时附 `--break 文件:行`；命中后打开并定位到该行。
 - `Shift+F9`：给当前行设条件（`名字 比较符 字面量`，如 `k == 3`；留空=普通断点），拼成 `--break "文件:行 if …"`；装饰悬停显示条件。
 - 调试会话：`jmrun --dbg --事件流` 的 NDJSON 驱动暂停/定位，`F10` 下一行、`Ctrl+F10` 步过、`F5` 继续、`Shift+F5` 停止；「砾：调试任务过滤」可设 `--task N`（0–3）。不做变量/调用栈的可视面板。
-- 格式化：`Shift+Alt+F` 缩进按 4 空格归一，运算符两侧各留一个空格；字符串、注释与空行原样保留，重复格式化结果不变（幂等）。
+- 格式化：`Shift+Alt+F` 由 `micc lsp` 完成（缩进 4 空格、运算符两侧空格），字符串/注释/空行原样保留，重复格式化结果不变。
 
-编辑器侧验证不依赖板子：`node test/verify.js` 覆盖符号/包/输出解析、断点判定与 5 项格式化（含幂等），`test/run-it.ps1` 用 VS Code 扩展宿主跑真实命令。
+编辑器侧验证不依赖板子：`node tools/test-lsp.js` 用 JSON-RPC 覆盖诊断/补全/定义/格式化/退出（9 项）；
+`node editors/vscode/test/verify.js` 覆盖符号/包/输出解析、断点判定与格式化（44 项）；
+`editors/vscode/test/run-it.ps1` 用 VS Code 扩展宿主跑真实命令（14 项，含 LSP 定义与格式化）。
 
 ---
 
@@ -267,6 +273,7 @@ docs/                      路径图、字节码规格、原生函数表、调�
 | [tools/capture-serial.ps1](tools/capture-serial.ps1) | 串口录制到 `build\uart\`（`-Port` / `-Seconds` / `-Out`） |
 | [tools/test.ps1](tools/test.ps1) | 输出回归（逐字节对比 `tests\expected`，62/62） |
 | [tools/test-errors.ps1](tools/test-errors.ps1) | 错误码回归（104/104） |
+| [tools/test-lsp.js](tools/test-lsp.js) | 语言服务器回归（诊断/补全/定义/格式化/退出，9/9，需 node） |
 | [tools/test-native-import.ps1](tools/test-native-import.ps1) | 原生导入回归（引脚 / ADC / 定时器 / 队列 / 信号量 / 外部中断各三类错误 + 任务 + 正确用例，37/37） |
 | [tools/test-packages.ps1](tools/test-packages.ps1) | 包用例回归（单包/双包/菱形/离线/预算/跨包类型/公开私有/标准库/集合源码包/包内多文件/接口/签名/包站，99/99） |
 | [tools/test-debug.ps1](tools/test-debug.ps1) | 调试表回归（双向查询/跨函数/跨包/剥离/损坏/旧文件，54/54） |
