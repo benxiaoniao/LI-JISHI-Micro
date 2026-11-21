@@ -271,67 +271,89 @@ impl<'a> Renamer<'a> {
 
     /// 改写分支模式里的枚举名（依赖包内改名为 `包名::枚举名`；跨包看 `[导出] 类型`）。
     fn match_patterns(&mut self, pats: &mut [MatchPattern], line: u32) -> Result<()> {
-        for pat in pats {
-            let MatchPattern::EnumMember(n, _) = pat else {
-                continue;
-            };
-            // `包名.枚举名.成员`：解析器把枚举名拼成 `包名.枚举名`。
-            if let Some((pkg, en)) = n.split_once('.') {
-                let pkg = pkg.to_string();
-                let en = en.to_string();
-                if !self.is_dep_pkg(&pkg) {
-                    return Err(CompileError::new(
-                        "E128",
-                        line,
-                        1,
-                        format!("包「{}」不在依赖里；跨包枚举要写 包名.枚举名.成员", pkg),
-                    ));
+        for pat in pats.iter_mut() {
+            self.match_pattern(pat, line)?;
+        }
+        Ok(())
+    }
+
+    /// 单个模式：枚举成员改名；列表/字典解构递归处理内部模式。
+    fn match_pattern(&mut self, pat: &mut MatchPattern, line: u32) -> Result<()> {
+        match pat {
+            MatchPattern::List(items) => {
+                for i in items.iter_mut() {
+                    self.match_pattern(i, line)?;
                 }
-                if !self.deps[&pkg].enums.contains(&en) {
-                    return Err(CompileError::new(
-                        "E128",
-                        line,
-                        1,
-                        format!("包「{}」里没有枚举「{}」", pkg, en),
-                    ));
-                }
-                if self.is_private(&pkg, &en) {
-                    return Err(CompileError::new(
-                        "E128",
-                        line,
-                        1,
-                        format!("枚举「{}.{}」是私有声明，不能跨包使用", pkg, en),
-                    ));
-                }
-                if !self.type_exported(&pkg, &en) {
-                    return Err(CompileError::new(
-                        "E128",
-                        line,
-                        1,
-                        format!(
-                            "枚举「{}.{}」没有导出；请在它的 砾包.toml [导出] 类型 里列出这个名字",
-                            pkg, en
-                        ),
-                    ));
-                }
-                *n = format!("{}::{}", pkg, en);
-                continue;
+                return Ok(());
             }
-            if let Some(m) = self.global_ref(n) {
-                *n = m;
-            } else if self.is_root {
-                if let Some(owner) = self.dep_enum_owner(n) {
-                    return Err(CompileError::new(
-                        "E128",
-                        line,
-                        1,
-                        format!(
-                            "枚举「{}.{}」不能直接写；跨包请用 {}.{}.成员，并在对方 [导出] 类型 里列出",
-                            owner, n, owner, n
-                        ),
-                    )
-                    .with_hint("枚举跨包需要显式导出；枚举名本身不能当值用"));
+            MatchPattern::Dict(pairs) => {
+                for (_, v) in pairs.iter_mut() {
+                    self.match_pattern(v, line)?;
                 }
+                return Ok(());
+            }
+            MatchPattern::EnumMember(..) => {}
+            _ => return Ok(()),
+        }
+        let MatchPattern::EnumMember(n, _) = pat else {
+            return Ok(());
+        };
+        // `包名.枚举名.成员`：解析器把枚举名拼成 `包名.枚举名`。
+        if let Some((pkg, en)) = n.split_once('.') {
+            let pkg = pkg.to_string();
+            let en = en.to_string();
+            if !self.is_dep_pkg(&pkg) {
+                return Err(CompileError::new(
+                    "E128",
+                    line,
+                    1,
+                    format!("包「{}」不在依赖里；跨包枚举要写 包名.枚举名.成员", pkg),
+                ));
+            }
+            if !self.deps[&pkg].enums.contains(&en) {
+                return Err(CompileError::new(
+                    "E128",
+                    line,
+                    1,
+                    format!("包「{}」里没有枚举「{}」", pkg, en),
+                ));
+            }
+            if self.is_private(&pkg, &en) {
+                return Err(CompileError::new(
+                    "E128",
+                    line,
+                    1,
+                    format!("枚举「{}.{}」是私有声明，不能跨包使用", pkg, en),
+                ));
+            }
+            if !self.type_exported(&pkg, &en) {
+                return Err(CompileError::new(
+                    "E128",
+                    line,
+                    1,
+                    format!(
+                        "枚举「{}.{}」没有导出；请在它的 砾包.toml [导出] 类型 里列出这个名字",
+                        pkg, en
+                    ),
+                ));
+            }
+            *n = format!("{}::{}", pkg, en);
+            return Ok(());
+        }
+        if let Some(m) = self.global_ref(n) {
+            *n = m;
+        } else if self.is_root {
+            if let Some(owner) = self.dep_enum_owner(n) {
+                return Err(CompileError::new(
+                    "E128",
+                    line,
+                    1,
+                    format!(
+                        "枚举「{}.{}」不能直接写；跨包请用 {}.{}.成员，并在对方 [导出] 类型 里列出",
+                        owner, n, owner, n
+                    ),
+                )
+                .with_hint("枚举跨包需要显式导出；枚举名本身不能当值用"));
             }
         }
         Ok(())

@@ -1022,7 +1022,10 @@ fn collect_decls(stmts: &[Stmt], out: &mut Vec<String>) {
             StmtKind::Match {
                 arms, else_body, ..
             } => {
-                for (_, body) in arms {
+                for (pats, body) in arms {
+                    for p in pats {
+                        collect_pattern_binds(p, out);
+                    }
                     collect_decls(body, out);
                 }
                 if let Some(body) = else_body {
@@ -1042,6 +1045,24 @@ fn collect_decls(stmts: &[Stmt], out: &mut Vec<String>) {
             }
             _ => {}
         }
+    }
+}
+
+/// 解构模式里的叶绑定名字：提前分配局部槽，臂内按普通变量使用。
+fn collect_pattern_binds(p: &MatchPattern, out: &mut Vec<String>) {
+    match p {
+        MatchPattern::Bind(n) => out.push(n.clone()),
+        MatchPattern::List(items) => {
+            for i in items {
+                collect_pattern_binds(i, out);
+            }
+        }
+        MatchPattern::Dict(pairs) => {
+            for (_, v) in pairs {
+                collect_pattern_binds(v, out);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -2626,67 +2647,107 @@ fn compile_match(
     Ok(())
 }
 
-/// 把每个分支的模式解析成闭区间 `[起, 止]`，并检查未知枚举成员与区间重叠。
+/// 解析后的模式：标量已折成闭区间，解构保留结构。
+enum RPat {
+    Range(i64, i64),
+    Bind(String),
+    List(Vec<RPat>),
+    Dict(Vec<(String, RPat)>),
+}
+
+/// 把每个分支的模式解析成 `RPat`，并检查未知枚举成员与标量区间重叠。
+/// 解构模式不参与区间重叠检查（是否命中要等运行期看值的形状）。
 fn resolve_match_arms<'a>(
     b: &Builder,
     patterns: impl Iterator<Item = &'a [MatchPattern]>,
     line: u32,
-) -> Result<Vec<Vec<(i64, i64)>>> {
-    let mut out: Vec<Vec<(i64, i64)>> = Vec::new();
+) -> Result<Vec<Vec<RPat>>> {
+    let mut out: Vec<Vec<RPat>> = Vec::new();
     let mut seen: Vec<(i64, i64)> = Vec::new();
     for pats in patterns {
-        let mut cur: Vec<(i64, i64)> = Vec::new();
+        let mut cur: Vec<RPat> = Vec::new();
         for p in pats {
-            let (lo, hi) = match p {
-                MatchPattern::Int(v) => (*v, *v),
-                MatchPattern::Range(a, z) => (*a, *z),
-                MatchPattern::EnumMember(en, member) => {
-                    let Some(map) = b.enums.get(en) else {
-                        return Err(CompileError::new(
-                            "E139",
-                            line,
-                            1,
-                            format!("「情形」里的「{}」不是枚举", en),
-                        ));
-                    };
-                    match map.get(member) {
-                        Some(&v) => (v as i64, v as i64),
-                        None => {
-                            return Err(CompileError::new(
-                                "E139",
-                                line,
-                                1,
-                                format!("枚举「{}」里没有成员「{}」", en, member),
-                            ))
-                        }
-                    }
-                }
-                MatchPattern::Else => {
+            let range = scalar_range(b, p, line)?;
+            if let Some((lo, hi)) = range {
+                if seen.iter().any(|&(a, z)| lo <= z && a <= hi) {
                     return Err(CompileError::new(
                         "E139",
                         line,
                         1,
-                        "「其他」不能出现在普通分支里",
-                    ))
+                        format!(
+                            "「匹配」里的情形值与之前的分支重复或区间重叠（{}..{}）",
+                            lo, hi
+                        ),
+                    ));
                 }
-            };
-            if seen.iter().any(|&(a, z)| lo <= z && a <= hi) {
-                return Err(CompileError::new(
-                    "E139",
-                    line,
-                    1,
-                    format!(
-                        "「匹配」里的情形值与之前的分支重复或区间重叠（{}..{}）",
-                        lo, hi
-                    ),
-                ));
+                seen.push((lo, hi));
+                cur.push(RPat::Range(lo, hi));
+            } else {
+                cur.push(resolve_pattern(b, p, line)?);
             }
-            seen.push((lo, hi));
-            cur.push((lo, hi));
         }
         out.push(cur);
     }
     Ok(out)
+}
+
+/// 标量模式折成闭区间；解构/绑定/其他返回 `None`。
+fn scalar_range(b: &Builder, p: &MatchPattern, line: u32) -> Result<Option<(i64, i64)>> {
+    Ok(match p {
+        MatchPattern::Int(v) => Some((*v, *v)),
+        MatchPattern::Range(a, z) => Some((*a, *z)),
+        MatchPattern::EnumMember(en, member) => {
+            let Some(map) = b.enums.get(en) else {
+                return Err(CompileError::new(
+                    "E139",
+                    line,
+                    1,
+                    format!("「情形」里的「{}」不是枚举", en),
+                ));
+            };
+            match map.get(member) {
+                Some(&v) => Some((v as i64, v as i64)),
+                None => {
+                    return Err(CompileError::new(
+                        "E139",
+                        line,
+                        1,
+                        format!("枚举「{}」里没有成员「{}」", en, member),
+                    ))
+                }
+            }
+        }
+        _ => None,
+    })
+}
+
+fn resolve_pattern(b: &Builder, p: &MatchPattern, line: u32) -> Result<RPat> {
+    if let Some((lo, hi)) = scalar_range(b, p, line)? {
+        return Ok(RPat::Range(lo, hi));
+    }
+    match p {
+        MatchPattern::Bind(n) => Ok(RPat::Bind(n.clone())),
+        MatchPattern::List(items) => {
+            let mut out = Vec::with_capacity(items.len());
+            for i in items {
+                out.push(resolve_pattern(b, i, line)?);
+            }
+            Ok(RPat::List(out))
+        }
+        MatchPattern::Dict(pairs) => {
+            let mut out = Vec::with_capacity(pairs.len());
+            for (k, v) in pairs {
+                out.push((k.clone(), resolve_pattern(b, v, line)?));
+            }
+            Ok(RPat::Dict(out))
+        }
+        _ => Err(CompileError::new(
+            "E139",
+            line,
+            1,
+            "「其他」不能出现在普通分支或解构模式里",
+        )),
+    }
 }
 
 /// 为一条分支发出比较链：任一模式命中就跳到分支体。
@@ -2694,30 +2755,123 @@ fn emit_match_test(
     fs: &mut FnState,
     b: &mut Builder,
     slot: u8,
-    pats: &[(i64, i64)],
+    pats: &[RPat],
     line: u32,
     hits: &mut Vec<usize>,
 ) -> Result<()> {
-    for &(lo, hi) in pats {
-        fs.emit_u8(OP_LOAD_LOCAL, slot);
-        let c = b.const_int(lo, line, 1)?;
-        fs.emit_u8(OP_CONST, c);
-        if lo == hi {
-            fs.emit_u8(OP_CMP, CMP_EQ);
-            hits.push(fs.jump(OP_JUMP_IF_TRUE));
-        } else {
-            // 区间：`起 <= 值 <= 止`，两次比较，不新增指令。
-            fs.emit_u8(OP_CMP, CMP_GE);
-            let jf = fs.jump(OP_JUMP_IF_FALSE);
-            fs.emit_u8(OP_LOAD_LOCAL, slot);
-            let c2 = b.const_int(hi, line, 1)?;
-            fs.emit_u8(OP_CONST, c2);
-            fs.emit_u8(OP_CMP, CMP_LE);
-            hits.push(fs.jump(OP_JUMP_IF_TRUE));
-            let skip = fs.here();
-            fs.patch(jf, skip);
+    for pat in pats {
+        let mut fails: Vec<usize> = Vec::new();
+        emit_pattern_test(fs, b, slot, pat, line, &mut fails)?;
+        hits.push(fs.jump(OP_JUMP));
+        let next = fs.here();
+        for f in fails {
+            fs.patch(f, next);
         }
     }
+    Ok(())
+}
+
+/// 单个模式的测试：命中则顺序执行，不命中则跳进 `fails`（由调用方后续回填）。
+/// 解构用内建 `类型` / `长度` / `包含` 与 `GET_ITEM` 组合，不新增操作码。
+fn emit_pattern_test(
+    fs: &mut FnState,
+    b: &mut Builder,
+    slot: u8,
+    pat: &RPat,
+    line: u32,
+    fails: &mut Vec<usize>,
+) -> Result<()> {
+    match pat {
+        RPat::Range(lo, hi) => {
+            fs.emit_u8(OP_LOAD_LOCAL, slot);
+            let c = b.const_int(*lo, line, 1)?;
+            fs.emit_u8(OP_CONST, c);
+            if lo == hi {
+                fs.emit_u8(OP_CMP, CMP_EQ);
+                fails.push(fs.jump(OP_JUMP_IF_FALSE));
+            } else {
+                // 区间：`起 <= 值 <= 止`，两次比较。
+                fs.emit_u8(OP_CMP, CMP_GE);
+                fails.push(fs.jump(OP_JUMP_IF_FALSE));
+                fs.emit_u8(OP_LOAD_LOCAL, slot);
+                let c2 = b.const_int(*hi, line, 1)?;
+                fs.emit_u8(OP_CONST, c2);
+                fs.emit_u8(OP_CMP, CMP_LE);
+                fails.push(fs.jump(OP_JUMP_IF_FALSE));
+            }
+            Ok(())
+        }
+        RPat::Bind(name) => {
+            fs.emit_u8(OP_LOAD_LOCAL, slot);
+            store_name(fs, b, name, line, 1)
+        }
+        RPat::List(items) => {
+            emit_pattern_type_test(fs, b, slot, "列表", line, fails)?;
+            emit_load_builtin(fs, b, "长度", line)?;
+            fs.emit_u8(OP_LOAD_LOCAL, slot);
+            fs.emit_u8(OP_CALL, 1);
+            let c = b.const_int(items.len() as i64, line, 1)?;
+            fs.emit_u8(OP_CONST, c);
+            fs.emit_u8(OP_CMP, CMP_EQ);
+            fails.push(fs.jump(OP_JUMP_IF_FALSE));
+            for (i, item) in items.iter().enumerate() {
+                let t = fs.alloc_temp(line, 1)?;
+                fs.emit_u8(OP_LOAD_LOCAL, slot);
+                let ci = b.const_int(i as i64, line, 1)?;
+                fs.emit_u8(OP_CONST, ci);
+                fs.emit(OP_GET_ITEM);
+                fs.emit_u8(OP_STORE_LOCAL, t);
+                emit_pattern_test(fs, b, t, item, line, fails)?;
+                fs.free_temp(t);
+            }
+            Ok(())
+        }
+        RPat::Dict(pairs) => {
+            emit_pattern_type_test(fs, b, slot, "字典", line, fails)?;
+            for (key, sub) in pairs {
+                emit_load_builtin(fs, b, "包含", line)?;
+                fs.emit_u8(OP_LOAD_LOCAL, slot);
+                let ck = b.const_str(key, line, 1)?;
+                fs.emit_u8(OP_CONST, ck);
+                fs.emit_u8(OP_CALL, 2);
+                fails.push(fs.jump(OP_JUMP_IF_FALSE));
+                let t = fs.alloc_temp(line, 1)?;
+                fs.emit_u8(OP_LOAD_LOCAL, slot);
+                let ck2 = b.const_str(key, line, 1)?;
+                fs.emit_u8(OP_CONST, ck2);
+                fs.emit(OP_GET_ITEM);
+                fs.emit_u8(OP_STORE_LOCAL, t);
+                emit_pattern_test(fs, b, t, sub, line, fails)?;
+                fs.free_temp(t);
+            }
+            Ok(())
+        }
+    }
+}
+
+/// 直接装载内建值：按名字取全局槽，`jm_builtin_install` 在加载时已按名绑定。
+fn emit_load_builtin(fs: &mut FnState, b: &mut Builder, name: &str, line: u32) -> Result<()> {
+    let idx = b.intern_name(name, line, 1)?;
+    fs.emit_u8(OP_LOAD_GLOBAL, idx);
+    Ok(())
+}
+
+/// `类型(值) == "列表"/"字典"`：类型不同就落到 `其他`，避免对非容器取值。
+fn emit_pattern_type_test(
+    fs: &mut FnState,
+    b: &mut Builder,
+    slot: u8,
+    want: &str,
+    line: u32,
+    fails: &mut Vec<usize>,
+) -> Result<()> {
+    emit_load_builtin(fs, b, "类型", line)?;
+    fs.emit_u8(OP_LOAD_LOCAL, slot);
+    fs.emit_u8(OP_CALL, 1);
+    let c = b.const_str(want, line, 1)?;
+    fs.emit_u8(OP_CONST, c);
+    fs.emit_u8(OP_CMP, CMP_EQ);
+    fails.push(fs.jump(OP_JUMP_IF_FALSE));
     Ok(())
 }
 

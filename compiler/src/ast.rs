@@ -135,6 +135,12 @@ pub enum MatchPattern {
     Range(i64, i64),
     /// `枚举名.成员`
     EnumMember(String, String),
+    /// 列表解构 `[甲, 乙]`：长度必须完全相等，元素按位置继续匹配。
+    List(Vec<MatchPattern>),
+    /// 字典解构 `{键: 模式, ...}`：列出的键必须存在，多余的键忽略。
+    Dict(Vec<(String, MatchPattern)>),
+    /// 容器里的叶绑定：把当前位置的值绑到同名局部变量。
+    Bind(String),
     /// `其他`
     Else,
 }

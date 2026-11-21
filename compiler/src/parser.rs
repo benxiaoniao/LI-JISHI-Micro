@@ -399,6 +399,15 @@ impl Parser {
             }
             self.pos += 1;
             let pats = self.parse_match_patterns()?;
+            if pats
+                .iter()
+                .any(|p| matches!(p, MatchPattern::List(_) | MatchPattern::Dict(_)))
+            {
+                return Err(self.err(
+                    "E139",
+                    "匹配作为表达式时不支持列表/字典解构；请改用语句形式「匹配 …:」",
+                ));
+            }
             self.expect_op(":")?;
             if matches!(self.peek().tok, Tok::Newline) {
                 return Err(self.err(
@@ -438,10 +447,53 @@ impl Parser {
         })
     }
 
-    /// 解析一个情形模式：整数、负数、闭区间 `起..止`、枚举成员或 `其他`。
-    fn parse_match_pattern(&mut self) -> Result<MatchPattern> {
+    /// 解析一个情形模式：整数、负数、闭区间 `起..止`、枚举成员、`其他`，
+    /// 或列表/字典解构。`allow_bind` 只在容器内部为真——那里单独的标识符是叶绑定。
+    fn parse_match_pattern(&mut self, allow_bind: bool) -> Result<MatchPattern> {
         let t = self.peek().clone();
         match t.tok {
+            Tok::Op("[") => {
+                self.pos += 1;
+                let mut items: Vec<MatchPattern> = Vec::new();
+                while !matches!(self.peek().tok, Tok::Op("]")) {
+                    items.push(self.parse_match_pattern(true)?);
+                    if matches!(self.peek().tok, Tok::Op(",")) {
+                        self.pos += 1;
+                    } else {
+                        break;
+                    }
+                }
+                self.expect_op("]")?;
+                Ok(MatchPattern::List(items))
+            }
+            Tok::Op("{") => {
+                self.pos += 1;
+                let mut pairs: Vec<(String, MatchPattern)> = Vec::new();
+                while !matches!(self.peek().tok, Tok::Op("}")) {
+                    let key = match self.peek().tok.clone() {
+                        Tok::Ident(s) | Tok::Str(s) => {
+                            self.pos += 1;
+                            s
+                        }
+                        _ => {
+                            return Err(self.err(
+                                "E139",
+                                "字典解构的键要写名字或文本字面量（如 {名字: 值}）",
+                            ))
+                        }
+                    };
+                    self.expect_op(":")?;
+                    let sub = self.parse_match_pattern(true)?;
+                    pairs.push((key, sub));
+                    if matches!(self.peek().tok, Tok::Op(",")) {
+                        self.pos += 1;
+                    } else {
+                        break;
+                    }
+                }
+                self.expect_op("}")?;
+                Ok(MatchPattern::Dict(pairs))
+            }
             Tok::Int(v) => {
                 self.pos += 1;
                 if matches!(self.peek().tok, Tok::Op("..")) {
@@ -482,15 +534,27 @@ impl Parser {
                 // 单独一个「其他」是兜底分支；`其他.成员` 仍按枚举成员解析。
                 if name == "其他" && !matches!(self.peek_at(1).tok, Tok::Op(".")) {
                     self.pos += 1;
+                    if allow_bind {
+                        return Err(CompileError::new(
+                            "E139",
+                            t.line,
+                            t.col,
+                            "「其他」只能单独作为分支兜底，不能写进列表/字典解构",
+                        ));
+                    }
                     return Ok(MatchPattern::Else);
                 }
                 self.pos += 1;
                 if !matches!(self.peek().tok, Tok::Op(".")) {
+                    if allow_bind {
+                        return Ok(MatchPattern::Bind(name));
+                    }
                     return Err(CompileError::new(
                         "E139",
                         t.line,
                         t.col,
-                        "「情形」只能是整数字面量、区间（起..止）、枚举成员（名.成员）或「其他」",
+                        "「情形」只能是整数字面量、区间（起..止）、枚举成员（名.成员）、\
+                         列表/字典解构或「其他」",
                     ));
                 }
                 self.pos += 1;
@@ -511,7 +575,8 @@ impl Parser {
                 "E139",
                 t.line,
                 t.col,
-                "「情形」只能是整数字面量、区间（起..止）、枚举成员（名.成员）或「其他」",
+                "「情形」只能是整数字面量、区间（起..止）、枚举成员（名.成员）、\
+                 列表/字典解构或「其他」",
             )),
         }
     }
@@ -539,10 +604,10 @@ impl Parser {
 
     /// 一个「情形」后面可以写多个模式，用逗号分隔：`情形 1, 3, 5:`。
     fn parse_match_patterns(&mut self) -> Result<Vec<MatchPattern>> {
-        let mut pats = vec![self.parse_match_pattern()?];
+        let mut pats = vec![self.parse_match_pattern(false)?];
         while matches!(self.peek().tok, Tok::Op(",")) {
             self.pos += 1;
-            pats.push(self.parse_match_pattern()?);
+            pats.push(self.parse_match_pattern(false)?);
         }
         if pats.len() > 1 && pats.iter().any(|p| matches!(p, MatchPattern::Else)) {
             return Err(self.err("E139", "「其他」必须单独成一个分支，不能和别的值写在一起"));
