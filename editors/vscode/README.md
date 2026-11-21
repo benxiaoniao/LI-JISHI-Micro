@@ -2,6 +2,7 @@
 
 `editors/vscode` 是砾语言的**编辑器外壳**：语法高亮、运行与调试（多断点 / 条件断点 / 任务过滤）由扩展直接完成；
 **诊断、补全、跳转到定义、格式化统一由 `micc lsp` 提供**，扩展只做 LSP 客户端（`src/lsp.ts`，无额外 npm 依赖）。
+有断点时，调试走标准 DAP：扩展启动 `micc dap`（`src/dap.ts`），适配器再驱动 `jmrun --dbg --事件流`。
 它不参与编译器、运行时和固件构建：扩展卸载或启动失败，`tools\*.ps1` 与 `micc` 的命令行工作流完全不受影响。
 
 - 语言 ID：`li`，文件后缀 `.jsh`，TextMate scope：`source.li`
@@ -95,23 +96,22 @@ powershell -ExecutionPolicy Bypass -File tools\build.ps1 -SkipTests
 
 | 操作 | 实际调用 |
 |---|---|
-| `F5` / 「砾：运行当前文件」 | 无断点：`micc <当前文件> -o <临时.jmb>` → `jmrun <临时.jmb>`；有断点：`jmrun --dbg --事件流 --break ... <临时.jmb>` |
+| `F5` / 「砾：运行当前文件」 | 无断点：`micc <当前文件> -o <临时.jmb>` → `jmrun <临时.jmb>`；有断点：启动 DAP 会话，由 `micc dap` 拉 `jmrun --dbg --事件流 --break ... <临时.jmb>` |
 | `F9` / 「砾：行断点开/关」 | 在当前行切换断点；**每个文档可设多个（合计 ≤8）**，整行淡红底 + 左侧红线 |
 | `Shift+F9` / 「砾：设置/清除行断点条件」 | 给当前行设条件（`名字 比较符 字面量`，如 `k == 3`）；留空 = 转为普通断点。输入框只做形状检查，名字与类型由 `jmrun` 判定 |
 | 「砾：调试任务过滤（`--task`）」 | 设置/清除绿色任务号（0–3，留空 = 任意任务）；下次 `F5` 生效，需要至少一个断点 |
-| `F10` / 「调试下一行」 | 暂停时发送 `n`（行级单步） |
-| `Ctrl+F10` / 「调试步过」 | 暂停时发送 `o`（步过，不进入被调函数） |
-| `F5`（调试会话中） | 发送 `c`（继续到下一个断点） |
-| `Shift+F5` / 「停止调试」 | 结束当前 `jmrun` 调试会话 |
+| `F10` / 「调试下一行」 | 调试会话里发 DAP `next`（行级单步） |
+| `Ctrl+F10` / 「调试步过」 | 发 DAP `stepOut`（步过，不进入被调函数） |
+| `F5`（调试会话中） | 发 DAP `continue`（继续到下一个断点） |
+| `Shift+F5` / 「停止调试」 | 停止当前 DAP 调试会话 |
 
 - 运行前自动保存当前文件；`micc` 失败时直接走编译诊断，不会调 `jmrun`
 - 输出流式进「输出」面板的 **砾** 频道；运行期错误同时进**问题**面板
-- 有断点时进入调试会话：`jmrun --dbg --事件流` 在 stderr 上发 NDJSON 事件，扩展解析后
-  自动打开暂停位置并高亮该行；暂停时默认弹出动作选择（继续 / 下一行 / 步过 / 单步指令 /
-  断点列表 / 退出），可用设置 `li.debugPrompt: false` 关掉弹窗、只用快捷键
-- 调试会话支持 M1–M3 的全部能力：继续、单步指令、行级单步、步过、多断点、条件断点、`--task` 过滤。
-  条件由 `Shift+F9` 输入，扩展拼成 `--break "文件:行 if 名字 比较符 字面量"`；任务过滤由
-  「砾：调试任务过滤」设置，扩展拼成 `--task N`（两者都直接复用 `jmrun` 的既有解析，不在扩展里重写求值）。
+- 有断点时进入标准 DAP 调试会话：扩展启动 `micc dap`，适配器再 spawn `jmrun --dbg --事件流`。
+  VS Code 的调试工具栏、变量面板（当前帧局部变量）与调用栈面板都可用；暂停位置由 `stopped`
+  事件自动定位，不再弹自定义动作框
+- 断点/条件/任务过滤仍由扩展维护：`F9`/`Shift+F9` 改完后，下一次 `F5` 随 launch 配置传给适配器；
+  条件拼成 `if 名字 比较符 字面量`，任务过滤拼成 `--task N`，求值仍在 `jmrun`
 - 条件断点在整行装饰的悬停提示里显示 `if …`；条件求值失败由 `jmrun` 打印一次警告并按不成立继续
 - 没有调试段（`--strip-debug`、旧文件、损坏段）时，错误只按错误码定位到当前文件首行，不弹错
 
@@ -123,16 +123,16 @@ powershell -ExecutionPolicy Bypass -File tools\build.ps1 -SkipTests
 | 砾：构建固件（STM32） | `li.buildFirmware` | `Ctrl+Alt+B`（仅 `.jsh`） | `tools\build-firmware.ps1 -Example <示例名>` |
 | 砾：烧录固件（需确认） | `li.flash` | — | `tools\flash-firmware.ps1 -Apply` |
 | 砾：诊断当前文件 | `li.check` | — | `micc <当前文件> -o <临时.jmb>` |
-| 砾：运行当前文件 | `li.run` | `F5`（仅 `.jsh`） | `micc` → `jmrun`；有断点时 `--dbg --事件流` |
-| 砾：行断点开/关（多断点） | `li.toggleBreakpoint` | `F9`（仅 `.jsh`） | 编辑器内状态，不调外部命令 |
-| 砾：设置/清除行断点条件 | `li.setBreakpointCondition` | `Shift+F9`（仅 `.jsh`） | 拼进 `--break "文件:行 if …"` |
-| 砾：调试任务过滤（`--task`） | `li.debug.filterTask` | — | 拼进 `--task N`，下次 F5 生效 |
-| 砾：调试下一行 | `li.debug.next` | `F10`（仅 `.jsh`） | 向调试会话 stdin 写 `n` |
-| 砾：调试步过 | `li.debug.stepOut` | `Ctrl+F10`（仅 `.jsh`） | 写 `o` |
-| 砾：调试继续 | `li.debug.continue` | — | 写 `c` |
-| 砾：调试单步指令 | `li.debug.step` | — | 写 `s` |
-| 砾：调试断点列表 | `li.debug.breaks` | — | 写 `bl` |
-| 砾：停止调试 | `li.debug.stop` | `Shift+F5`（仅 `.jsh`） | 结束 `jmrun` 子进程 |
+| 砾：运行当前文件 | `li.run` | `F5`（仅 `.jsh`） | 无断点 `micc` → `jmrun`；有断点启动 `micc dap` 会话 |
+| 砾：行断点开/关（多断点） | `li.toggleBreakpoint` | `F9`（仅 `.jsh`） | 编辑器内状态，启动调试时随 launch 配置下发 |
+| 砾：设置/清除行断点条件 | `li.setBreakpointCondition` | `Shift+F9`（仅 `.jsh`） | 随 launch 配置下发条件 |
+| 砾：调试任务过滤（`--task`） | `li.debug.filterTask` | — | 随 launch 配置下发 `task`，下次 F5 生效 |
+| 砾：调试下一行 | `li.debug.next` | `F10`（仅 `.jsh`） | DAP `next` |
+| 砾：调试步过 | `li.debug.stepOut` | `Ctrl+F10`（仅 `.jsh`） | DAP `stepOut` |
+| 砾：调试继续 | `li.debug.continue` | — | DAP `continue` |
+| 砾：调试单步指令 | `li.debug.step` | — | DAP `stepIn` |
+| 砾：调试断点列表 | `li.debug.breaks` | — | 输出面板列出扩展维护的断点 |
+| 砾：停止调试 | `li.debug.stop` | `Shift+F5`（仅 `.jsh`） | 停止 DAP 会话 |
 | 砾：重新加载语言卡补全 | `li.reloadLangcard` | — | 重新读取 `spec/langcard.json` |
 | 砾：取消当前任务 | `li.cancel` | 点状态栏 | 结束当前 PowerShell 子进程 |
 
@@ -197,13 +197,17 @@ node test\verify.js
 # 2) 语言服务器：stdio JSON-RPC（诊断/补全/定义/格式化/退出）
 node ..\..\tools\test-lsp.js
 
-# 3) VS Code 扩展宿主：真实命令、跳转、诊断、F5/F9
+# 3) 调试适配器：stdio DAP（断点/条件/栈/变量/单步/停止）
+node ..\..\tools\test-dap.js
+
+# 4) VS Code 扩展宿主：真实命令、跳转、诊断、F5/F9/DAP 单步
 powershell -NoProfile -ExecutionPolicy Bypass -File test\run-it.ps1
 ```
 
 - `tools\test-lsp.js` 覆盖 9 项：`initialize` 能力、坏源码诊断（含错误码）、改好清空、补全含 `令`/`打印`、函数定义跳转、格式化、`--format` 与 LSP 结果一致、`shutdown`、干净退出。
+- `tools\test-dap.js` 覆盖 21 项：能力声明、`initialized` 顺序、条件断点命中、栈/变量、`next` 行号前进、一次暂停只发一个 `stopped`、条件不成立不停、`continue` 退出、暂停中断开、断点上限。
 - `verify.js` 覆盖 44 项：同文件符号/类/方法、跨包 `工具.加一`、裸包名、不存在符号、原生模块语言卡、E007 定位、无调试段退回、断点命中（第 32 行）与未命中（退出码 2），6 项格式化（缩进/运算符空格/幂等/注释与空行/示例零改写/`??` 与安全访问），以及调试事件流、条件断点（`k == 3` 只停一次 / `k == 99` 不停）、`--task 1` 只停子任务。
-- `run-it.ps1` 启动真实 `Code.exe --extensionTestsPath`，覆盖 14 项：扩展激活、命令注册（含条件断点与任务过滤）、`c.加`/`c.值`/`查点` 三处同文件跳转、`打印` 不跳转、跨包跳转、`导入 引脚` 跳语言卡、Shift+Alt+F 格式化提供者（含幂等）、F5 错误进问题面板并定位第 3 行、F9 + F5 断点停第 32 行、再按 F9 清除。
+- `run-it.ps1` 启动真实 `Code.exe --extensionTestsPath`，覆盖 14 项：扩展激活、命令注册（含条件断点与任务过滤）、`c.加`/`c.值`/`查点` 三处同文件跳转、`打印` 不跳转、跨包跳转、`导入 引脚` 跳语言卡、Shift+Alt+F 格式化提供者（含幂等）、F5 错误进问题面板并定位第 3 行、F9 + F5 断点停第 32 行且会话类型为 `li`、DAP 单步后行号前进、再按 F9 清除。
 - 集成测试夹具提交在 `editors\vscode\test\fixtures\`；`run-it.ps1` 每次运行先同步到
   `build\editor-it\`（`build` 被 gitignore，所以不能依赖它已存在）。
 
@@ -213,7 +217,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File test\run-it.ps1
 
 - 扩展不修改 `compiler/`、`runtime/`、`firmware/`、`tools/` 的任何文件，只**调用**现有脚本
 - 跳转只覆盖 `令/函数/类/方法/字段/包/原生模块`；不做重命名、引用查找
-- 调试是「`jmrun --dbg --事件流` + 快捷键/弹窗」的轻量桥接：有断点、条件、单步与任务过滤，但没有变量/调用栈的可视面板，断点用整行装饰而非 VS Code 原生断点槽
+- 调试由 `micc dap` 翻译标准 DAP：变量面板只列当前帧局部变量，调用栈来自 `bt`；F9 断点由扩展维护，VS Code 原生断点在启动时经 `setBreakpoints` 合并，运行中修改下次会话生效
 - 条件只支持 `名字 比较符 字面量`（`== != < <= > >=`；整数 / 文本 / `真` / `假`），不支持任意表达式或函数调用；`--task` 只覆盖绿色任务 0–3
 - 诊断是「编译一次、报告首条错误」，与 `micc` 命令行行为一致；LSP 只编译当前文件，不做工作区整体编译
 - 不上板、不碰串口；烧录只转发给 `tools\flash-firmware.ps1`

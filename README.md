@@ -36,7 +36,8 @@ PC 上：  .jsh 源码 ──micc──▶  .jmb 微字节码
 | 规范校验 | `--check-native`、`--check-langcard` 进构建链路，头文件或语言卡落后于规范即失败 |
 | 可复现工具链 | `tools/toolchains/toolchain.lock.json` + `tools/fetch-toolchain.ps1`，按锁文件哈希安装 |
 | 语言服务器 | `micc lsp`（stdio JSON-RPC）：诊断、语言卡补全、跳转到定义、格式化；宿主侧 0 B，编辑器只做客户端 |
-| 编辑器扩展 | `editors/vscode`（可选）：高亮、LSP 诊断/补全/定义/格式化、`F5` 运行、`F9` 多断点 / `Shift+F9` 条件断点 / `--task` 过滤；只调 `micc` / `jmrun`，不占固件空间 |
+| 调试适配器 | `micc dap`（stdio DAP）：断点/条件断点/变量/调用栈/单步/继续；后端仍是 `jmrun --dbg --事件流`，宿主侧 0 B |
+| 编辑器扩展 | `editors/vscode`（可选）：高亮、LSP 诊断/补全/定义/格式化、`F5` 运行、`F9` 多断点 / `Shift+F9` 条件断点 / `--task` 过滤；有断点时走 DAP 调试会话（变量与调用栈面板）；只调 `micc` / `jmrun`，不占固件空间 |
 
 上板验证记录在 [docs/verification/](docs/verification/)：ADC 零点（PA0 接 GND）、
 ADC 满量程（PA0 接 3V3）、以及第四轮读到 4094 触发 E023 的故障与修复对照。
@@ -166,15 +167,16 @@ compiler\target\release\micc.exe pack --目录 examples\packages\应用 --离线
 - 跳转到定义：本文件符号、`包名.函数` 的依赖入口、`导入 模块` 的语言卡声明；未保存的缓冲区也按当前文本解析。
 - `micc --format` 与 LSP 格式化是同一份 Rust 实现（`Shift+Alt+F`），CLI 可单独验证。
 - 运行期错误标红：解析 `jmrun` 输出的 `于 文件:行`，在该行画诊断并可点击定位；没有调试段时优雅退回错误码诊断，不报错。
-- `F5`：以当前文件为入口跑 `micc` + `jmrun`，输出进「砾」频道，错误同时进问题面板。
-- `F9`：在当前行切换断点，每个文档可设多个（合计 ≤8），`F5` 时附 `--break 文件:行`；命中后打开并定位到该行。
+- `F5`：无断点时以当前文件为入口跑 `micc` + `jmrun`，输出进「砾」频道，错误同时进问题面板；有断点时启动 VS Code 原生调试会话（`micc dap`）。
+- `F9`：在当前行切换断点，每个文档可设多个（合计 ≤8），调试启动时随 `breaks` 传给适配器；命中后打开并定位到该行。
 - `Shift+F9`：给当前行设条件（`名字 比较符 字面量`，如 `k == 3`；留空=普通断点），拼成 `--break "文件:行 if …"`；装饰悬停显示条件。
-- 调试会话：`jmrun --dbg --事件流` 的 NDJSON 驱动暂停/定位，`F10` 下一行、`Ctrl+F10` 步过、`F5` 继续、`Shift+F5` 停止；「砾：调试任务过滤」可设 `--task N`（0–3）。不做变量/调用栈的可视面板。
+- 调试会话由 `micc dap` 翻译为标准 DAP：VS Code 的调试工具栏、变量面板、调用栈面板可用；`F10` 下一行、`Ctrl+F10` 步过、`F5` 继续、`Shift+F5` 停止都保留；「砾：调试任务过滤」仍映射到 `--task N`。
 - 格式化：`Shift+Alt+F` 由 `micc lsp` 完成（缩进 4 空格、运算符两侧空格），字符串/注释/空行原样保留，重复格式化结果不变。
 
 编辑器侧验证不依赖板子：`node tools/test-lsp.js` 用 JSON-RPC 覆盖诊断/补全/定义/格式化/退出（9 项）；
+`node tools/test-dap.js` 直接驱动 `micc dap` 覆盖断点/条件/栈/变量/单步/停止（21 项）；
 `node editors/vscode/test/verify.js` 覆盖符号/包/输出解析、断点判定与格式化（44 项）；
-`editors/vscode/test/run-it.ps1` 用 VS Code 扩展宿主跑真实命令（14 项，含 LSP 定义与格式化）。
+`editors/vscode/test/run-it.ps1` 用 VS Code 扩展宿主跑真实命令（14 项，含 LSP 定义、DAP 断点与单步）。
 
 ---
 

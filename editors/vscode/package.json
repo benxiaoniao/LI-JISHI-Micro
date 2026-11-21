@@ -52,6 +52,88 @@
         "path": "./syntaxes/li.tmLanguage.json"
       }
     ],
+    "breakpoints": [
+      {
+        "language": "li"
+      }
+    ],
+    "debuggers": [
+      {
+        "type": "li",
+        "label": "砾",
+        "languages": [
+          "li"
+        ],
+        "configurationAttributes": {
+          "launch": {
+            "required": [
+              "program"
+            ],
+            "properties": {
+              "program": {
+                "type": "string",
+                "description": "要调试的 .jsh 或 .jmb；.jsh 由适配器调用 micc 编译。",
+                "default": "${file}"
+              },
+              "source": {
+                "type": "string",
+                "description": "源码路径（可选，用于定位）。"
+              },
+              "cwd": {
+                "type": "string",
+                "description": "工作目录。",
+                "default": "${workspaceFolder}"
+              },
+              "miccPath": {
+                "type": "string",
+                "description": "micc 可执行文件路径。"
+              },
+              "jmrunPath": {
+                "type": "string",
+                "description": "jmrun 可执行文件路径。"
+              },
+              "task": {
+                "type": "number",
+                "description": "只在该绿色任务号上停（对应 --task N）。"
+              },
+              "breaks": {
+                "type": "array",
+                "description": "断点规格（扩展内部使用）。",
+                "items": {
+                  "type": "object"
+                }
+              },
+              "cleanup": {
+                "type": "boolean",
+                "description": "会话结束后删除临时 .jmb。",
+                "default": false
+              }
+            }
+          }
+        },
+        "initialConfigurations": [
+          {
+            "type": "li",
+            "request": "launch",
+            "name": "砾：调试当前文件",
+            "program": "${file}",
+            "cwd": "${workspaceFolder}"
+          }
+        ],
+        "configurationSnippets": [
+          {
+            "label": "砾：调试当前文件",
+            "body": {
+              "type": "li",
+              "request": "launch",
+              "name": "砾：调试当前文件",
+              "program": "${file}",
+              "cwd": "${workspaceFolder}"
+            }
+          }
+        ]
+      }
+    ],
     "commands": [
       {
         "command": "li.check",
@@ -229,11 +311,6 @@
           "type": "boolean",
           "default": true,
           "markdownDescription": "输入时（防抖 700 ms）调用 `micc` 刷新诊断。保存与打开文件时始终刷新。"
-        },
-        "li.debugPrompt": {
-          "type": "boolean",
-          "default": true,
-          "markdownDescription": "调试暂停时弹出动作选择（继续 / 下一行 / 步过 / 退出）。集成测试会关掉它。"
         },
         "li.langcardPath": {
           "type": "string",

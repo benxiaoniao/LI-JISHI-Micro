@@ -18,7 +18,7 @@ use crate::native_spec;
 use crate::stdlib_spec;
 use crate::symbols;
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
 pub fn run() -> i32 {
@@ -466,7 +466,7 @@ impl Server {
 
 /* ---------------- 传输 ---------------- */
 
-fn read_message(reader: &mut BufReader<std::io::StdinLock<'_>>) -> Option<String> {
+pub(crate) fn read_message<R: BufRead>(reader: &mut R) -> Option<String> {
     let mut length: Option<usize> = None;
     loop {
         let mut line = String::new();
@@ -488,11 +488,14 @@ fn read_message(reader: &mut BufReader<std::io::StdinLock<'_>>) -> Option<String
     String::from_utf8(buf).ok()
 }
 
-fn send(value: &Json) {
+pub(crate) fn write_message<W: Write>(out: &mut W, value: &Json) {
     let body = json::stringify(value);
-    let mut out = std::io::stdout().lock();
     let _ = write!(out, "Content-Length: {}\r\n\r\n{}", body.len(), body);
     let _ = out.flush();
+}
+
+fn send(value: &Json) {
+    write_message(&mut std::io::stdout().lock(), value);
 }
 
 fn diagnostics_notification(uri: &str, diagnostics: Vec<Json>) -> Json {

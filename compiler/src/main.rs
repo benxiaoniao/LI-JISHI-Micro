@@ -1,5 +1,6 @@
 mod ast;
 mod codegen;
+mod dap;
 mod debug;
 mod error;
 mod format;
@@ -43,6 +44,7 @@ fn usage() {
     eprintln!("      micc --pack-files <包目录>                 # 包与依赖的入口文件（给编辑器跳转）");
     eprintln!("      micc --format <x.jsh>                      # 按编辑器规则格式化到 stdout");
     eprintln!("      micc lsp                                   # 语言服务器（stdio JSON-RPC，编辑器调用）");
+    eprintln!("      micc dap                                   # 调试适配器（stdio DAP，编辑器调用）");
     eprintln!("      micc --emit-blob <x.jmb> [-o jm_blob.c]     # 生成内嵌字节数组（固件用）");
     eprintln!("      micc --emit-header        # 导出 jm_opcodes.h");
     eprintln!("      micc --emit-native-header # 导出运行时原生表头 runtime/include/jm_native_table.h");
@@ -401,6 +403,9 @@ fn main() {
     }
     if args[0] == "lsp" {
         exit(lsp::run());
+    }
+    if args[0] == "dap" {
+        exit(dap::run());
     }
     if args[0] == "pack" {
         exit(pack::cmd_pack(&args[1..]));

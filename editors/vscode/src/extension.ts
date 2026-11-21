@@ -5,16 +5,15 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import {
-  buildDebugArgs,
   displayPath,
   looksLikeBreakCondition,
   normalizeBreakCondition,
-  parseDebugEvent,
   parseRunOutput,
   toggleBreak,
 } from './core';
 import type { BreakSpec, Site } from './core';
 import { LiLspClient } from './lsp';
+import { DEBUG_TYPE, LiDebugAdapterFactory, LiDebugConfigurationProvider } from './dap';
 
 const LANGUAGE_ID = 'li';
 const OUTPUT_NAME = '砾';
@@ -32,9 +31,6 @@ const breakpoints = new Map<string, number[]>();
 const breakConditions = new Map<string, string>();
 /** `--task N` 过滤：undefined = 任意绿色任务。 */
 let debugTaskFilter: number | undefined;
-let debugChild: ChildProcess | undefined;
-let debugPaused = false;
-let debugPrompting = false;
 const runUris = new Map<string, vscode.Uri>();
 
 const debounceTimers = new Map<string, NodeJS.Timeout>();
@@ -547,7 +543,26 @@ async function runCurrent(): Promise<void> {
       line,
       condition: breakConditions.get(breakConditionKey(key, line)),
     }));
-    await startDebugSession(root, document, jmrun, target, spec, debugTaskFilter);
+    const started = await vscode.debug.startDebugging(
+      vscode.workspace.getWorkspaceFolder(document.uri),
+      {
+        type: DEBUG_TYPE,
+        request: 'launch',
+        name: `砾：${path.basename(document.uri.fsPath)}`,
+        program: target,
+        source: document.uri.fsPath,
+        cwd: root,
+        jmrunPath: jmrun,
+        miccPath: micc,
+        breaks: spec,
+        task: debugTaskFilter,
+        cleanup: true,
+      }
+    );
+    if (!started) {
+      removeQuietly(target);
+      vscode.window.showErrorMessage('砾：调试会话没有启动，详见调试控制台。');
+    }
     return;
   }
   if (debugTaskFilter !== undefined) {
@@ -578,157 +593,43 @@ async function runCurrent(): Promise<void> {
   }
 }
 
-function setDebugPaused(paused: boolean, label?: string): void {
-  debugPaused = paused;
-  if (paused) {
-    statusItem.text = `$(debug-pause) 砾：${label ?? '已暂停'}`;
-    statusItem.tooltip = '已暂停：F10 下一行 / Ctrl+F10 步过 / F5 继续 / Shift+F5 停止';
-    statusItem.show();
-  } else {
-    statusItem.hide();
-  }
+function activeLiSession(): vscode.DebugSession | undefined {
+  const session = vscode.debug.activeDebugSession;
+  return session && session.type === DEBUG_TYPE ? session : undefined;
 }
 
-function sendDebug(cmd: string): void {
-  if (!debugChild || !debugChild.stdin) {
+/** 把旧快捷键转发给 DAP 会话；没有会话时只提示。 */
+function debugCommand(command: string): Thenable<unknown> | undefined {
+  const session = activeLiSession();
+  if (!session) {
     vscode.window.showInformationMessage('砾：当前没有调试会话（F5 且有断点时才会进入调试）。');
-    return;
+    return undefined;
   }
-  if (!debugPaused && (cmd === 'c' || cmd === 'n' || cmd === 'o' || cmd === 's')) {
-    vscode.window.showInformationMessage('砾：程序未暂停，无需继续/步进。');
-    return;
-  }
-  debugChild.stdin.write(cmd + '\n');
-  if (cmd !== 'bl' && cmd !== 'v' && cmd !== 'bt') {
-    setDebugPaused(false);
-  }
+  return session.customRequest(command);
 }
 
-async function promptDebugAction(): Promise<void> {
-  if (debugPrompting || !debugChild) {
-    return;
-  }
-  if (!config<boolean>('debugPrompt', true)) {
-    return;
-  }
-  debugPrompting = true;
-  try {
-    const options = [
-      { label: '$(play) 继续', description: 'c', cmd: 'c' },
-      { label: '$(arrow-right) 下一行', description: 'n', cmd: 'n' },
-      { label: '$(debug-step-over) 步过', description: 'o', cmd: 'o' },
-      { label: '$(debug-step-into) 单步指令', description: 's', cmd: 's' },
-      { label: '$(list-unordered) 断点列表', description: 'bl', cmd: 'bl' },
-      { label: '$(stop) 退出', description: 'q', cmd: 'q' },
-    ];
-    const pick = await vscode.window.showQuickPick(options, {
-      placeHolder: '砾调试：选择动作（Esc 保持暂停，之后可用 F10 / F5）',
-      ignoreFocusOut: true,
-    });
-    if (pick) {
-      sendDebug(pick.cmd);
+function listBreakpoints(): void {
+  const root = workspaceRoot(vscode.window.activeTextEditor?.document.uri);
+  output.appendLine('== 砾断点');
+  let count = 0;
+  for (const [uri, lines] of breakpoints) {
+    for (const line of lines) {
+      const condition = breakConditions.get(breakConditionKey(uri, line));
+      const file = root ? displayPath(root, vscode.Uri.parse(uri).fsPath) : uri;
+      output.appendLine(`  ${file}:${line}${condition ? ` if ${condition}` : ''}`);
+      count++;
     }
-  } finally {
-    debugPrompting = false;
   }
+  if (count === 0) {
+    output.appendLine('  （没有断点）');
+  }
+  output.show(true);
 }
 
-/** 事件行 → 输出通道 / 状态栏 / 编辑器定位；非事件行原样显示。 */
-function handleDebugLine(root: string, raw: string, onPause?: () => void): void {
-  const ev = parseDebugEvent(raw);
-  if (!ev) {
-    output.appendLine(raw);
-    return;
-  }
-  if (ev.event === 'pause') {
-    const where = ev.file ? `${ev.file}:${ev.line}` : '（无行表）';
-    output.appendLine(`== 暂停（${ev.reason}）任务 ${ev.task}「${ev.func}」 ${where}`);
-    setDebugPaused(true, `暂停 ${ev.func} ${where}`);
-    if (ev.file && ev.line > 0) {
-      const uri = siteUri(root, ev.file);
-      const row = Math.max(0, ev.line - 1);
-      void vscode.window.showTextDocument(uri, {
-        selection: new vscode.Range(row, 0, row, 0),
-        preserveFocus: true,
-        preview: true,
-      });
-    }
-    void promptDebugAction();
-    onPause?.();
-    return;
-  }
-  output.appendLine(`== 结束（码 ${ev.code}${ev.quit ? '，用户退出' : ''}）`);
-  setDebugPaused(false);
-}
-
-/** 有断点时走完整调试：`--dbg --事件流`，交互命令走 stdin。首次暂停（或结束）后 resolve。 */
-function startDebugSession(
-  root: string,
-  document: vscode.TextDocument,
-  jmrun: string,
-  target: string,
-  spec: BreakSpec[],
-  task?: number
-): Promise<void> {
-  return new Promise(resolve => {
-    let settled = false;
-    const settle = (): void => {
-      if (!settled) {
-        settled = true;
-        resolve();
-      }
-    };
-    const args = buildDebugArgs({ jmb: target, breaks: spec, task });
-    const conditionCount = spec.filter(b => normalizeBreakCondition(b.condition ?? '')).length;
-    const parts = [`断点 ${spec.length} 个`];
-    if (conditionCount > 0) {
-      parts.push(`条件 ${conditionCount} 个`);
-    }
-    parts.push(task === undefined ? '任意任务' : `任务 ${task}`);
-    output.appendLine(`== 调试 ${path.basename(document.uri.fsPath)}（${parts.join('，')}）`);
-    output.appendLine(`> jmrun ${args.map(a => (a.includes(' ') ? `"${a}"` : a)).join(' ')}`);
-    const child = spawn(jmrun, args, { cwd: root, windowsHide: true });
-    debugChild = child;
-    child.stdout?.setEncoding('utf8');
-    child.stderr?.setEncoding('utf8');
-    child.stdout?.on('data', (chunk: string | Buffer) => output.append(String(chunk)));
-
-    let buf = '';
-    child.stderr?.on('data', (chunk: string | Buffer) => {
-      buf += String(chunk);
-      let idx = buf.indexOf('\n');
-      while (idx >= 0) {
-        const line = buf.slice(0, idx).replace(/\r$/, '');
-        buf = buf.slice(idx + 1);
-        handleDebugLine(root, line, settle);
-        idx = buf.indexOf('\n');
-      }
-    });
-    child.on('error', err => {
-      output.appendLine(`无法启动 jmrun：${err.message}`);
-      vscode.window.showErrorMessage(`砾：无法启动 jmrun（${err.message}）。`);
-      debugChild = undefined;
-      setDebugPaused(false);
-      removeQuietly(target);
-      settle();
-    });
-    child.on('close', code => {
-      if (buf) {
-        handleDebugLine(root, buf.replace(/\r$/, ''));
-        buf = '';
-      }
-      output.appendLine(`== 退出码 ${code ?? -1}`);
-      debugChild = undefined;
-      setDebugPaused(false);
-      removeQuietly(target);
-      settle();
-    });
-  });
-}
-
-function stopDebug(): void {
-  if (debugChild) {
-    debugChild.kill();
+function stopDebugSession(): void {
+  const session = activeLiSession();
+  if (session) {
+    void vscode.debug.stopDebugging(session);
   }
 }
 
@@ -939,9 +840,8 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('li.build', () => runScript('tools/build.ps1', [], '构建')),
 
     vscode.commands.registerCommand('li.run', () => {
-      if (debugChild) {
-        sendDebug('c');
-        return;
+      if (activeLiSession()) {
+        return vscode.commands.executeCommand('workbench.action.debug.continue');
       }
       return runCurrent();
     }),
@@ -952,12 +852,12 @@ export function activate(context: vscode.ExtensionContext): void {
 
     vscode.commands.registerCommand('li.debug.filterTask', () => setTaskFilter()),
 
-    vscode.commands.registerCommand('li.debug.continue', () => sendDebug('c')),
-    vscode.commands.registerCommand('li.debug.next', () => sendDebug('n')),
-    vscode.commands.registerCommand('li.debug.step', () => sendDebug('s')),
-    vscode.commands.registerCommand('li.debug.stepOut', () => sendDebug('o')),
-    vscode.commands.registerCommand('li.debug.breaks', () => sendDebug('bl')),
-    vscode.commands.registerCommand('li.debug.stop', () => stopDebug()),
+    vscode.commands.registerCommand('li.debug.continue', () => debugCommand('continue')),
+    vscode.commands.registerCommand('li.debug.next', () => debugCommand('next')),
+    vscode.commands.registerCommand('li.debug.step', () => debugCommand('stepIn')),
+    vscode.commands.registerCommand('li.debug.stepOut', () => debugCommand('stepOut')),
+    vscode.commands.registerCommand('li.debug.breaks', () => listBreakpoints()),
+    vscode.commands.registerCommand('li.debug.stop', () => stopDebugSession()),
 
     vscode.commands.registerCommand('li.buildFirmware', () => {
       const root = workspaceRoot(vscode.window.activeTextEditor?.document.uri);
@@ -1011,6 +911,10 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.languages.registerDefinitionProvider(LANGUAGE_ID, new LiDefinitions()),
 
     vscode.languages.registerDocumentFormattingEditProvider(LANGUAGE_ID, new LiFormatter()),
+
+    vscode.debug.registerDebugConfigurationProvider(DEBUG_TYPE, new LiDebugConfigurationProvider()),
+
+    vscode.debug.registerDebugAdapterDescriptorFactory(DEBUG_TYPE, new LiDebugAdapterFactory()),
 
     vscode.window.onDidChangeActiveTextEditor(editor => {
       if (editor) {
@@ -1073,7 +977,10 @@ export function activate(context: vscode.ExtensionContext): void {
 
 export function deactivate(): void {
   stopRunning();
-  stopDebug();
+  const session = vscode.debug.activeDebugSession;
+  if (session && session.type === DEBUG_TYPE) {
+    void vscode.debug.stopDebugging(session);
+  }
   lspClient?.dispose();
   lspClient = undefined;
   lspRoot = undefined;

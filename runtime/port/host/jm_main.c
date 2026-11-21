@@ -759,7 +759,9 @@ static void stream_finish(int code, int quit) {
     fflush(stderr);
 }
 
-static void dbg_where(void) {
+/* `stream` 只在进入 REPL 的第一轮为 1：NDJSON 暂停事件必须一次暂停只发一次，
+ * 否则每条调试命令之后都会再补一条，编辑器会重复刷新。 */
+static void dbg_where(int stream) {
     JmDbgFrame fs[16];
     int n = cur_frames(fs, 16);
     if (n <= 0) {
@@ -781,11 +783,15 @@ static void dbg_where(void) {
                 line = atoi(colon + 1);
             }
         }
-        stream_pause(jm_dbg_current_task(), name, file, line, line > 0);
+        if (stream) {
+            stream_pause(jm_dbg_current_task(), name, file, line, line > 0);
+        }
     } else {
         fprintf(stderr, "暂停：任务 %d 「%s」 代码 %u 偏移 %u\n", jm_dbg_current_task(), name,
                 (unsigned)fs[0].code, (unsigned)fs[0].ip);
-        stream_pause(jm_dbg_current_task(), name, "", 0, 0);
+        if (stream) {
+            stream_pause(jm_dbg_current_task(), name, "", 0, 0);
+        }
     }
 }
 
@@ -798,39 +804,52 @@ static void dbg_vars(void) {
     }
     char args[512];
     char raw[1024];
-    snprintf(args, sizeof args, "--locals-of \"%s\" %u", g_jmb, (unsigned)fs[0].code);
-    if (micc_query(args, raw, sizeof raw) != 0) {
-        fprintf(stderr, "（当前函数没有局部符号）\n");
-        return;
-    }
+    static char names[64][128];
+    static char values[64][256];
     int shown = 0;
-    char *p = raw;
-    while (*p) {
-        unsigned slot = 0;
-        char name[128];
-        int used = 0;
-        if (sscanf(p, "%u\t%127[^\n]%n", &slot, name, &used) < 2) {
-            break;
-        }
-        p += used;
-        while (*p == '\r' || *p == '\n') {
-            p++;
-        }
-        JmValue v;
-        if (jm_dbg_local(jm_dbg_current_task(), 0, (uint8_t)slot, &v) == 0) {
-            char txt[256];
-            if (jm_dbg_value_text(v, txt, sizeof txt) == 0) {
-                fprintf(stderr, "  %s = %s\n", name, txt);
-            } else {
-                fprintf(stderr, "  %s = <太长>\n", name);
+    snprintf(args, sizeof args, "--locals-of \"%s\" %u", g_jmb, (unsigned)fs[0].code);
+    if (micc_query(args, raw, sizeof raw) == 0) {
+        char *p = raw;
+        while (*p && shown < 64) {
+            unsigned slot = 0;
+            char name[128];
+            int used = 0;
+            if (sscanf(p, "%u\t%127[^\n]%n", &slot, name, &used) < 2) {
+                break;
             }
-        } else {
-            fprintf(stderr, "  %s = <未赋值>\n", name);
+            p += used;
+            while (*p == '\r' || *p == '\n') {
+                p++;
+            }
+            JmValue v;
+            char txt[256];
+            if (jm_dbg_local(jm_dbg_current_task(), 0, (uint8_t)slot, &v) == 0) {
+                if (jm_dbg_value_text(v, txt, sizeof txt) != 0) {
+                    snprintf(txt, sizeof txt, "<太长>");
+                }
+            } else {
+                snprintf(txt, sizeof txt, "<未赋值>");
+            }
+            snprintf(names[shown], sizeof names[shown], "%s", name);
+            snprintf(values[shown], sizeof values[shown], "%s", txt);
+            fprintf(stderr, "  %s = %s\n", name, txt);
+            shown++;
         }
-        shown = 1;
     }
     if (!shown) {
         fprintf(stderr, "（当前函数没有局部符号）\n");
+    }
+    if (g_stream) {
+        fprintf(stderr, "{\"事件\":\"变量\",\"任务\":%d,\"局部\":[", jm_dbg_current_task());
+        for (int i = 0; i < shown; i++) {
+            char jn[300];
+            char jv[600];
+            json_escape(names[i], jn, sizeof jn);
+            json_escape(values[i], jv, sizeof jv);
+            fprintf(stderr, "%s{\"名\":\"%s\",\"值\":\"%s\"}", i ? "," : "", jn, jv);
+        }
+        fprintf(stderr, "]}\n");
+        fflush(stderr);
     }
 }
 
@@ -841,16 +860,44 @@ static void dbg_stack(void) {
         fprintf(stderr, "（取不到调用栈）\n");
         return;
     }
+    static char names[16][192];
+    static char files[16][640];
+    int lines[16];
     for (int i = 0; i < n; i++) {
         const char *name = "?";
         jm_dbg_code_name(fs[i].code, &name);
+        snprintf(names[i], sizeof names[i], "%s", name);
+        files[i][0] = '\0';
+        lines[i] = 0;
         char loc[512];
         if (lookup_line((int)fs[i].code, (int)fs[i].ip, loc, sizeof loc)) {
             fprintf(stderr, "  #%d 「%s」 %s\n", i, name, loc);
+            const char *colon = strrchr(loc, ':');
+            if (colon && colon != loc) {
+                size_t len = (size_t)(colon - loc);
+                if (len < sizeof files[i]) {
+                    memcpy(files[i], loc, len);
+                    files[i][len] = '\0';
+                    lines[i] = atoi(colon + 1);
+                }
+            }
         } else {
             fprintf(stderr, "  #%d 「%s」 代码 %u 偏移 %u\n", i, name, (unsigned)fs[i].code,
                     (unsigned)fs[i].ip);
         }
+    }
+    if (g_stream) {
+        fprintf(stderr, "{\"事件\":\"栈\",\"任务\":%d,\"帧\":[", jm_dbg_current_task());
+        for (int i = 0; i < n; i++) {
+            char jn[400];
+            char jf[1400];
+            json_escape(names[i], jn, sizeof jn);
+            json_escape(files[i], jf, sizeof jf);
+            fprintf(stderr, "%s{\"索引\":%d,\"函数\":\"%s\",\"文件\":\"%s\",\"行\":%d}",
+                    i ? "," : "", i, jn, jf, lines[i]);
+        }
+        fprintf(stderr, "]}\n");
+        fflush(stderr);
     }
 }
 
@@ -915,8 +962,10 @@ static void dbg_break_list(void) {
 
 /* 暂停后的交互循环。返回 0 = 程序已正常结束；1 = 用户退出不再继续；-1 = 故障。 */
 static int dbg_repl(void) {
+    int first = 1;
     for (;;) {
-        dbg_where();
+        dbg_where(first);
+        first = 0;
         fprintf(stderr, "(砾调试) ");
         fflush(stderr);
         char line[128];
@@ -1001,6 +1050,7 @@ static int dbg_repl(void) {
         if (rc < 0) {
             return -1;
         }
+        first = 1; /* 同一次 REPL 里的新暂停：NDJSON 暂停事件要重新发一次 */
     }
 }
 #endif

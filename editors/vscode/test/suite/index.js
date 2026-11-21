@@ -145,41 +145,76 @@ exports.run = async function run() {
     assert(runDiag.range.start.line === 2, '实际行 ' + (runDiag.range.start.line + 1));
   });
 
-  await check('F9 + F5：断点命中并停在第 32 行（完整调试）', async () => {
-    await vscode.workspace
-      .getConfiguration('li')
-      .update('debugPrompt', false, vscode.ConfigurationTarget.Workspace);
-    const document = await open('examples/类.jsh');
+  await check('F9 + F5：断点命中并停在第 32 行（DAP 会话）', async () => {
+    await open('examples/类.jsh');
     const editor = vscode.window.activeTextEditor;
     editor.selection = new vscode.Selection(31, 0, 31, 0);
     await vscode.commands.executeCommand('li.toggleBreakpoint');
     await vscode.commands.executeCommand('li.run');
-    // 调试是异步会话：等首次暂停把编辑器定位到断点行（最多 8 秒）
-    const deadline = Date.now() + 8000;
+    // 等 DAP 会话真正停下来：stackTrace 第 32 行才算命中（编辑器选区在设断点时已是 31 行，
+    // 只看选区会误判）。
+    const deadline = Date.now() + 15000;
     let hit = false;
     while (Date.now() < deadline) {
-      const active = vscode.window.activeTextEditor;
-      if (active && active.document.uri.fsPath.endsWith('类.jsh') &&
-          active.selection.active.line === 31) {
-        hit = true;
-        break;
+      const session = vscode.debug.activeDebugSession;
+      if (session && session.type === 'li') {
+        const stack = await session
+          .customRequest('stackTrace', { threadId: 1, startFrame: 0, levels: 1 })
+          .catch(() => undefined);
+        const frame = stack && stack.stackFrames && stack.stackFrames[0];
+        if (frame && frame.line === 32) {
+          hit = true;
+          break;
+        }
       }
       await new Promise(r => setTimeout(r, 100));
     }
     assert(hit, '没有停在类.jsh 第 32 行');
+    const session = vscode.debug.activeDebugSession;
+    assert(session && session.type === 'li', '活动调试会话不是 li（DAP 未接管）');
+    const active = vscode.window.activeTextEditor;
+    assert(active && active.selection.active.line === 31, '编辑器没有定位到第 32 行');
+  });
+
+  await check('DAP 单步：li.debug.next 让暂停行前进', async () => {
+    const session = vscode.debug.activeDebugSession;
+    assert(session && session.type === 'li', '没有 li 调试会话');
+    const first = await session.customRequest('stackTrace', { threadId: 1, startFrame: 0, levels: 1 });
+    const before = first && first.stackFrames && first.stackFrames[0] ? first.stackFrames[0].line : 0;
+    assert(before === 32, '暂停行不是 32：' + before);
+    await vscode.commands.executeCommand('li.debug.next');
+    const deadline = Date.now() + 8000;
+    let after = before;
+    while (Date.now() < deadline) {
+      const stack = await session
+        .customRequest('stackTrace', { threadId: 1, startFrame: 0, levels: 1 })
+        .catch(() => undefined);
+      const frame = stack && stack.stackFrames && stack.stackFrames[0];
+      if (frame) {
+        after = frame.line;
+        if (after !== before) {
+          break;
+        }
+      }
+      await new Promise(r => setTimeout(r, 100));
+    }
+    assert(after !== before, `单步后行号没有前进：${before} → ${after}`);
   });
 
   await check('调试会话：li.debug.stop 停止（Shift+F5 语义）', async () => {
     await vscode.commands.executeCommand('li.debug.stop');
-  });
-
-  await check('集成测试收尾：恢复 li.debugPrompt 配置', async () => {
-    await vscode.workspace
-      .getConfiguration('li')
-      .update('debugPrompt', undefined, vscode.ConfigurationTarget.Workspace);
+    const deadline = Date.now() + 5000;
+    while (Date.now() < deadline) {
+      if (!vscode.debug.activeDebugSession) {
+        break;
+      }
+      await new Promise(r => setTimeout(r, 100));
+    }
+    assert(!vscode.debug.activeDebugSession, '调试会话没有停止');
   });
 
   await check('F9 再按一次可清除断点', async () => {
+    await open('examples/类.jsh');
     const editor = vscode.window.activeTextEditor;
     editor.selection = new vscode.Selection(31, 0, 31, 0);
     await vscode.commands.executeCommand('li.toggleBreakpoint');
