@@ -154,11 +154,12 @@ fn render_json(source: &str, hits: &[&pack_index::IndexEntry]) -> String {
             s.push(',');
         }
         s.push_str(&format!(
-            "{{\"名字\":\"{}\",\"版本\":\"{}\",\"来源\":\"{}\",\"校验\":\"{}\"}}",
+            "{{\"名字\":\"{}\",\"版本\":\"{}\",\"来源\":\"{}\",\"校验\":\"{}\",\"文档\":\"{}\"}}",
             json_escape(&e.name),
             e.version,
             json_escape(&e.source),
-            json_escape(&e.hash)
+            json_escape(&e.hash),
+            json_escape(e.doc.as_deref().unwrap_or(""))
         ));
     }
     s.push_str("]}");
@@ -297,6 +298,18 @@ fn do_publish(args: &[String]) -> Result<()> {
     }
     let hash = pack_resolve::dir_hash(&unpack)?;
 
+    let doc_html = crate::doc::render_html(&dir)?;
+    let final_doc = repo
+        .join(&m.name)
+        .join(format!("{}-{}.html", m.name, m.version));
+    if let Some(parent) = final_doc.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| e138(format!("建不了仓库子目录 {}：{}", parent.display(), e)))?;
+    }
+    std::fs::write(&final_doc, doc_html.as_bytes())
+        .map_err(|e| e138(format!("写不了文档 {}：{}", final_doc.display(), e)))?;
+    let doc_rel = relative_source(&index_dir, &final_doc);
+
     let final_zip = repo
         .join(&m.name)
         .join(format!("{}-{}.zip", m.name, m.version));
@@ -308,22 +321,29 @@ fn do_publish(args: &[String]) -> Result<()> {
         .map_err(|e| e138(format!("写不了 {}：{}", final_zip.display(), e)))?;
 
     // 读旧索引（存在才算），保留其它包的条目。
-    let mut rows: Vec<(String, Version, String, String)> = Vec::new();
+    let mut rows: Vec<(String, Version, String, String, Option<String>)> = Vec::new();
     if index_path.is_file() {
         let text = read_index(&index_path)?;
         let idx = pack_index::parse_index(&text, None)?;
         for list in idx.by_name.values() {
             for e in list {
-                rows.push((e.name.clone(), e.version, e.source.clone(), e.hash.clone()));
+                rows.push((
+                    e.name.clone(),
+                    e.version,
+                    e.source.clone(),
+                    e.hash.clone(),
+                    e.doc.clone(),
+                ));
             }
         }
     }
-    rows.retain(|(n, v, _, _)| !(n == &m.name && *v == m.version));
+    rows.retain(|(n, v, _, _, _)| !(n == &m.name && *v == m.version));
     rows.push((
         m.name.clone(),
         m.version,
         relative_source(&index_dir, &final_zip),
         hash.clone(),
+        Some(doc_rel),
     ));
     rows.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
     if let Some(parent) = index_path.parent() {
@@ -348,6 +368,7 @@ fn do_publish(args: &[String]) -> Result<()> {
         );
     }
     println!("  归档：{}（{} B）", final_zip.display(), bytes.len());
+    println!("  文档：{}", final_doc.display());
     println!("  校验：{}", hash);
     println!("  索引：{}（共 {} 条）", index_path.display(), rows.len());
     if let Ok(dir_hash) = pack_resolve::dir_hash(&dir) {
@@ -396,17 +417,22 @@ fn esc(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
-fn render_index(rows: &[(String, Version, String, String)]) -> String {
+fn render_index(rows: &[(String, Version, String, String, Option<String>)]) -> String {
     let mut s = String::new();
     s.push_str("# 砾静态索引（`micc publish` 生成；手写同样支持）\n");
     s.push_str("索引版本 = 1\n\n[包]\n");
-    for (name, ver, source, hash) in rows {
+    for (name, ver, source, hash, doc) in rows {
+        let doc_field = match doc {
+            Some(path) => format!(", 文档 = \"{}\"", esc(path)),
+            None => String::new(),
+        };
         s.push_str(&format!(
-            "\"{}@{}\" = {{ 来源 = \"{}\", 校验 = \"{}\" }}\n",
+            "\"{}@{}\" = {{ 来源 = \"{}\", 校验 = \"{}\"{} }}\n",
             esc(name),
             ver,
             esc(source),
-            esc(hash)
+            esc(hash),
+            doc_field
         ));
     }
     s

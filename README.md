@@ -143,6 +143,7 @@ compiler\target\release\micc.exe examples\类.jsh --strip-debug -o build\类-发
 `砾包.toml` 声明包，`micc pack` 递归解析依赖并在源码层合并成一个 `.jmb`；
 `micc install` 生成 `.砾/锁.toml` 与 `.砾/包` 缓存，`--离线` 只读锁与缓存；
 `micc add` / `micc remove` / `micc update` 直接改 `[依赖]` 并按约束重选版本、重写锁（失败时清单与锁回滚）。
+`micc doc` 从接口数据 + 语言卡生成 Markdown/HTML API 文档；`micc publish` 会同时生成 HTML 文档、写进索引，包站显示「API 文档」链接。
 顶层声明默认公开：可 `新建 包名.类名(...)`、在类型标注里写 `参数: 包名.类名`、读取 `包名.枚举名.成员`；
 在声明前加 `私有` 就只在包内可见。`[导出] 名字/类型` 是可选的跨包白名单。
 `micc interface` 会生成公开类/字段/方法与枚举轮廓，并跳过私有声明。

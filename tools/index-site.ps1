@@ -1,5 +1,6 @@
 ﻿# 从 `砾索引.toml` 生成静态包站（LI028）：外置包管理站直接读同一份索引，不维护第二套目录。
 # 只调 `micc search --json`，不自己解析 TOML；产物是 index.html + index.json，无服务器、无外部依赖。
+# 索引条目带 `文档` 字段时，站点渲染成「API 文档」链接；没有文档的包显示「—」。
 param(
     [string]$Index = "砾索引.toml",
     [string]$Out = "build/包站",
@@ -75,12 +76,15 @@ function Html([string]$s) {
 $entries = @()
 foreach ($p in @($data.'包')) {
     if ($null -eq $p) { continue }
+    $docRel = [string]$p.'文档'
+    $docLink = if ($docRel) { Get-RelLink $outDir $docRel } else { "" }
     $entries += [ordered]@{
         '名字' = [string]$p.'名字'
         '版本' = [string]$p.'版本'
         '来源' = [string]$p.'来源'
         '校验' = [string]$p.'校验'
         '链接' = (Get-RelLink $outDir ([string]$p.'来源'))
+        '文档' = $docLink
     }
 }
 
@@ -105,8 +109,10 @@ foreach ($e in $entries) {
     $ver = Html $e.'版本'
     $link = Html $e.'链接'
     $hash = Html $e.'校验'
+    $doc = [string]$e.'文档'
+    $docCell = if ($doc) { "<a href=""$(Html $doc)"">API 文档</a>" } else { "<span class=""muted"">—</span>" }
     [void]$rows.AppendLine("      <tr data-name=""$($name.ToLower())""><td>$name</td><td>$ver</td>" +
-        "<td><a href=""$link"">$link</a></td><td><code>$hash</code></td></tr>")
+        "<td><a href=""$link"">$link</a></td><td><code>$hash</code></td><td class=""doc"">$docCell</td></tr>")
 }
 $badge = if ($signed) { "已验签（" + (Html $Identity) + "）" } else { "未验签（只做哈希校验）" }
 $count = $entries.Count
@@ -137,6 +143,8 @@ $html = @"
   td:nth-child(1) { white-space:nowrap; font-weight:600; }
   td:nth-child(2) { white-space:nowrap; }
   td:nth-child(3) { word-break:break-all; }
+  td.doc { white-space:nowrap; }
+  .muted { color: var(--muted); }
   code { font-family: ui-monospace,Consolas,monospace; font-size:12.5px; color:var(--muted); word-break:break-all; }
   a { color: var(--accent); }
   footer { margin-top: 18px; color: var(--muted); font-size: 13px; word-break: break-all; }
@@ -152,7 +160,7 @@ $html = @"
     <span class="badge">$badge</span>
   </div>
   <table>
-    <thead><tr><th>包名</th><th>版本</th><th>来源</th><th>校验</th></tr></thead>
+    <thead><tr><th>包名</th><th>版本</th><th>来源</th><th>校验</th><th>文档</th></tr></thead>
     <tbody id="rows">
 $($rows.ToString().TrimEnd())
     </tbody>

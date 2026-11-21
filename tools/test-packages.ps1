@@ -1737,6 +1737,99 @@ try {
     Check "add --路径：写本地路径依赖并安装" `
         (($code -eq 0) -and $text.Contains('路径 = "../本地库"') -and(Test-Path (Join-Path $localApp ".砾/包/本地库-0.1.0/主.jsh"))) $o
 
+    # ---------- 25. LI040：包文档生成 ----------
+    $docRoot = Join-Path $sandbox "包文档"
+    $docLib = Join-Path $docRoot "文档库"
+    $docToml = @"
+[包]
+名字 = "文档库"
+版本 = "1.0.0"
+原生 = ["引脚"]
+
+[导出]
+名字 = ["描述"]
+类型 = ["计数器", "状态"]
+"@
+    $docSrc = @"
+类 计数器:
+    令 值 = 0
+    函数 初始化(起点):
+        本.值 = 起点
+    函数 加(n):
+        本.值 = 本.值 + n
+        返回 本.值
+
+枚举 状态:
+    空闲
+    运行
+
+函数 描述():
+    返回 "库"
+"@
+    New-Pkg $docLib $docToml $docSrc
+    $card = Join-Path $root "spec/langcard.json"
+    $o = (& $micc doc --目录 $docLib --语言卡 $card 2>&1 | Out-String)
+    $code = $LASTEXITCODE
+    $mdPath = Join-Path $docLib "文档.md"
+    $md = [IO.File]::ReadAllText($mdPath, [Text.Encoding]::UTF8)
+    Check "doc：Markdown 覆盖函数/类/字段/方法/枚举" `
+        (($code -eq 0) -and $md.Contains("## 函数（1）") -and $md.Contains("| ``描述`` | 0 |") -and
+         $md.Contains("### ``计数器``") -and $md.Contains("字段：``值``") -and $md.Contains("| ``加`` | 1 |") -and
+         $md.Contains("### ``状态``") -and $md.Contains("成员：``空闲``、``运行``")) ($o + "`n" + $md)
+    Check "doc：语言卡原生模块说明并入" `
+        ($md.Contains("## 原生模块（1）") -and $md.Contains("### ``引脚``（``f103_board``）") -and
+         $md.Contains("``引脚写``") -and $md.Contains("推挽输出")) ""
+
+    $o = (& $micc doc --目录 $docLib --格式 html --语言卡 $card 2>&1 | Out-String)
+    $code = $LASTEXITCODE
+    $html = [IO.File]::ReadAllText((Join-Path $docLib "文档.html"), [Text.Encoding]::UTF8)
+    Check "doc：HTML 自带样式并覆盖类/枚举/原生模块" `
+        (($code -eq 0) -and ($html -match '<!DOCTYPE html>') -and $html.Contains("计数器") -and
+         $html.Contains("状态") -and $html.Contains("引脚写") -and $html.Contains("micc doc")) $o
+
+    # 接口清单漂移：改了导出函数参数个数但没重新生成，doc 必须拒绝
+    & $micc interface --目录 $docLib | Out-Null
+    $o = (& $micc doc --目录 $docLib --语言卡 $card 2>&1 | Out-String)
+    $okCode = $LASTEXITCODE
+    $docSrcPath = Join-Path $docLib "主.jsh"
+    $srcText = [IO.File]::ReadAllText($docSrcPath, [Text.Encoding]::UTF8)
+    [IO.File]::WriteAllText(
+        $docSrcPath,
+        $srcText.Replace("函数 描述():", "函数 描述(前缀):"),
+        (New-Object System.Text.UTF8Encoding($false)))
+    $o2 = (& $micc doc --目录 $docLib --语言卡 $card 2>&1 | Out-String)
+    $badCode = $LASTEXITCODE
+    Check "doc：接口未变时通过" ($okCode -eq 0) $o
+    Check-Error "doc：接口清单漂移 → E146" @{ code = $badCode; out = $o2 } "E146" "漂移"
+    & $micc interface --目录 $docLib | Out-Null
+    $o3 = (& $micc doc --目录 $docLib --语言卡 $card 2>&1 | Out-String)
+    Check "doc：重新生成接口后恢复" ($LASTEXITCODE -eq 0) $o3
+
+    # publish 生成 HTML 文档 + 索引 文档 字段；包站显示链接
+    $docRepo = Join-Path $docRoot "仓库"
+    $o = (& $micc publish --目录 $docLib --仓库 $docRepo 2>&1 | Out-String)
+    $code = $LASTEXITCODE
+    $docIdx = Join-Path $docRepo "砾索引.toml"
+    $docIdxText = [IO.File]::ReadAllText($docIdx, [Text.Encoding]::UTF8)
+    $docFile = Join-Path $docRepo "文档库/文档库-1.0.0.html"
+    Check "publish：生成 HTML 文档并写索引 文档 字段" `
+        (($code -eq 0) -and (Test-Path $docFile) -and
+         $docIdxText.Contains('文档 = "文档库/文档库-1.0.0.html"')) $o
+
+    $docSite = Join-Path $docRoot "站"
+    $o = (& (Join-Path $PSScriptRoot "index-site.ps1") -Index $docIdx -Out $docSite 2>&1 | Out-String)
+    $docJson = $null
+    try {
+        $docJson = (Get-Content (Join-Path $docSite "index.json") -Raw -Encoding UTF8) | ConvertFrom-Json
+    }
+    catch { }
+    $docHtml = Get-Content (Join-Path $docSite "index.html") -Raw -Encoding UTF8
+    $docLink = if ($null -ne $docJson) { [string]$docJson.'包'[0].'文档' } else { "" }
+    $docTarget = if ($docLink) { [IO.Path]::GetFullPath((Join-Path $docSite $docLink)) } else { "" }
+    Check "包站：索引 文档 字段变成可用链接" `
+        (($docLink -ne "") -and ($docHtml -match 'API 文档') -and (Test-Path $docTarget)) `
+        ($o + "`n文档链接：" + $docLink)
+
     Write-Host ("包用例：共 " + $script:total + " 个，失败 " + $script:fail + " 个，跳过 " + $script:skip + " 个")
     if ($script:fail -gt 0) { exit 1 }
     exit 0

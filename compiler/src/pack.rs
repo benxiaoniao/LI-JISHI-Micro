@@ -1091,7 +1091,49 @@ fn do_interface(args: &[String]) -> Result<()> {
     if !dir.is_dir() {
         return Err(usage_err(format!("包目录不存在：{}", dir.display())));
     }
-    let m = pack_manifest::Manifest::load(&dir)?;
+    let data = build_interface(&dir)?;
+    let text = interface_text(&data);
+    let path = out.unwrap_or_else(|| dir.join(IFACE_NAME));
+    std::fs::write(&path, text)
+        .map_err(|e| usage_err(format!("写不了 {}：{}", path.display(), e)))?;
+    println!(
+        "接口清单：{} {} → {}（函数 {} 个，类 {} 个，枚举 {} 个）",
+        data.name,
+        data.version,
+        path.display(),
+        data.funcs.len(),
+        data.classes.len(),
+        data.enums.len()
+    );
+    Ok(())
+}
+
+/// `micc interface` / `micc doc` / `micc publish` 共用的接口数据。
+pub(crate) struct InterfaceData {
+    pub name: String,
+    pub version: String,
+    pub native_abi: u8,
+    pub bytecode_version: u8,
+    pub native_mods: Vec<String>,
+    pub funcs: Vec<(String, usize)>,
+    pub classes: Vec<InterfaceClass>,
+    pub enums: Vec<InterfaceEnum>,
+}
+
+pub(crate) struct InterfaceClass {
+    pub name: String,
+    pub fields: Vec<String>,
+    pub methods: Vec<(String, usize)>,
+}
+
+pub(crate) struct InterfaceEnum {
+    pub name: String,
+    pub members: Vec<String>,
+}
+
+/// 从源码包的入口与子模块收集公开函数/类/枚举（不编译）。
+pub(crate) fn build_interface(dir: &Path) -> Result<InterfaceData> {
+    let m = pack_manifest::Manifest::load(dir)?;
     if m.product.is_some() {
         return Err(usage_err(format!(
             "「{}」是二进制包（没有源码），接口清单应从源码包生成",
@@ -1099,11 +1141,11 @@ fn do_interface(args: &[String]) -> Result<()> {
         )));
     }
     // 入口 + 包内子模块一起看，导出函数可以定义在子模块里。
-    let stmts = load_package(&dir, &m)?.stmts;
+    let stmts = load_package(dir, &m)?.stmts;
 
     let mut funcs: Vec<(String, usize)> = Vec::new();
-    let mut classes: Vec<(String, Vec<String>, Vec<(String, usize)>)> = Vec::new();
-    let mut enums: Vec<(String, Vec<String>)> = Vec::new();
+    let mut classes: Vec<InterfaceClass> = Vec::new();
+    let mut enums: Vec<InterfaceEnum> = Vec::new();
     let mut private: HashSet<String> = HashSet::new();
     for s in &stmts {
         match &s.kind {
@@ -1120,16 +1162,20 @@ fn do_interface(args: &[String]) -> Result<()> {
                     .iter()
                     .map(|md| (md.name.clone(), md.params.len()))
                     .collect();
-                classes.push((c.name.clone(), fields, methods));
+                classes.push(InterfaceClass {
+                    name: c.name.clone(),
+                    fields,
+                    methods,
+                });
                 if s.is_private {
                     private.insert(c.name.clone());
                 }
             }
             crate::ast::StmtKind::Enum(e) => {
-                enums.push((
-                    e.name.clone(),
-                    e.members.iter().map(|m| m.name.clone()).collect(),
-                ));
+                enums.push(InterfaceEnum {
+                    name: e.name.clone(),
+                    members: e.members.iter().map(|m| m.name.clone()).collect(),
+                });
                 if s.is_private {
                     private.insert(e.name.clone());
                 }
@@ -1138,60 +1184,67 @@ fn do_interface(args: &[String]) -> Result<()> {
         }
     }
     // 私有声明不导出；有 [导出] 时再按清单过滤。
-    funcs.retain(|(n, _)| !private.contains(n) && m.exports.as_ref().map(|e| e.contains(n)).unwrap_or(true));
-    classes.retain(|(n, _, _)| {
-        !private.contains(n)
+    funcs.retain(|(n, _)| {
+        !private.contains(n) && m.exports.as_ref().map(|e| e.contains(n)).unwrap_or(true)
+    });
+    classes.retain(|c| {
+        !private.contains(&c.name)
             && m.export_types
                 .as_ref()
-                .map(|t| t.contains(n))
+                .map(|t| t.contains(&c.name))
                 .unwrap_or(true)
     });
-    enums.retain(|(n, _)| {
-        !private.contains(n)
+    enums.retain(|e| {
+        !private.contains(&e.name)
             && m.export_types
                 .as_ref()
-                .map(|t| t.contains(n))
+                .map(|t| t.contains(&e.name))
                 .unwrap_or(true)
     });
     funcs.sort_by(|a, b| a.0.cmp(&b.0));
-    classes.sort_by(|a, b| a.0.cmp(&b.0));
-    enums.sort_by(|a, b| a.0.cmp(&b.0));
+    classes.sort_by(|a, b| a.name.cmp(&b.name));
+    enums.sort_by(|a, b| a.name.cmp(&b.name));
 
+    Ok(InterfaceData {
+        name: m.name,
+        version: ver_text(&m.version),
+        native_abi: m.native_abi,
+        bytecode_version: writer::VERSION,
+        native_mods: m.native_mods,
+        funcs,
+        classes,
+        enums,
+    })
+}
+
+/// 接口清单文本（`micc interface` 输出；`micc doc` 用它检查漂移）。
+pub(crate) fn interface_text(data: &InterfaceData) -> String {
     let mut text = String::new();
     text.push_str("# 本文件由 micc interface 生成，不要手改\n");
     text.push_str("接口版本 = 1\n");
-    text.push_str(&format!("包 = \"{}\"\n", m.name));
-    text.push_str(&format!("版本 = \"{}\"\n", ver_text(&m.version)));
-    text.push_str(&format!("原生ABI = {}\n", m.native_abi));
-    text.push_str(&format!("字节码版本 = {}\n", writer::VERSION));
+    text.push_str(&format!("包 = \"{}\"\n", data.name));
+    text.push_str(&format!("版本 = \"{}\"\n", data.version));
+    text.push_str(&format!("原生ABI = {}\n", data.native_abi));
+    text.push_str(&format!("字节码版本 = {}\n", data.bytecode_version));
     text.push_str("\n[函数]\n");
-    for (n, k) in &funcs {
+    for (n, k) in &data.funcs {
         text.push_str(&format!("{} = {}\n", n, k));
     }
-    for (name, fields, methods) in &classes {
-        text.push_str(&format!("\n[类.{}]\n", name));
-        text.push_str(&format!("字段 = {}\n", iface_array(fields)));
-        let ms: Vec<String> = methods.iter().map(|(n, k)| format!("{}/{}", n, k)).collect();
+    for class in &data.classes {
+        text.push_str(&format!("\n[类.{}]\n", class.name));
+        text.push_str(&format!("字段 = {}\n", iface_array(&class.fields)));
+        let ms: Vec<String> = class
+            .methods
+            .iter()
+            .map(|(n, k)| format!("{}/{}", n, k))
+            .collect();
         text.push_str(&format!("方法 = {}\n", iface_array(&ms)));
     }
-    for (name, members) in &enums {
-        text.push_str(&format!("\n[枚举.{}]\n", name));
-        text.push_str(&format!("成员 = {}\n", iface_array(members)));
+    for e in &data.enums {
+        text.push_str(&format!("\n[枚举.{}]\n", e.name));
+        text.push_str(&format!("成员 = {}\n", iface_array(&e.members)));
     }
-
-    let path = out.unwrap_or_else(|| dir.join(IFACE_NAME));
-    std::fs::write(&path, text)
-        .map_err(|e| usage_err(format!("写不了 {}：{}", path.display(), e)))?;
-    println!(
-        "接口清单：{} {} → {}（函数 {} 个，类 {} 个，枚举 {} 个）",
-        m.name,
-        ver_text(&m.version),
-        path.display(),
-        funcs.len(),
-        classes.len(),
-        enums.len()
-    );
-    Ok(())
+    text
 }
 
 /// 接口里的字符串数组：`["a", "b"]`（空数组写 `[]`）。

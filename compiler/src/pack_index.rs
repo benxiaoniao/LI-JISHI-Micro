@@ -24,6 +24,8 @@ pub struct IndexEntry {
     pub source: String,
     /// H4 的目录内容哈希：`fnv1a64:xxxxxxxxxxxxxxxx`。
     pub hash: String,
+    /// 可选：相对索引目录的文档路径（`micc publish` 生成的 HTML）。
+    pub doc: Option<String>,
 }
 
 #[derive(Debug)]
@@ -291,10 +293,12 @@ pub fn parse_index(text: &str, base_dir: Option<PathBuf>) -> Result<Index> {
         };
         let mut source = String::new();
         let mut hash = String::new();
+        let mut doc: Option<String> = None;
         for (k, v) in fields {
             match k.as_str() {
                 "来源" => source = v,
                 "校验" => hash = v,
+                "文档" => doc = Some(v),
                 other => {
                     return Err(idx_err(
                         line_no,
@@ -319,6 +323,11 @@ pub fn parse_index(text: &str, base_dir: Option<PathBuf>) -> Result<Index> {
             ));
         }
         hash = hash.to_ascii_lowercase();
+        if let Some(path) = &doc {
+            if path.trim().is_empty() {
+                return Err(idx_err(line_no, format!("条目「{}」的 文档 不能为空", key)));
+            }
+        }
         if seen.iter().any(|(n, v)| n == &name && *v == version) {
             return Err(idx_err(
                 line_no,
@@ -331,6 +340,7 @@ pub fn parse_index(text: &str, base_dir: Option<PathBuf>) -> Result<Index> {
             version,
             source,
             hash,
+            doc,
         });
     }
 
